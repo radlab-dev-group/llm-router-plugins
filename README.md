@@ -140,3 +140,10 @@ After placing the file in `llm_router_plugins/maskers/plugins/`, you can enable 
 
 These components together give the LLM‑Router a flexible, policy‑driven request‑processing stack that can be tailored to
 any deployment scenario.
+
+
+---
+
+## 📜 License
+
+See the [LICENSE](LICENSE) file.
