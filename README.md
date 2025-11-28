@@ -20,7 +20,8 @@ endpoint logic in `endpoint_i.py`.
 
 ### 1.2 Built‑in anonymizer plugins
 
-Full list of `FastMaskerPlugin` masking strategies is located in [README.md](llm_router_plugins/maskers/fast_masker/README.md) file.
+Full list of `FastMaskerPlugin` masking strategies is located
+in [README.md](llm_router_plugins/maskers/fast_masker/README.md) file.
 
 | Plugin                                         | Description                                                                                                                                            | Technical notes                                                                                                                                                            |
 |------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
