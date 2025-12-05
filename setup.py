@@ -21,8 +21,7 @@ setup(
     packages=find_packages(exclude=("tests", "docs")),
     include_package_data=True,
     python_requires=">=3.8",
-    install_requires=[
-    ],
+    install_requires=[],
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: Apache Software License",
