@@ -1,9 +1,9 @@
 """
-NASK Guardrail Plugin
+Sójka Guardrail Plugin
 
-This plugin sends the incoming ``payload`` to the NASK guardrail service and
+This plugin sends the incoming ``payload`` to the Sojka guardrail service and
 parses the JSON response.  The service URL can be configured through the
-environment variable ``LLM_ROUTER_GUARDRAIL_NASK_GUARD_HOST_EP``;
+environment variable ``LLM_ROUTER_GUARDRAIL_Sojka_GUARD_HOST_EP``;
 
 The expected response format is:
 
@@ -25,16 +25,6 @@ The expected response format is:
 If the request succeeds, ``apply`` returns a dictionary containing the
 extracted fields.  If any error occurs (network error, unexpected payload,
 missing keys, etc.) the method returns ``{'success': False}``.
-
----
-
-**Model License:** The model used by this plugin is licensed under **CC BY‑NC‑SA 4.0**.
-**Router License:** The LLM router component is licensed under **Apache 2.0**.
-Before using the plugin, ensure that your intended use complies with these licenses.
-
-**Authors:** Aleksandra Krasnodębska, Karolina Seweryn, Szymon Łukasik, Wojciech Kusa
-(see *PL‑Guard: Benchmarking Language Model Safety for Polish*, 2025).
-
 """
 
 import os
@@ -43,31 +33,29 @@ from typing import Dict, Optional, Tuple
 
 from llm_router_plugins.constants import _DontChangeMe
 
-# =============================================================================
-# Host with router service where NASK-PIB/HerBERT-PL-Guard model is served
-# Read model License before using this model **MODEL LICENSE** CC BY-NC-SA 4.0
-GUARDRAIL_NASK_GUARD_HOST_EP = str(
+GUARDRAIL_SOJKA_GUARD_HOST_EP = str(
     os.environ.get(
-        f"{_DontChangeMe.MAIN_ENV_PREFIX}GUARDRAIL_NASK_GUARD_HOST_EP", ""
+        f"{_DontChangeMe.MAIN_ENV_PREFIX}GUARDRAIL_SOJKA_GUARD_HOST_EP", ""
     )
 )
+
 
 from llm_router_plugins.plugin_interface import HttpPluginInterface
 
 
-class NASKGuardPlugin(HttpPluginInterface):
+class SojkaGuardPlugin(HttpPluginInterface):
     """
     Concrete implementation of :class:`HttpPluginInterface` that
-    talks to the NASK guardrail HTTP endpoint.
+    talks to the Sojka guardrail HTTP endpoint.
     """
 
-    name = "nask_guard"
+    name = "sojka_guard"
 
     def __init__(self, logger: Optional[logging.Logger] = None):
-        if not len(GUARDRAIL_NASK_GUARD_HOST_EP):
+        if not len(GUARDRAIL_SOJKA_GUARD_HOST_EP):
             raise RuntimeError(
-                f"When you are using `nask_guard` plugin, you must provide a "
-                f"host with model, GUARDRAIL_NASK_GUARD_HOST_EP must be set "
+                f"When you are using `sojka_guard` plugin, you must provide a "
+                f"host with model, GUARDRAIL_SOJKA_GUARD_HOST_EP must be set "
                 f"to valid host."
             )
 
@@ -79,7 +67,7 @@ class NASKGuardPlugin(HttpPluginInterface):
         Resolve the endpoint URL from the environment variable or fall back to
         the default value.
         """
-        return GUARDRAIL_NASK_GUARD_HOST_EP
+        return GUARDRAIL_SOJKA_GUARD_HOST_EP
 
     def apply(self, payload: Dict) -> Tuple[bool, Dict]:
         """
@@ -118,6 +106,6 @@ class NASKGuardPlugin(HttpPluginInterface):
         except Exception as exc:
             if self._logger:
                 self._logger.error(
-                    "NASKGuardPlugin failed to process payload: %s", exc
+                    "SojkaGuardPlugin failed to process payload: %s", exc
                 )
             return False, {}
