@@ -33,6 +33,7 @@ from typing import Dict, Optional, Tuple
 
 from llm_router_plugins.constants import _DontChangeMe
 
+
 GUARDRAIL_SOJKA_GUARD_HOST_EP = str(
     os.environ.get(
         f"{_DontChangeMe.MAIN_ENV_PREFIX}GUARDRAIL_SOJKA_GUARD_HOST_EP", ""
@@ -50,6 +51,7 @@ class SojkaGuardPlugin(HttpPluginInterface):
     """
 
     name = "sojka_guard"
+    SOJKA_EP_NAME = "api/guardrails/sojka_guard"
 
     def __init__(self, logger: Optional[logging.Logger] = None):
         if not len(GUARDRAIL_SOJKA_GUARD_HOST_EP):
@@ -67,7 +69,7 @@ class SojkaGuardPlugin(HttpPluginInterface):
         Resolve the endpoint URL from the environment variable or fall back to
         the default value.
         """
-        return GUARDRAIL_SOJKA_GUARD_HOST_EP
+        return GUARDRAIL_SOJKA_GUARD_HOST_EP.rstrip("/") + "/" + self.SOJKA_EP_NAME
 
     def apply(self, payload: Dict) -> Tuple[bool, Dict]:
         """
