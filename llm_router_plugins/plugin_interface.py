@@ -87,7 +87,7 @@ class HttpPluginInterface(PluginInterface, abc.ABC):
         from requests.exceptions import RequestException
 
         try:
-            response = requests.post(self.endpoint_url, json=payload, timeout=10)
+            response = requests.post(self.endpoint_url, json=payload, timeout=60)
             response.raise_for_status()
             return response.json()
         except RequestException as exc:
