@@ -62,7 +62,7 @@ class HttpPluginInterface(PluginInterface, abc.ABC):
 
     @property
     @abc.abstractmethod
-    def base_url(self) -> str:
+    def endpoint_url(self) -> str:
         """
         URL of the remote host to which the payload will be sent.
         """
@@ -87,12 +87,12 @@ class HttpPluginInterface(PluginInterface, abc.ABC):
         from requests.exceptions import RequestException
 
         try:
-            response = requests.post(self.base_url, json=payload, timeout=10)
+            response = requests.post(self.endpoint_url, json=payload, timeout=10)
             response.raise_for_status()
             return response.json()
         except RequestException as exc:
             if self._logger:
                 self._logger.error(
-                    "HTTP request to %s failed: %s", self.base_url, exc
+                    "HTTP request to %s failed: %s", self.endpoint_url, exc
                 )
             raise
