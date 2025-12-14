@@ -9,9 +9,13 @@ It mirrors the structure used for maskers:
 """
 
 from llm_router_plugins.guardrails.nask.nask_guard_plugin import NASKGuardPlugin
+from llm_router_plugins.guardrails.speakleash.sojka_guard_plugin import (
+    SojkaGuardPlugin,
+)
 
 MAIN_GUARDRAILS_REGISTRY = {
-    NASKGuardPlugin.name: NASKGuardPlugin  # **Model is licensed under **CC BY‑NC‑SA 4.0**
+    NASKGuardPlugin.name: NASKGuardPlugin,  # **Model is licensed under **CC BY‑NC‑SA 4.0**,
+    SojkaGuardPlugin.name: SojkaGuardPlugin,
 }
 
 # Runtime session cache – filled by the registrator.

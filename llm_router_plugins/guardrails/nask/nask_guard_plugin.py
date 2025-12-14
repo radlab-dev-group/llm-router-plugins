@@ -3,7 +3,7 @@ NASK Guardrail Plugin
 
 This plugin sends the incoming ``payload`` to the NASK guardrail service and
 parses the JSON response.  The service URL can be configured through the
-environment variable ``LLM_ROUTER_GUARDRAIL_NASK_GUARD_HOST_EP``;
+environment variable ``LLM_ROUTER_GUARDRAIL_NASK_GUARD_HOST``;
 
 The expected response format is:
 
@@ -43,13 +43,12 @@ from typing import Dict, Optional, Tuple
 
 from llm_router_plugins.constants import _DontChangeMe
 
+
 # =============================================================================
 # Host with router service where NASK-PIB/HerBERT-PL-Guard model is served
 # Read model License before using this model **MODEL LICENSE** CC BY-NC-SA 4.0
-GUARDRAIL_NASK_GUARD_HOST_EP = str(
-    os.environ.get(
-        f"{_DontChangeMe.MAIN_ENV_PREFIX}GUARDRAIL_NASK_GUARD_HOST_EP", ""
-    )
+GUARDRAIL_NASK_GUARD_HOST = str(
+    os.environ.get(f"{_DontChangeMe.MAIN_ENV_PREFIX}GUARDRAIL_NASK_GUARD_HOST", "")
 )
 
 from llm_router_plugins.plugin_interface import HttpPluginInterface
@@ -62,24 +61,25 @@ class NASKGuardPlugin(HttpPluginInterface):
     """
 
     name = "nask_guard"
+    endpoint_path = "api/guardrails/nask_guard"
 
     def __init__(self, logger: Optional[logging.Logger] = None):
-        if not len(GUARDRAIL_NASK_GUARD_HOST_EP):
+        if not len(GUARDRAIL_NASK_GUARD_HOST):
             raise RuntimeError(
                 f"When you are using `nask_guard` plugin, you must provide a "
-                f"host with model, GUARDRAIL_NASK_GUARD_HOST_EP must be set "
+                f"host with model, GUARDRAIL_NASK_GUARD_HOST must be set "
                 f"to valid host."
             )
 
         super().__init__(logger=logger)
 
     @property
-    def base_url(self) -> str:
+    def endpoint_url(self) -> str:
         """
         Resolve the endpoint URL from the environment variable or fall back to
         the default value.
         """
-        return GUARDRAIL_NASK_GUARD_HOST_EP
+        return GUARDRAIL_NASK_GUARD_HOST.rstrip("/") + "/" + self.endpoint_path
 
     def apply(self, payload: Dict) -> Tuple[bool, Dict]:
         """
