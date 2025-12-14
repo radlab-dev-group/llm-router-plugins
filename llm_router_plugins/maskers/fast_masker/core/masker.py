@@ -78,7 +78,7 @@ class FastMasker(MaskerPayloadTraveler):
         SimCardRule(),  # 19-20 digit ICCID
         SslCertRule(),  # 16-40 hex chars
         # 8. LOWEST CERTAINTY - Generic patterns (potentially noisy)
-        StreetNameRule(),  # Street
+        # StreetNameRule(),  # Street
         PhoneRule(),  # Local phone (9 digits)
         SocialIdRule(),  # fbid only
         # Beta features (if enabled)
