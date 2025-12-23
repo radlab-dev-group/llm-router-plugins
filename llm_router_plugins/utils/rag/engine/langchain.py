@@ -213,7 +213,7 @@ class LangChainRAG:
 
             from transformers import AutoTokenizer, AutoModel
 
-            from langchain.docstore.in_memory import InMemoryDocstore
-            from langchain.schema import Document
-            from langchain.vectorstores import FAISS
-            from langchain.vectorstores.faiss import DistanceStrategy
+            from langchain_core.documents import Document
+            from langchain_community.docstore.in_memory import InMemoryDocstore
+            from langchain_community.vectorstores import FAISS
+            from langchain_community.vectorstores.faiss import DistanceStrategy
