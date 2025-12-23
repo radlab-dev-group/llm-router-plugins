@@ -43,17 +43,6 @@ if all(
     USE_LANGCHAIN_RAG = True
 
 
-if USE_LANGCHAIN_RAG:
-    import torch
-
-    from transformers import AutoTokenizer, AutoModel
-
-    from langchain.docstore.in_memory import InMemoryDocstore
-    from langchain.schema import Document
-    from langchain.vectorstores import FAISS
-    from langchain.vectorstores.faiss import DistanceStrategy
-
-
 class LangChainRAG:
     """
     A tiny RAG helper that:
@@ -94,6 +83,8 @@ class LangChainRAG:
         """
         if not USE_LANGCHAIN_RAG:
             raise Exception("Cannot use LangChainRAG when USE_LANGCHAIN_RAG=False!")
+
+        self.__lazy_imports()
 
         self.collection_name = collection_name
         self.doc_store = InMemoryDocstore()
@@ -214,3 +205,15 @@ class LangChainRAG:
         pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1)
 
         return [vec.squeeze(0) for vec in pooled]
+
+    @staticmethod
+    def __lazy_imports():
+        if USE_LANGCHAIN_RAG:
+            import torch
+
+            from transformers import AutoTokenizer, AutoModel
+
+            from langchain.docstore.in_memory import InMemoryDocstore
+            from langchain.schema import Document
+            from langchain.vectorstores import FAISS
+            from langchain.vectorstores.faiss import DistanceStrategy
