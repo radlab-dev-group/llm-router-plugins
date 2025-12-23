@@ -97,8 +97,10 @@ class LangChainRAG:
         self.doc_store = InMemoryDocstore()
 
         self.vectorstore = FAISS(
-            embedding_function=None,
+            embedding_function=self._mean_pool_embeddings,
             docstore=self.doc_store,
+            index=None,
+            index_to_docstore_id={},
             distance_strategy=DistanceStrategy.COSINE,
         )
 
@@ -179,9 +181,9 @@ class LangChainRAG:
                 meta.append({"doc_id": doc_id, "chunk_id": len(meta)})
         return chunks, meta
 
-    def _mean_pool_embeddings(self, text: str) -> "torch.Tensor":
+    def _mean_pool_embeddings(self, text: str) -> List[float]:
         """
-        Return a single vector for *text* by mean‑pooling the last hidden state.
+        Return a single embedding for *text* as a plain ``list[float]``.
         """
         inputs = self.tokenizer(text, return_tensors="pt", truncation=True).to(
             self.device
@@ -189,16 +191,16 @@ class LangChainRAG:
         with torch.no_grad():
             outputs = self.model(**inputs)
 
-        # Mean‑pool over token embeddings (ignore padding)
         last_hidden = outputs.last_hidden_state  # (1, seq_len, dim)
         mask = inputs.attention_mask.unsqueeze(-1)  # (1, seq_len, 1)
-        pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1)
+        pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1)  # (1, dim)
 
-        return pooled.squeeze(0)  # (dim,)
+        return pooled.squeeze(0).cpu().tolist()
 
-    def _embed_batch(self, texts: List[str]) -> List["torch.Tensor"]:
+    def _embed_batch(self, texts: List[str]) -> List[List[float]]:
         """
-        Batch-version of the ``_mean_pool_embeddings`` for a little speed‑up.
+        Batch version of ``_mean_pool_embeddings`` – returns a list of
+        ``list[float]`` embeddings, one per input text.
         """
         inputs = self.tokenizer(
             texts, return_tensors="pt", padding=True, truncation=True
@@ -207,8 +209,8 @@ class LangChainRAG:
         with torch.no_grad():
             outputs = self.model(**inputs)
 
-        last_hidden = outputs.last_hidden_state
-        mask = inputs.attention_mask.unsqueeze(-1)
-        pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1)
+        last_hidden = outputs.last_hidden_state  # (batch, seq_len, dim)
+        mask = inputs.attention_mask.unsqueeze(-1)  # (batch, seq_len, 1)
+        pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1)  # (batch, dim)
 
-        return [vec.squeeze(0) for vec in pooled]
+        return [vec.cpu().tolist() for vec in pooled]
