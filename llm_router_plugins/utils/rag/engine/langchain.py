@@ -4,7 +4,7 @@ from typing import List, Tuple
 
 from llm_router_plugins.constants import _DontChangeMe
 
-USE_LANGCHAIN_RAG = True
+USE_LANGCHAIN_RAG = False
 
 # The name of the FAISS collection to use (read from the environment).
 LANGCHAIN_RAG_COLLECTION = os.getenv(
@@ -128,7 +128,7 @@ class LangChainRAG:
         ]
         self.vectorstore.add_embeddings(embeddings, docs)  # type: ignore
 
-    def search(self, text: str, top_n: int = 10) -> List[Document]:
+    def search(self, text: str, top_n: int = 10) -> List["Document"]:
         """
         Retrieve the ``top_n`` most similar chunks to ``text`` from the FAISS index
         using cosine similarity.
@@ -181,7 +181,7 @@ class LangChainRAG:
                 meta.append({"doc_id": doc_id, "chunk_id": len(meta)})
         return chunks, meta
 
-    def _mean_pool_embeddings(self, text: str) -> torch.Tensor:
+    def _mean_pool_embeddings(self, text: str) -> "torch.Tensor":
         """
         Return a single vector for *text* by mean‑pooling the last hidden state.
         """
@@ -198,7 +198,7 @@ class LangChainRAG:
 
         return pooled.squeeze(0)  # (dim,)
 
-    def _embed_batch(self, texts: List[str]) -> List[torch.Tensor]:
+    def _embed_batch(self, texts: List[str]) -> List["torch.Tensor"]:
         """
         Batch-version of the ``_mean_pool_embeddings`` for a little speed‑up.
         """
