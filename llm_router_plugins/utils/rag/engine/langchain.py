@@ -26,9 +26,9 @@ LANGCHAIN_RAG_CHUNK_SIZE = int(
     os.getenv(f"{_DontChangeMe.MAIN_ENV_PREFIX}LANGCHAIN_RAG_CHUNK_SIZE", "400")
 )
 
-# Number of tokens each chunk overlaps with the previous one (default: 10).
+# Number of tokens each chunk overlaps with the previous one (default: 100).
 LANGCHAIN_RAG_CHUNK_OVERLAP = int(
-    os.getenv(f"{_DontChangeMe.MAIN_ENV_PREFIX}LANGCHAIN_RAG_CHUNK_OVERLAP", "10")
+    os.getenv(f"{_DontChangeMe.MAIN_ENV_PREFIX}LANGCHAIN_RAG_CHUNK_OVERLAP", "100")
 )
 
 if all(
