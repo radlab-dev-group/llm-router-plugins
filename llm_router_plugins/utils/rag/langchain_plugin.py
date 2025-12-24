@@ -61,8 +61,8 @@ class LangchainRAGPlugin(PluginInterface):
             chunk_overlap=LANGCHAIN_RAG_CHUNK_OVERLAP,
         )
 
-        # Simple flag – becomes True after the first successful indexing
-        self._has_index = False
+        # If a persisted FAISS index was loaded, consider the store ready.
+        self._has_index = bool(getattr(self.rag.vectorstore, "index", None))
 
     def apply(self, payload: Dict) -> Dict:
         """
