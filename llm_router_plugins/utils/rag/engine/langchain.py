@@ -53,7 +53,7 @@ if USE_LANGCHAIN_RAG:
     from langchain_community.vectorstores.faiss import DistanceStrategy
 
 
-class MeanPoolEmbeddings(Embeddings):
+class MeanPoolEmbeddings("Embeddings"):
     """
     Implements the ``Embeddings`` interface required by LangChain
     (``embed_query`` and ``embed_documents``) using the same

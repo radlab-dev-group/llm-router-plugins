@@ -17,23 +17,25 @@ import argparse
 from pathlib import Path
 
 from llm_router_plugins.core.utils import read_files_from_dir
+from llm_router_plugins.utils.rag.engine.langchain import USE_LANGCHAIN_RAG
 
-try:
-    from llm_router_plugins.utils.rag.engine.langchain import (
-        LangChainRAG,
-        LANGCHAIN_RAG_COLLECTION,
-        LANGCHAIN_RAG_EMBEDDER,
-        LANGCHAIN_RAG_DEVICE,
-        LANGCHAIN_RAG_CHUNK_SIZE,
-        LANGCHAIN_RAG_CHUNK_OVERLAP,
-        USE_LANGCHAIN_RAG,
-    )
-    from langchain_community.vectorstores import FAISS
-except Exception as exc:  # pragma: no cover
-    sys.stderr.write(f"Failed to import LangChainRAG utilities: {exc}\n")
-    sys.exit(1)
+if USE_LANGCHAIN_RAG:
+    try:
+        from llm_router_plugins.utils.rag.engine.langchain import (
+            LangChainRAG,
+            LANGCHAIN_RAG_COLLECTION,
+            LANGCHAIN_RAG_EMBEDDER,
+            LANGCHAIN_RAG_DEVICE,
+            LANGCHAIN_RAG_CHUNK_SIZE,
+            LANGCHAIN_RAG_CHUNK_OVERLAP,
+            USE_LANGCHAIN_RAG,
+        )
+        from langchain_community.vectorstores import FAISS
+    except Exception as exc:  # pragma: no cover
+        sys.stderr.write(f"Failed to import LangChainRAG utilities: {exc}\n")
+        sys.exit(1)
 
-from llm_router_plugins.utils.rag.langchain_plugin import LangchainRAGPlugin
+    from llm_router_plugins.utils.rag.langchain_plugin import LangchainRAGPlugin
 
 
 def _ensure_rag_enabled() -> None:
