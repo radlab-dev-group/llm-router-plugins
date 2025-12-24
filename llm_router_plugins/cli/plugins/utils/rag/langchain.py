@@ -57,17 +57,8 @@ def cmd_index(args: argparse.Namespace) -> None:
     extensions = [ext if ext.startswith(".") else f".{ext}" for ext in args.ext]
     texts = read_files_from_dir(base_path, extensions)
 
-    print(len(texts))
-
-    #
-    # plugin = LangchainRAGPlugin()
-    # success, response = plugin.rag.index_texts(texts)
-    #
-    # if not success:
-    #     sys.stderr.write(f"Indexing failed: {response.get('error')}\n")
-    #     sys.exit(1)
-    #
-    # print(response.get("result"))
+    plugin = LangchainRAGPlugin()
+    plugin.rag.index_texts(texts)
 
 
 def cmd_search(args: argparse.Namespace) -> None:
