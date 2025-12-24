@@ -15,11 +15,6 @@ if USE_LANGCHAIN_RAG:
         LANGCHAIN_RAG_PERSIST_DIR,
     )
 
-    import multiprocessing as _mp
-
-    if _mp.get_start_method(allow_none=True) != "spawn":
-        _mp.set_start_method("spawn", force=True)
-
 
 class LangchainRAGPlugin(PluginInterface):
     """
@@ -38,6 +33,10 @@ class LangchainRAGPlugin(PluginInterface):
     """
 
     name = "langchain_rag"
+    USER_MSG_EXTEND_CONTENT = """
+    If the context below will help answer the above question, use it.
+    Context separated with double enter:
+    """
 
     def __init__(self, logger: Optional[logging.Logger] = None):
         """
@@ -105,20 +104,24 @@ class LangchainRAGPlugin(PluginInterface):
         if not text_as_query:
             self._logger.error(f"Cannot find field with user text using {self.name}")
             return payload
-        #
-        # import json
-        # print(json.dumps(payload, indent=2, ensure_ascii=False))
-
-        docs = self.rag.search(text_as_query, top_n=50)
-        for d in docs:
-            self._logger.debug(d)
 
         extended_content = ""
+        docs = self.rag.search(text_as_query, top_n=10)
+        for d in docs:
+            extended_content += "\n\n" + d.page_content.strip()
+
+        if len(extended_content):
+            extended_content = (
+                f"{self.USER_MSG_EXTEND_CONTENT}\n{extended_content.strip()}".strip()
+            ).strip()
+
+        if not extended_content:
+            return payload
 
         if messages:
-            messages[-1]["content"] += extended_content
+            messages[-1]["content"] += f"\n\n{extended_content}"
             payload["messages"] = messages
         elif field_with_query:
-            payload[field_with_query] += extended_content
+            payload[field_with_query] += f"\n\n{extended_content}"
 
         return payload
