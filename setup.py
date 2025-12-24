@@ -21,7 +21,7 @@ setup(
     install_requires=[],
     entry_points={
         "console_scripts": [
-            "llm-router-rag-langchain=cli.plugins.rag.langchain:main",
+            "llm-router-rag-langchain=llm_router_plugins.cli.plugins.utils.rag.langchain:main",
         ],
     },
     classifiers=[
