@@ -57,14 +57,17 @@ def cmd_index(args: argparse.Namespace) -> None:
     extensions = [ext if ext.startswith(".") else f".{ext}" for ext in args.ext]
     texts = read_files_from_dir(base_path, extensions)
 
-    plugin = LangchainRAGPlugin()
-    success, response = plugin.rag.index_texts(texts)
+    print(len(texts))
 
-    if not success:
-        sys.stderr.write(f"Indexing failed: {response.get('error')}\n")
-        sys.exit(1)
-
-    print(response.get("result"))
+    #
+    # plugin = LangchainRAGPlugin()
+    # success, response = plugin.rag.index_texts(texts)
+    #
+    # if not success:
+    #     sys.stderr.write(f"Indexing failed: {response.get('error')}\n")
+    #     sys.exit(1)
+    #
+    # print(response.get("result"))
 
 
 def cmd_search(args: argparse.Namespace) -> None:
@@ -102,7 +105,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="CLI for LangChain‑based Retrieval‑Augmented Generation."
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(
+        dest="command", required=True, help="Command: [index|search]"
+    )
 
     # ------------------------------ index ------------------------------ #
     idx_parser = subparsers.add_parser(

@@ -1,5 +1,4 @@
 import os
-
 from typing import List, Tuple
 
 from llm_router_plugins.constants import _DontChangeMe
@@ -31,6 +30,11 @@ LANGCHAIN_RAG_CHUNK_OVERLAP = int(
     os.getenv(f"{_DontChangeMe.MAIN_ENV_PREFIX}LANGCHAIN_RAG_CHUNK_OVERLAP", "100")
 )
 
+# Store the FAISS index under the given directory
+LANGCHAIN_RAG_PERSIST_DIR = os.getenv(
+    f"{_DontChangeMe.MAIN_ENV_PREFIX}LANGCHAIN_RAG_PERSIST_DIR", None
+)
+
 if all(
     [
         LANGCHAIN_RAG_COLLECTION,
@@ -45,7 +49,6 @@ if all(
 
 if USE_LANGCHAIN_RAG:
     import torch
-
     from transformers import AutoTokenizer, AutoModel
 
     from langchain_core.documents import Document
@@ -53,6 +56,7 @@ if USE_LANGCHAIN_RAG:
     from langchain_community.vectorstores import FAISS
     from langchain_community.docstore.in_memory import InMemoryDocstore
     from langchain_community.vectorstores.faiss import DistanceStrategy
+
 
 if USE_LANGCHAIN_RAG:
 
@@ -116,6 +120,7 @@ class LangChainRAG:
         device: str = "cpu",
         chunk_size: int = 200,
         chunk_overlap: int = 50,
+        persist_dir: str | None = None,
     ) -> None:
         """
         Parameters
@@ -132,9 +137,16 @@ class LangChainRAG:
             Number of tokens per chunk.
         chunk_overlap: int, default ``50``
             How many tokens the next chunk should overlap with the previous one.
+        persist_dir: str | None, optional
+            Directory where the FAISS index and docstore are saved.
+            If ``None`` the ``collection_name`` is used as folder name.
         """
         if not USE_LANGCHAIN_RAG:
             raise Exception("Cannot use LangChainRAG when USE_LANGCHAIN_RAG=False!")
+
+        self.persist_dir = persist_dir
+        if self.persist_dir:
+            os.makedirs(self.persist_dir, exist_ok=True)
 
         self.collection_name = collection_name
         self.doc_store = InMemoryDocstore()
@@ -143,22 +155,15 @@ class LangChainRAG:
         self.tokenizer = AutoTokenizer.from_pretrained(embedder_path)
         self.model = AutoModel.from_pretrained(embedder_path).to(device)
 
-        self._embedding = MeanPoolEmbeddings(
-            tokenizer=self.tokenizer, model=self.model, device=self.device
-        )
-
-        self.vectorstore = FAISS(
-            embedding_function=self._embedding,
-            docstore=self.doc_store,
-            index=None,
-            index_to_docstore_id={},
-            distance_strategy=DistanceStrategy.COSINE,
-        )
-
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
-    # ---------------------------------------------------------------------------
+        self._embedding = MeanPoolEmbeddings(
+            tokenizer=self.tokenizer, model=self.model, device=self.device
+        )
+        self.vectorstore = self._prepare_faiss()
+
+    # -------------------------------------------------------------------------
     def index_texts(self, texts: List[str]) -> None:
         """
         Split each text into token windows, embed each window,
@@ -171,6 +176,7 @@ class LangChainRAG:
             for chunk, m in zip(chunks, meta)
         ]
         self.vectorstore.add_embeddings(embeddings, docs)  # type: ignore
+        self._persist()
 
     def search(self, text: str, top_n: int = 10) -> List["Document"]:
         """
@@ -194,7 +200,31 @@ class LangChainRAG:
             return []
         return self.vectorstore.similarity_search(text, k=top_n)
 
-    # ---------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    def _persist(self) -> None:
+        """
+        Save the FAISS index and the in‑memory docstore to ``self.persist_dir``.
+        """
+        self.vectorstore.save_local(self.persist_dir)
+
+    def _prepare_faiss(self):
+        if self.persist_dir and os.listdir(self.persist_dir):
+            return FAISS.load_local(
+                folder_path=self.persist_dir,
+                embeddings=self._embedding,
+                docstore=self.doc_store,
+                index_name="index",
+                distance_strategy=DistanceStrategy.COSINE,
+            )
+        else:
+            return FAISS(
+                embedding_function=self._embedding,
+                docstore=self.doc_store,
+                index=None,
+                index_to_docstore_id={},
+                distance_strategy=DistanceStrategy.COSINE,
+            )
+
     def _split_into_chunks(self, texts: List[str]) -> Tuple[List[str], List[dict]]:
         """
         Token‑window split each text.
