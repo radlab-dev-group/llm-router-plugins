@@ -217,7 +217,7 @@ class LangChainRAG:
             LangChain ``Document`` objects representing the most similar chunks,
             ordered from most to least similar.
         """
-        if not getattr(self.vectorstore, "index", None):
+        if not self.vectorstore:
             return []
         return self.vectorstore.similarity_search(text, k=top_n)
 
