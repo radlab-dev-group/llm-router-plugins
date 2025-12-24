@@ -236,7 +236,6 @@ class LangChainRAG:
             return FAISS.load_local(
                 folder_path=self.persist_dir,
                 embeddings=self._embedding,
-                docstore=self.doc_store,
                 index_name="index",
                 distance_strategy=DistanceStrategy.COSINE,
                 allow_dangerous_deserialization=True,
