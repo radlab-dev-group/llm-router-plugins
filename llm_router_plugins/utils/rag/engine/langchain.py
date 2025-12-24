@@ -195,7 +195,7 @@ class LangChainRAG:
             Document(page_content=chunk, metadata=m)
             for chunk, m in zip(chunks, meta)
         ]
-        self.vectorstore.add_embeddings(embeddings, docs)  # type: ignore
+        self.vectorstore.add_documents(docs, embeddings=embeddings)
         self._persist()
 
     def search(self, text: str, top_n: int = 10) -> List["Document"]:
