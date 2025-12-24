@@ -50,6 +50,12 @@ if all(
 
 
 if USE_LANGCHAIN_RAG:
+    # multiprocess spawn for CUDA
+    import multiprocessing as _mp
+
+    if _mp.get_start_method(allow_none=True) != "spawn":
+        _mp.set_start_method("spawn", force=True)
+
     import faiss
     import torch
 

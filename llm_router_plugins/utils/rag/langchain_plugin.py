@@ -15,12 +15,6 @@ if USE_LANGCHAIN_RAG:
         LANGCHAIN_RAG_PERSIST_DIR,
     )
 
-    import multiprocessing as _mp
-
-    if _mp.get_start_method(allow_none=True) != "spawn":
-        _mp.set_start_method("spawn", force=True)
-
-
 class LangchainRAGPlugin(PluginInterface):
     """
     Plugin that exposes a tiny Retrieval‑Augmented Generation (RAG) service
