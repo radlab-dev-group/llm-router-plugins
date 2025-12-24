@@ -12,6 +12,7 @@ if USE_LANGCHAIN_RAG:
         LANGCHAIN_RAG_DEVICE,
         LANGCHAIN_RAG_CHUNK_SIZE,
         LANGCHAIN_RAG_CHUNK_OVERLAP,
+        LANGCHAIN_RAG_PERSIST_DIR,
     )
 
 
@@ -59,6 +60,7 @@ class LangchainRAGPlugin(PluginInterface):
             device=LANGCHAIN_RAG_DEVICE,
             chunk_size=LANGCHAIN_RAG_CHUNK_SIZE,
             chunk_overlap=LANGCHAIN_RAG_CHUNK_OVERLAP,
+            persist_dir=LANGCHAIN_RAG_PERSIST_DIR,
         )
 
         # If a persisted FAISS index was loaded, consider the store ready.
