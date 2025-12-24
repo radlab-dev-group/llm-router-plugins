@@ -172,11 +172,6 @@ exposes a single plugin called **`langchain_rag`**.
    UTILS_PIPELINE = ["langchain_rag"]
    ```
 
-3. Use the `action` field in the request payload:
-
-    * **Indexing** – `{ "action": "index", "path": "./data", "ext": [".txt", ".md"] }`
-    * **Searching** – `{ "action": "search", "query": "What is LangChain?", "top_n": 5 }`
-
 The plugin will automatically handle errors, log them (if a logger is provided),
 and return the enriched payload.
 
