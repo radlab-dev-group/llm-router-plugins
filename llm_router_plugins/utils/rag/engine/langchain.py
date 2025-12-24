@@ -50,7 +50,9 @@ if all(
 
 
 if USE_LANGCHAIN_RAG:
+    import faiss
     import torch
+
     from transformers import AutoTokenizer, AutoModel
 
     from langchain_core.documents import Document
@@ -190,12 +192,11 @@ class LangChainRAG:
         and push it to the FAISS store.
         """
         chunks, meta = self._split_into_chunks(texts)
-        embeddings = self._embedding.embed_documents(chunks)
         docs = [
             Document(page_content=chunk, metadata=m)
             for chunk, m in zip(chunks, meta)
         ]
-        self.vectorstore.add_documents(docs, embeddings=embeddings)
+        self.vectorstore.add_documents(docs)  # , embeddings=embeddings)
         self._persist()
 
     def search(self, text: str, top_n: int = 10) -> List["Document"]:
@@ -225,6 +226,9 @@ class LangChainRAG:
         """
         Save the FAISS index and the in‑memory docstore to ``self.persist_dir``.
         """
+        if not self.persist_dir:
+            return
+
         self.vectorstore.save_local(self.persist_dir)
 
     def _prepare_faiss(self):
@@ -237,10 +241,19 @@ class LangChainRAG:
                 distance_strategy=DistanceStrategy.COSINE,
             )
         else:
+            # Ask the embedding object for the dimensionality of a single vector.
+            # Using a dummy query is cheap and avoids pulling the whole model again.
+            dummy_vec = self._embedding.embed_query("dummy")
+            dim = len(dummy_vec)
+
+            # IndexFlatIP works with inner‑product; LangChain will normalize vectors
+            # so this effectively gives you cosine similarity.
+            faiss_index = faiss.IndexFlatIP(dim)
+
             return FAISS(
                 embedding_function=self._embedding,
                 docstore=self.doc_store,
-                index=None,
+                index=faiss_index,
                 index_to_docstore_id={},
                 distance_strategy=DistanceStrategy.COSINE,
             )
