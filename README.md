@@ -70,7 +70,7 @@ Both masker and guardrail pipelines share the same design pattern:
 
 | Class                                                     | Purpose                                                                            |
 |-----------------------------------------------------------|------------------------------------------------------------------------------------|
-| **MaskerPipeline** (`pipeline.py` – masker version)       | Executes a list of masker plugins in order, transforming the payload step‑by‑step. |                                                                                                                                                                      
+| **MaskerPipeline** (`pipeline.py` – masker version)       | Executes a list of masker plugins in order, transforming the payload step‑by‑step. |
 | **GuardrailPipeline** (`pipeline.py` – guardrail version) | Executes guardrail plugins sequentially, stopping on the first failure.            |
 
 ### 3.1 Registration
@@ -129,18 +129,71 @@ After placing the file in `llm_router_plugins/maskers/plugins/`, you can enable 
 
 ---
 
-## 5. Summary
+## 5. Retrieval‑Augmented Generation (RAG) Support
+
+> Detailed description of LangChain based RAG plugin 
+> [LANGCHAIN_RAG.md](llm_router_plugins/utils/rag/LANGCHAIN_RAG.md)
+
+### 5.1 Overview
+
+The project now includes a **LangChain‑based RAG plugin** that enables
+semantic search over user‑provided documents.  
+It is implemented in `llm_router_plugins/utils/rag/langchain_plugin.py` and
+exposes a single plugin called **`langchain_rag`**.
+
+### 5.2 What the plugin does
+
+* **Indexing** – Reads a directory of text files, splits them into token‑based
+  chunks, embeds each chunk with a configurable transformer model, and stores
+  the vectors in a FAISS (or compatible) vector store.
+* **Searching** – Given a user query, retrieves the most similar chunks and
+  injects them into the payload (e.g. appends to the last user message) so that
+  downstream LLM calls can use the retrieved context.
+* **Configuration** – All parameters (collection name, embedder model, device,
+  chunk size, overlap, persistence directory) are driven by environment variables
+  prefixed with `LLM_ROUTER_`. See the next section for the full list.
+
+### 5.3 Enabling the RAG plugin
+
+1. Set the required environment variables (example values shown):
+
+   ```bash
+   export LLM_ROUTER_LANGCHAIN_RAG_COLLECTION="my_rag_collection"
+   export LLM_ROUTER_LANGCHAIN_RAG_EMBEDDER="sentence-transformers/all-MiniLM-L6-v2"
+   export LLM_ROUTER_LANGCHAIN_RAG_DEVICE="cpu"
+   export LLM_ROUTER_LANGCHAIN_RAG_CHUNK_SIZE="200"
+   export LLM_ROUTER_LANGCHAIN_RAG_CHUNK_OVERLAP="50"
+   export LLM_ROUTER_LANGCHAIN_RAG_PERSIST_DIR="/tmp/rag_index"
+   ```
+
+2. Include the plugin name in the utils pipeline configuration, e.g.:
+
+   ```python
+   UTILS_PIPELINE = ["langchain_rag"]
+   ```
+
+3. Use the `action` field in the request payload:
+
+    * **Indexing** – `{ "action": "index", "path": "./data", "ext": [".txt", ".md"] }`
+    * **Searching** – `{ "action": "search", "query": "What is LangChain?", "top_n": 5 }`
+
+The plugin will automatically handle errors, log them (if a logger is provided),
+and return the enriched payload.
+
+---
+
+## 6. Summary
 
 * **Anonymizers** (`FastMaskerPlugin`, `BANonymizer`) scrub PII from requests.
 * **Guardrails** (`NASKGuardPlugin`, internal `GuardrailProcessor`) enforce safety policies.
 * **Pipelines** (`MaskerPipeline`, `GuardrailPipeline`) orchestrate the sequential execution of these plugins,
   short‑circuiting on failure for guardrails.
+* **RAG Plugin** (`langchain_rag`) adds semantic retrieval capabilities using LangChain and FAISS.
 * The system is **extensible**: new plugins are just classes that obey the tiny interface contract and can be referenced
   by name in the configuration.
 
 These components together give the LLM‑Router a flexible, policy‑driven request‑processing stack that can be tailored to
 any deployment scenario.
-
 
 ---
 
