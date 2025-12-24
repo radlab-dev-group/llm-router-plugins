@@ -45,49 +45,54 @@ if all(
 
 if USE_LANGCHAIN_RAG:
     import torch
+
     from transformers import AutoTokenizer, AutoModel
+
     from langchain_core.documents import Document
     from langchain.embeddings.base import Embeddings
     from langchain_community.vectorstores import FAISS
     from langchain_community.docstore.in_memory import InMemoryDocstore
     from langchain_community.vectorstores.faiss import DistanceStrategy
 
+if USE_LANGCHAIN_RAG:
 
-class MeanPoolEmbeddings("Embeddings"):
-    """
-    Implements the ``Embeddings`` interface required by LangChain
-    (``embed_query`` and ``embed_documents``) using the same
-    tokenizer/model you already have.
-    """
+    class MeanPoolEmbeddings(Embeddings):
+        """
+        Implements the ``Embeddings`` interface required by LangChain
+        (``embed_query`` and ``embed_documents``) using the same
+        tokenizer/model you already have.
+        """
 
-    def __init__(self, tokenizer, model, device: str):
-        self.tokenizer = tokenizer
-        self.model = model
-        self.device = device
+        def __init__(self, tokenizer, model, device: str):
+            self.tokenizer = tokenizer
+            self.model = model
+            self.device = device
 
-    def embed_query(self, text: str) -> List[float]:
-        """Embed a single query string."""
-        inputs = self.tokenizer(text, return_tensors="pt", truncation=True).to(
-            self.device
-        )
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-        last_hidden = outputs.last_hidden_state  # (1, seq_len, dim)
-        mask = inputs.attention_mask.unsqueeze(-1)  # (1, seq_len, 1)
-        pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1)  # (1, dim)
-        return pooled.squeeze(0).cpu().tolist()
+        def embed_query(self, text: str) -> List[float]:
+            """Embed a single query string."""
+            inputs = self.tokenizer(text, return_tensors="pt", truncation=True).to(
+                self.device
+            )
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+            last_hidden = outputs.last_hidden_state  # (1, seq_len, dim)
+            mask = inputs.attention_mask.unsqueeze(-1)  # (1, seq_len, 1)
+            pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1)  # (1, dim)
+            return pooled.squeeze(0).cpu().tolist()
 
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """Batch‑embed a list of documents."""
-        inputs = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True
-        ).to(self.device)
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-        last_hidden = outputs.last_hidden_state  # (batch, seq_len, dim)
-        mask = inputs.attention_mask.unsqueeze(-1)  # (batch, seq_len, 1)
-        pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1)  # (batch, dim)
-        return [vec.cpu().tolist() for vec in pooled]
+        def embed_documents(self, texts: List[str]) -> List[List[float]]:
+            """Batch‑embed a list of documents."""
+            inputs = self.tokenizer(
+                texts, return_tensors="pt", padding=True, truncation=True
+            ).to(self.device)
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+            last_hidden = outputs.last_hidden_state  # (batch, seq_len, dim)
+            mask = inputs.attention_mask.unsqueeze(-1)  # (batch, seq_len, 1)
+            pooled = (last_hidden * mask).sum(dim=1) / mask.sum(
+                dim=1
+            )  # (batch, dim)
+            return [vec.cpu().tolist() for vec in pooled]
 
 
 class LangChainRAG:
