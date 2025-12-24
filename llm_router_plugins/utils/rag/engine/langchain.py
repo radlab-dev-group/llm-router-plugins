@@ -1,4 +1,6 @@
 import os
+
+from tqdm import tqdm
 from typing import List, Tuple
 
 from llm_router_plugins.constants import _DontChangeMe
@@ -84,19 +86,37 @@ if USE_LANGCHAIN_RAG:
             pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1)  # (1, dim)
             return pooled.squeeze(0).cpu().tolist()
 
-        def embed_documents(self, texts: List[str]) -> List[List[float]]:
-            """Batch‑embed a list of documents."""
-            inputs = self.tokenizer(
-                texts, return_tensors="pt", padding=True, truncation=True
-            ).to(self.device)
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-            last_hidden = outputs.last_hidden_state  # (batch, seq_len, dim)
-            mask = inputs.attention_mask.unsqueeze(-1)  # (batch, seq_len, 1)
-            pooled = (last_hidden * mask).sum(dim=1) / mask.sum(
-                dim=1
-            )  # (batch, dim)
-            return [vec.cpu().tolist() for vec in pooled]
+        def embed_documents(
+            self, texts: List[str], batch_size: int = 32
+        ) -> List[List[float]]:
+            """Batch‑embed a list of documents using the specified batch size."""
+            all_embeddings: List[List[float]] = []
+
+            # Process the input list in batches, showing a progress bar.
+            for start_idx in tqdm(
+                range(0, len(texts), batch_size),
+                desc="Embedding documents",
+                unit="batch",
+            ):
+                batch = texts[start_idx : start_idx + batch_size]
+
+                inputs = self.tokenizer(
+                    batch, return_tensors="pt", padding=True, truncation=True
+                ).to(self.device)
+
+                with torch.no_grad():
+                    outputs = self.model(**inputs)
+
+                last_hidden = outputs.last_hidden_state  # (batch, seq_len, dim)
+                mask = inputs.attention_mask.unsqueeze(-1)  # (batch, seq_len, 1)
+                pooled = (last_hidden * mask).sum(dim=1) / mask.sum(
+                    dim=1
+                )  # (batch, dim)
+
+                # Convert each vector in the batch to a plain Python list and extend the result.
+                all_embeddings.extend([vec.cpu().tolist() for vec in pooled])
+
+            return all_embeddings
 
 
 class LangChainRAG:
