@@ -15,6 +15,11 @@ if USE_LANGCHAIN_RAG:
         LANGCHAIN_RAG_PERSIST_DIR,
     )
 
+    import multiprocessing as _mp
+
+    if _mp.get_start_method(allow_none=True) != "spawn":
+        _mp.set_start_method("spawn", force=True)
+
 
 class LangchainRAGPlugin(PluginInterface):
     """
@@ -63,9 +68,6 @@ class LangchainRAGPlugin(PluginInterface):
             persist_dir=LANGCHAIN_RAG_PERSIST_DIR,
         )
 
-        # If a persisted FAISS index was loaded, consider the store ready.
-        self._has_index = bool(getattr(self.rag.vectorstore, "index", None))
-
     def apply(self, payload: Dict) -> Dict:
         """
         Dispatch the incoming payload to the appropriate handler.
@@ -88,93 +90,35 @@ class LangchainRAGPlugin(PluginInterface):
             ``(True, {"result": …})`` on success, ``(False, {"error": …})`` on
             failure.
         """
-        try:
-            action = payload.get("action", "search")
+        messages = None
 
-            if action == "index":
-                return self._index(payload)
+        field_with_query = "user_last_statement"
+        text_as_query = payload.get("user_last_statement")
 
-            if action == "search":
-                return self._search(payload)
-            raise ValueError(f"Unsupported action '{action}'.")
+        if not text_as_query:
+            field_with_query = None
 
-        except Exception as exc:  # pragma: no cover – defensive logging
-            self._logger.exception(f"LangchainRAGPlugin error {exc}")
-            return False, {"error": str(exc)}
+            messages = payload.get("messages")
+            if messages:
+                text_as_query = messages[-1].get("content")
 
-    def _index(self, payload: Dict) -> Tuple[bool, Dict]:
-        """
-        Handle the ``"index"`` action.
+        if not text_as_query:
+            self._logger.error(f"Cannot find field with user text using {self.name}")
+            return payload
+        #
+        # import json
+        # print(json.dumps(payload, indent=2, ensure_ascii=False))
 
-        This method validates that ``payload["texts"]`` is a list of strings,
-        forwards the texts to the underlying :class:`LangChainRAG` instance,
-        and records that an index has been created for the current session.
+        docs = self.rag.search(text_as_query, top_n=50)
+        for d in docs:
+            self._logger.debug(d)
 
-        Parameters
-        ----------
-        payload: dict
-            Expected keys:
-            * ``"texts"`` – ``List[str]`` containing the documents to index.
+        extended_content = ""
 
-        Returns
-        -------
-        Tuple[bool, dict]
-            ``(True, {"result": "..."} )`` on success.
+        if messages:
+            messages[-1]["content"] += extended_content
+            payload["messages"] = messages
+        elif field_with_query:
+            payload[field_with_query] += extended_content
 
-        Raises
-        ------
-        ValueError
-            If ``texts`` is missing or not a list of strings.
-        """
-        texts: List[str] = payload.get("texts")
-        if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
-            raise ValueError("'texts' must be a list of strings.")
-
-        self.rag.index_texts(texts)
-        self._has_index = True
-        return True, {"result": f"Indexed {len(texts)} document(s)."}
-
-    def _search(self, payload: Dict) -> Tuple[bool, Dict]:
-        """
-        Handle the ``"search"`` action.
-
-        Ensures that an index exists, validates the query string, performs the
-        similarity search using the configured ``top_n`` value and returns a
-        JSON‑serialisable list of documents.
-
-        Parameters
-        ----------
-        payload: dict
-            Expected keys:
-            * ``"query"`` – the search string.
-            * ``"top_n"`` – optional ``int`` (default ``10``) specifying how many
-              results to return.
-
-        Returns
-        -------
-        Tuple[bool, dict]
-            ``(True, {"result": [...]})`` where each entry contains ``content``
-            and ``metadata`` fields.
-
-        Raises
-        ------
-        RuntimeError
-            If the vector store is empty (no prior indexing).
-        ValueError
-            If ``query`` is missing or not a string.
-        """
-        if not self._has_index:
-            raise RuntimeError(
-                "The vector store is empty – call the 'index' action first."
-            )
-        query: str = payload.get("query")
-        if not isinstance(query, str):
-            raise ValueError("'query' must be a string.")
-        top_n: int = int(payload.get("top_n", 10))
-        docs = self.rag.search(query, top_n=top_n)
-
-        # Convert LangChain Document objects to a plain‑serialisable form
-        result = [
-            {"content": doc.page_content, "metadata": doc.metadata} for doc in docs
-        ]
-        return True, {"result": result}
+        return payload
