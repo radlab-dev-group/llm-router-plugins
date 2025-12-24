@@ -196,7 +196,7 @@ class LangChainRAG:
             Document(page_content=chunk, metadata=m)
             for chunk, m in zip(chunks, meta)
         ]
-        self.vectorstore.add_documents(docs)  # , embeddings=embeddings)
+        self.vectorstore.add_documents(docs)
         self._persist()
 
     def search(self, text: str, top_n: int = 10) -> List["Document"]:
@@ -239,10 +239,10 @@ class LangChainRAG:
                 docstore=self.doc_store,
                 index_name="index",
                 distance_strategy=DistanceStrategy.COSINE,
+                allow_dangerous_deserialization=True,
             )
         else:
             # Ask the embedding object for the dimensionality of a single vector.
-            # Using a dummy query is cheap and avoids pulling the whole model again.
             dummy_vec = self._embedding.embed_query("dummy")
             dim = len(dummy_vec)
 
