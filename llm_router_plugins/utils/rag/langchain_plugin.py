@@ -124,7 +124,4 @@ class LangchainRAGPlugin(PluginInterface):
         elif field_with_query:
             payload[field_with_query] += f"\n\n{extended_content}"
 
-        import json
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
-
         return payload
