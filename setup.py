@@ -1,11 +1,8 @@
-# setup.py
 import pathlib
 from setuptools import setup, find_packages
 
-# Path to this file's directory
 HERE = pathlib.Path(__file__).parent
 
-# Read the README for the long description
 LONG_DESCRIPTION = (HERE / "README.md").read_text(encoding="utf-8")
 VERSION = (HERE / ".version").read_text(encoding="utf-8")
 
@@ -22,6 +19,11 @@ setup(
     include_package_data=True,
     python_requires=">=3.8",
     install_requires=[],
+    entry_points={
+        "console_scripts": [
+            "llm-router-rag-langchain=llm_router_plugins.cli.plugins.utils.rag.langchain:main",
+        ],
+    },
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: Apache Software License",
