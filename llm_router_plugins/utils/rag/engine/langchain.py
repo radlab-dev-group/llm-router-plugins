@@ -47,9 +47,47 @@ if USE_LANGCHAIN_RAG:
     import torch
     from transformers import AutoTokenizer, AutoModel
     from langchain_core.documents import Document
+    from langchain.embeddings.base import Embeddings
     from langchain_community.vectorstores import FAISS
     from langchain_community.docstore.in_memory import InMemoryDocstore
     from langchain_community.vectorstores.faiss import DistanceStrategy
+
+
+class MeanPoolEmbeddings(Embeddings):
+    """
+    Implements the ``Embeddings`` interface required by LangChain
+    (``embed_query`` and ``embed_documents``) using the same
+    tokenizer/model you already have.
+    """
+
+    def __init__(self, tokenizer, model, device: str):
+        self.tokenizer = tokenizer
+        self.model = model
+        self.device = device
+
+    def embed_query(self, text: str) -> List[float]:
+        """Embed a single query string."""
+        inputs = self.tokenizer(text, return_tensors="pt", truncation=True).to(
+            self.device
+        )
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        last_hidden = outputs.last_hidden_state  # (1, seq_len, dim)
+        mask = inputs.attention_mask.unsqueeze(-1)  # (1, seq_len, 1)
+        pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1)  # (1, dim)
+        return pooled.squeeze(0).cpu().tolist()
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """Batch‑embed a list of documents."""
+        inputs = self.tokenizer(
+            texts, return_tensors="pt", padding=True, truncation=True
+        ).to(self.device)
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        last_hidden = outputs.last_hidden_state  # (batch, seq_len, dim)
+        mask = inputs.attention_mask.unsqueeze(-1)  # (batch, seq_len, 1)
+        pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1)  # (batch, dim)
+        return [vec.cpu().tolist() for vec in pooled]
 
 
 class LangChainRAG:
@@ -96,23 +134,24 @@ class LangChainRAG:
         self.collection_name = collection_name
         self.doc_store = InMemoryDocstore()
 
+        self.device = device
+        self.tokenizer = AutoTokenizer.from_pretrained(embedder_path)
+        self.model = AutoModel.from_pretrained(embedder_path).to(device)
+
+        self._embedding = MeanPoolEmbeddings(
+            tokenizer=self.tokenizer, model=self.model, device=self.device
+        )
+
         self.vectorstore = FAISS(
-            embedding_function=self._mean_pool_embeddings,
+            embedding_function=self._embedding,
             docstore=self.doc_store,
             index=None,
             index_to_docstore_id={},
             distance_strategy=DistanceStrategy.COSINE,
         )
 
-        self.tokenizer = AutoTokenizer.from_pretrained(embedder_path)
-        self.model = AutoModel.from_pretrained(embedder_path).to(device)
-        self.device = device
-
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-
-        # helper that turns a single text into an embedding
-        self._embed = self._mean_pool_embeddings
 
     # ---------------------------------------------------------------------------
     def index_texts(self, texts: List[str]) -> None:
@@ -121,7 +160,7 @@ class LangChainRAG:
         and push it to the FAISS store.
         """
         chunks, meta = self._split_into_chunks(texts)
-        embeddings = self._embed_batch(chunks)
+        embeddings = self._embedding.embed_documents(chunks)
         docs = [
             Document(page_content=chunk, metadata=m)
             for chunk, m in zip(chunks, meta)
@@ -180,37 +219,3 @@ class LangChainRAG:
                 chunks.append(chunk)
                 meta.append({"doc_id": doc_id, "chunk_id": len(meta)})
         return chunks, meta
-
-    def _mean_pool_embeddings(self, text: str) -> List[float]:
-        """
-        Return a single embedding for *text* as a plain ``list[float]``.
-        """
-        inputs = self.tokenizer(text, return_tensors="pt", truncation=True).to(
-            self.device
-        )
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-
-        last_hidden = outputs.last_hidden_state  # (1, seq_len, dim)
-        mask = inputs.attention_mask.unsqueeze(-1)  # (1, seq_len, 1)
-        pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1)  # (1, dim)
-
-        return pooled.squeeze(0).cpu().tolist()
-
-    def _embed_batch(self, texts: List[str]) -> List[List[float]]:
-        """
-        Batch version of ``_mean_pool_embeddings`` – returns a list of
-        ``list[float]`` embeddings, one per input text.
-        """
-        inputs = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True
-        ).to(self.device)
-
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-
-        last_hidden = outputs.last_hidden_state  # (batch, seq_len, dim)
-        mask = inputs.attention_mask.unsqueeze(-1)  # (batch, seq_len, 1)
-        pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1)  # (batch, dim)
-
-        return [vec.cpu().tolist() for vec in pooled]
