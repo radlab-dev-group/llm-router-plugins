@@ -1,4 +1,5 @@
 import os
+import re
 
 from tqdm import tqdm
 from typing import List, Tuple
@@ -186,17 +187,21 @@ class LangChainRAG:
         self.vectorstore = self._prepare_faiss()
 
     # -------------------------------------------------------------------------
-    def index_texts(self, texts: List[str]) -> None:
+    def index_texts(self, texts: List[str], batch_size: int = 10) -> None:
         """
         Split each text into token windows, embed each window,
         and push it to the FAISS store.
         """
+        texts = self._clear_texts(texts)
         chunks, meta = self._split_into_chunks(texts)
         docs = [
             Document(page_content=chunk, metadata=m)
             for chunk, m in zip(chunks, meta)
         ]
-        self.vectorstore.add_documents(docs)
+
+        for start_idx in range(0, len(docs), batch_size):
+            batch = docs[start_idx : start_idx + batch_size]
+            self.vectorstore.add_documents(batch)
         self._persist()
 
     def search(self, text: str, top_n: int = 10) -> List["Document"]:
@@ -286,3 +291,19 @@ class LangChainRAG:
                 chunks.append(chunk)
                 meta.append({"doc_id": doc_id, "chunk_id": len(meta)})
         return chunks, meta
+
+    @staticmethod
+    def _clear_texts(texts: List[str]) -> List[str]:
+        """
+        Strip leading/trailing whitespace and collapse any sequence of
+        whitespace characters (spaces, tabs, newlines, etc.) to a single
+        space. This makes the text uniform before further processing.
+        """
+        n_texts = []
+        for text in texts:
+            # Remove surrounding whitespace.
+            text = text.strip()
+            # Replace runs of whitespace with a single space.
+            text = re.sub(r"\s+", " ", text)
+            n_texts.append(text)
+        return n_texts
