@@ -13,8 +13,16 @@ python -m llm_router_plugins.utils.rag.engine.langchain_cli --search --query "Wh
 
 import sys
 import argparse
-
 from pathlib import Path
+
+# -------------------------------------------------
+# Simple ANSI colour helpers – no external deps needed
+# -------------------------------------------------
+RESET = "\033[0m"
+CYAN = "\033[36m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+MAGENTA = "\033[35m"
 
 from llm_router_plugins.core.utils import read_files_from_dir
 from llm_router_plugins.utils.rag.engine.langchain import USE_LANGCHAIN_RAG
@@ -61,34 +69,38 @@ def cmd_index(args: argparse.Namespace) -> None:
     plugin.rag.index_texts(texts)
 
 
+def search_and_show_results(plugin, text_as_query, top_n: int = 10):
+    docs_and_scores = plugin.rag.search(text_as_query, top_n=top_n)
+    for i, [doc, score] in enumerate(docs_and_scores, start=1):
+        print(f"{CYAN}--- [{score}] Result {i} ---{RESET}")
+        print(
+            f"{GREEN}Content :{RESET} {doc.page_content} (len={len(doc.page_content)})"
+        )
+        # print(f"{GREEN}Metadata:{RESET} {doc.metadata}\n")
+
+
 def cmd_search(args: argparse.Namespace) -> None:
     """Handle the ``--search`` command."""
-
-    # ------------------------------------------------------------------- #
-    # Delegate searching to the plugin.  The plugin validates that an index
-    # exists, runs the similarity search, and returns plain‑serialisable dicts.
-    # ------------------------------------------------------------------- #
     plugin = LangchainRAGPlugin()
-    payload = {
-        "action": "search",
-        "query": args.query,
-        "top_n": args.top_n,
-    }
-    success, response = plugin.apply(payload)
-    if not success:
-        sys.stderr.write(f"Search failed: {response.get('error')}\n")
-        sys.exit(1)
 
-    results = response.get("result", [])
-    if not results:
-        print("No results found.")
+    # Interactive mode when no query is supplied
+    if not args.query:
+        print(
+            f"{CYAN}Entering interactive search mode (type 'exit' to quit).{RESET}"
+        )
+        try:
+            while True:
+                query = input(f"{MAGENTA}>>> {RESET}").strip()
+                if query.lower() in ("", "exit", "quit"):
+                    print(f"{CYAN}Good‑bye!{RESET}")
+                    break
+                search_and_show_results(plugin, query, args.top_n)
+        except KeyboardInterrupt:
+            print(f"\n{CYAN}Interrupted – exiting interactive mode.{RESET}")
         return
 
-    for i, doc in enumerate(results, start=1):
-        print(f"--- Result {i} ---")
-        print(f"Content : {doc['content']}")
-        print(f"Metadata: {doc['metadata']}")
-        print()
+    # Normal (non‑interactive) execution when a query is supplied
+    search_and_show_results(plugin, args.query, args.top_n)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -100,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="command", required=True, help="Command: [index|search]"
     )
 
-    # ------------------------------ index ------------------------------ #
+    # ---------------------------- index ---------------------------- #
     idx_parser = subparsers.add_parser(
         "index", help="Index a directory of text files."
     )
@@ -117,14 +129,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     idx_parser.set_defaults(func=cmd_index)
 
-    # ------------------------------ search ------------------------------ #
+    # ---------------------------- search ---------------------------- #
     srch_parser = subparsers.add_parser(
         "search", help="Search the previously built index."
     )
     srch_parser.add_argument(
         "--query",
-        required=True,
-        help="Search query string.",
+        required=False,  # <-- made optional
+        help="Search query string. If omitted, an interactive REPL starts.",
     )
     srch_parser.add_argument(
         "--top_n",

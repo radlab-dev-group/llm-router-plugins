@@ -204,7 +204,7 @@ class LangChainRAG:
             self.vectorstore.add_documents(batch)
         self._persist()
 
-    def search(self, text: str, top_n: int = 10) -> List["Document"]:
+    def search(self, text: str, top_n: int = 10) -> List[Tuple["Document", float]]:
         """
         Retrieve the ``top_n`` most similar chunks to ``text`` from the FAISS index
         using cosine similarity.
@@ -224,7 +224,7 @@ class LangChainRAG:
         """
         if not self.vectorstore:
             return []
-        return self.vectorstore.similarity_search(text, k=top_n)
+        return self.vectorstore.similarity_search_with_score(text, k=top_n)
 
     # -------------------------------------------------------------------------
     def _persist(self) -> None:
