@@ -108,7 +108,7 @@ class LangchainRAGPlugin(PluginInterface):
         extended_content = ""
         docs = self.rag.search(text_as_query, top_n=10)
         for d in docs:
-            extended_content += "\n\n" + d.page_content.strip()
+            extended_content += "\n\n" + d.page_content.strip() + "\n"
 
         if len(extended_content):
             extended_content = (
