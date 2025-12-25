@@ -1,5 +1,18 @@
+"""
+CLI wrapper around the LangChainRAG helper.
+
+Usage examples
+--------------
+# Index all *.txt and *.md files under ./data
+python -m llm_router_plugins.utils.rag.engine.langchain_cli --index --path ./data --ext .txt .md
+
+# Search the previously built index
+python -m llm_router_plugins.utils.rag.engine.langchain_cli --search --query "What is LangChain?" --top_n 5
+"""
+
 import os
 import re
+import numpy as np
 
 from tqdm import tqdm
 from typing import List, Tuple
@@ -87,7 +100,13 @@ if USE_LANGCHAIN_RAG:
             last_hidden = outputs.last_hidden_state  # (1, seq_len, dim)
             mask = inputs.attention_mask.unsqueeze(-1)  # (1, seq_len, 1)
             pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1)  # (1, dim)
-            return pooled.squeeze(0).cpu().tolist()
+
+            # Normalize to unit length for cosine similarity
+            vec = pooled.squeeze(0).cpu().numpy()
+            norm = np.linalg.norm(vec)
+            if norm != 0:
+                vec = vec / norm
+            return vec.tolist()
 
         def embed_documents(
             self, texts: List[str], batch_size: int = 32
@@ -116,8 +135,15 @@ if USE_LANGCHAIN_RAG:
                     dim=1
                 )  # (batch, dim)
 
-                # Convert each vector in the batch to a plain Python list and extend the result.
-                all_embeddings.extend([vec.cpu().tolist() for vec in pooled])
+                # ---- Normalise each vector in the batch ----
+                batch_vecs = pooled.cpu().numpy()
+                norms = np.linalg.norm(batch_vecs, axis=1, keepdims=True)
+                # Avoid division by zero
+                norms[norms == 0] = 1
+                batch_vecs = batch_vecs / norms
+
+                # Convert each normalised vector to a plain Python list and extend the result.
+                all_embeddings.extend([vec.tolist() for vec in batch_vecs])
 
             return all_embeddings
 
@@ -186,7 +212,7 @@ class LangChainRAG:
         )
         self.vectorstore = self._prepare_faiss()
 
-    # -------------------------------------------------------------------------
+    # -----------------------------------------------------------------
     def index_texts(self, texts: List[str], batch_size: int = 10) -> None:
         """
         Split each text into token windows, embed each window,
@@ -226,7 +252,7 @@ class LangChainRAG:
             return []
         return self.vectorstore.similarity_search_with_score(text, k=top_n)
 
-    # -------------------------------------------------------------------------
+    # -----------------------------------------------------------------
     def _persist(self) -> None:
         """
         Save the FAISS index and the in‑memory docstore to ``self.persist_dir``.
