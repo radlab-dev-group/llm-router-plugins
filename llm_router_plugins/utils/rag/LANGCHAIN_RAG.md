@@ -48,17 +48,20 @@ pip install faiss-cpu tqdm langchain langchain-community transformers torch
 
 2. **Set the environment variables** shown above.
 
-3. **Add the plugin to the utils pipeline** (e.g. in your configuration file):
+3. **Add the plugin to the LLM Router utils pipeline** (e.g. in your configuration file):
 
-```python
-UTILS_PIPELINE = ["langchain_rag"]
+```bash
+export LLM_ROUTER_UTILS_PLUGINS_PIPELINE=${LLM_ROUTER_UTILS_PLUGINS_PIPELINE:-"langchain_rag"}
 ```
 
 4. **Use the CLI** (optional) for quick indexing/searching:
 
 ```shell script
+# Index files *.txt and *.md from ./data directory
 python -m llm_router_plugins.utils.rag.engine.langchain --index --path ./data --ext .txt .md
-   python -m llm_router_plugins.utils.rag.engine.langchain --search --query "Explain RAG" --top_n 3
+
+# Search and show 3 most relevant results
+python -m llm_router_plugins.utils.rag.engine.langchain --search --query "Explain RAG" --top_n 3
 ```
 
 ### Error Handling
