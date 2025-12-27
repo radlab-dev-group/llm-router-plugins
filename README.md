@@ -6,7 +6,7 @@ Each plugin implements a tiny, well‑defined interface (`apply`) and can be com
 *pipeline**. Pipelines are instantiated by the `MaskerPipeline` and `GuardrailPipeline` classes and are driven
 automatically by the endpoint logic in `endpoint_i.py`.
 
----
+---  
 
 ## 1. Anonymizers (Maskers)
 
@@ -31,7 +31,7 @@ automatically by the endpoint logic in `endpoint_i.py`.
 4. The final payload – now stripped of PII – proceeds to the rest of the request flow (guardrails, model dispatch,
    etc.).
 
----
+---  
 
 ## 2. Guardrails
 
@@ -47,18 +47,19 @@ automatically by the endpoint logic in `endpoint_i.py`.
 | Plugin                                             | Description                                                                                                                                                                                                                  | Technical notes                                                                                                                                                                                                                       |
 |----------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **NASKGuardPlugin** (`nask_guard_plugin.py`)       | HTTP‑based guardrail that forwards the payload to the external NASK guardrail service (`/nask_guard` endpoint) and returns a boolean *safe* flag together with the raw response.                                             | Inherits from `HttpPluginInterface`. The `apply` method calls `_request(payload)` (provided by the base class) and extracts `results["safe"]`. Errors are caught and logged; on failure the plugin returns `(False, {})`.             |
+| **SojkaGuardPlugin** (`sojka_guard_plugin.py`)     | HTTP‑based guardrail that forwards the payload to the **Sójka** guardrail service (`/sojka_guard` endpoint) and returns a safety flag.                                                                                       | Mirrors the design of `NASKGuardPlugin`. The `endpoint_url` is built from the `LLM_ROUTER_GUARDRAIL_SOJKA_GUARD_HOST` environment variable. On success it returns `(True, response)`, otherwise `(False, {})`.                        |
 | **(Implicit) GuardrailProcessor** (`processor.py`) | Core logic used by the internal NASK guardrail Flask route (`nask_guardrail`). Tokenises the payload, creates overlapping chunks, runs a Hugging‑Face `text‑classification` pipeline, and produces a detailed safety report. | Handles model loading (`AutoTokenizer`, `pipeline("text‑classification")`), chunking (`_chunk_text`), and scoring thresholds (`MIN_SCORE_FOR_SAFE`, `MIN_SCORE_FOR_NOT_SAFE`). Returns a dict: `{"safe": <bool>, "detailed": [...]}`. |
 
 ### 2.3 How a guardrail is used
 
 1. The endpoint calls `_is_request_guardrail_safe(payload)` (or the analogous response guardrail).
 2. If `FORCE_GUARDRAIL_REQUEST` is true, a `GuardrailPipeline` is built from the configured plugin IDs (e.g.
-   `["nask_guard"]`).
+   `["nask_guard", "sojka_guard"]`).
 3. The pipeline iterates over each guardrail plugin; each `apply` returns `(is_safe, message)`.
 4. The first plugin that reports `is_safe=False` short‑circuits the pipeline and the request is rejected with a 400/500
    error payload.
 
----
+---  
 
 ## 3. Pipelines
 
@@ -82,13 +83,13 @@ All plugin identifiers are stored in environment variables or constants such as:
 
 ```python
 MASKING_STRATEGY_PIPELINE = ["fast_masker"]
-GUARDRAIL_STRATEGY_PIPELINE_REQUEST = ["nask_guard"]
+GUARDRAIL_STRATEGY_PIPELINE_REQUEST = ["nask_guard", "sojka_guard"]
 ```
 
 These lists are consumed by the endpoint initialization (`EndpointI._prepare_masker_pipeline`,
 `EndpointI._prepare_guardrails_pipeline`).
 
----
+---  
 
 ## 4. Adding a New Plugin
 
@@ -123,7 +124,7 @@ class MyCustomMasker(PluginInterface):
 After placing the file in `llm_router_plugins/maskers/plugins/`, enable it by adding `"my_custom_masker"` to
 `MASKING_STRATEGY_PIPELINE`.
 
----
+---  
 
 ## 5. Retrieval‑Augmented Generation (RAG) Support
 
@@ -164,7 +165,7 @@ export LLM_ROUTER_LANGCHAIN_RAG_PERSIST_DIR="${LLM_ROUTER_LANGCHAIN_RAG_PERSIST_
 
 ### 5.3 Using the CLI scripts
 
-*Index a repository* (example for the documentation site):
+**Index a repository** (example for the documentation site):
 
 ```shell script
 scripts/llm-router-rag-langchain-index.sh
@@ -172,7 +173,7 @@ scripts/llm-router-rag-langchain-index.sh
 # llm-router-rag-langchain index --path "../.github/pages/llmrouter.cloud/" --ext .html .js .md
 ```
 
-*Search* (interactive REPL):
+**Search** (interactive REPL):
 
 ```shell script
 scripts/llm-router-rag-langchain-search.sh
@@ -181,7 +182,7 @@ scripts/llm-router-rag-langchain-search.sh
 # (you will be prompted for a query, type “exit” to quit)
 ```
 
-*One‑shot search*:
+**One‑shot search**:
 
 ```shell script
 llm-router-rag-langchain search --query "What is Retrieval‑Augmented Generation?" --top_n 5
@@ -192,41 +193,5 @@ the retrieved text and appends it to the user’s last message, prefixed with:
 
 ```
 If the context below will help answer the above question, use it.
-Context separated with double enter:
+Context separated with double enter
 ```
-
-### 5.4 Enabling the RAG plugin in LLM‑Router
-
-1. Add the plugin name to the utils pipeline configuration (usually via an environment variable):
-
-```shell script
-export LLM_ROUTER_UTILS_PLUGINS_PIPELINE="${LLM_ROUTER_UTILS_PLUGINS_PIPELINE:-langchain_rag}"
-```
-
-2. Ensure the persistence directory exists (the first indexing run will create it).
-3. Start the router as usual; the plugin will load the FAISS index on startup and enrich every incoming request with
-   relevant context.
-
-*No code changes are required* – the plugin is discovered automatically by the utils‑registry mechanism.
-
----
-
-## 6. Summary
-
-* **Anonymizers** (`FastMaskerPlugin`, `BANonymizer`) scrub PII from requests.
-* **Guardrails** (`NASKGuardPlugin`, internal `GuardrailProcessor`) enforce safety policies.
-* **Pipelines** (`MaskerPipeline`, `GuardrailPipeline`) orchestrate sequential execution, short‑circuiting on failure
-  for guardrails.
-* **RAG Plugin** (`langchain_rag`) adds semantic retrieval capabilities using LangChain, FAISS, and configurable
-  embedding models.
-* The system is **extensible**: new plugins are just classes that obey a tiny interface contract and can be referenced
-  by name in the configuration.
-
-These components together give the LLM‑Router a flexible, policy‑driven request‑processing stack that can be tailored to
-any deployment scenario.
-
----
-
-## 📜 License
-
-See the [LICENSE](LICENSE) file.
