@@ -159,7 +159,7 @@ before forwarding it to the underlying LLM.
 The plugin is released under the **Apache 2.0** license, the same as the rest of the LLM‑Router project.
 
 * **LangChain** – https://github.com/hwchase17/langchain (MIT)
-* **FAISS** – https://github.com/facebookresearch/faiss (BSD)
+* **FAISS** – https://github.com/facebookresearch/faiss (MIT)
 
 Please see the individual repositories for their licensing terms.
 
