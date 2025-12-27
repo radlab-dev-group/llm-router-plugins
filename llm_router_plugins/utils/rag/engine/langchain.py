@@ -80,6 +80,7 @@ if USE_LANGCHAIN_RAG:
 
         torchvision.disable_beta_transforms_warning()
     except ImportError:
+        torchvision = None
         pass
 
 
