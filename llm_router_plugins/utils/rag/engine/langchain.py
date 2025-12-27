@@ -75,6 +75,14 @@ if USE_LANGCHAIN_RAG:
     from langchain_community.docstore.in_memory import InMemoryDocstore
     from langchain_community.vectorstores.faiss import DistanceStrategy
 
+    try:
+        import torchvision
+
+        torchvision.disable_beta_transforms_warning()
+    except ImportError:
+        torchvision = None
+        pass
+
 
 if USE_LANGCHAIN_RAG:
 
