@@ -100,4 +100,4 @@ function index_medusa_data_to_kb() {
 # 3. Prepare knowledge base
 index_medusa_data_to_kb
 
-cd "$BASE_DIR"
+cd "$BASE_DIR" || return
