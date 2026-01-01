@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple
 
 from llm_router_plugins.plugin_interface import PluginInterface
 from llm_router_plugins.utils.rag.engine.langchain import USE_LANGCHAIN_RAG

@@ -12,7 +12,6 @@ python -m llm_router_plugins.utils.rag.engine.langchain_cli --search --query "Wh
 
 import os
 import re
-import numpy as np
 
 from tqdm import tqdm
 from typing import List, Tuple
@@ -66,6 +65,7 @@ if all(
 if USE_LANGCHAIN_RAG:
     import faiss
     import torch
+    import numpy as np
 
     from transformers import AutoTokenizer, AutoModel
 
