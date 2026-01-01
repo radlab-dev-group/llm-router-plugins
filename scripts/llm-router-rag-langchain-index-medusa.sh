@@ -91,11 +91,11 @@ function index_medusa_data_to_kb() {
     fi
 }
 
-## 1. Prepare local dir
-#prepare_storage
-#
-## 2. Download medusa documentation
-#prepare_medusa_data
+# 1. Prepare local dir
+prepare_storage
+
+# 2. Download medusa documentation
+prepare_medusa_data
 
 # 3. Prepare knowledge base
 index_medusa_data_to_kb
