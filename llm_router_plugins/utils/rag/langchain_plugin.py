@@ -90,16 +90,19 @@ class LangchainRAGPlugin(PluginInterface):
             failure.
         """
         messages = None
+        field_with_query = None
 
-        field_with_query = "user_last_statement"
-        text_as_query = payload.get("user_last_statement")
+        if type(payload) in [Dict, dict]:
+            field_with_query = "user_last_statement"
+            text_as_query = payload.get("user_last_statement")
+            if not text_as_query:
+                field_with_query = None
 
-        if not text_as_query:
-            field_with_query = None
-
-            messages = payload.get("messages")
-            if messages:
-                text_as_query = messages[-1].get("content")
+                messages = payload.get("messages")
+                if messages:
+                    text_as_query = messages[-1].get("content")
+        else:
+            text_as_query = str(payload)
 
         if not text_as_query:
             self._logger.error(f"Cannot find field with user text using {self.name}")
