@@ -1,3 +1,13 @@
+"""
+Utility helpers for file‑system operations.
+
+The module currently provides a single helper that walks a directory tree,
+collects the textual contents of files matching a set of extensions, and
+returns them as a list of strings.  It is deliberately lightweight and
+has no external dependencies, making it suitable for use in scripts,
+CLI tools, or test fixtures.
+"""
+
 import sys
 
 from typing import List
