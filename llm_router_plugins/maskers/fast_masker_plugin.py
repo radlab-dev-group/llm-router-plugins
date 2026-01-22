@@ -47,6 +47,7 @@ class FastMaskerPlugin(PluginInterface):
         Mask the supplied payload using the configured rule pipeline and
         return a new dictionary with all sensitive data redacted.
     """
+
     name = "fast_masker"
 
     def __init__(self, logger: Optional[logging.Logger] = None):
