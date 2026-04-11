@@ -10,9 +10,9 @@ Valid matches are replaced with the placeholder ``{{POSTAL_CODE}}``.
 """
 
 import re
-from typing import Match
+from typing import Optional, Callable, Match
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from .base_rule import BaseRule
 
 
 class PostalCodeRule(BaseRule):
@@ -53,13 +53,19 @@ class PostalCodeRule(BaseRule):
             self._POSTAL_REGEX, flags=re.IGNORECASE | re.VERBOSE
         )
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> str:
         """
         Replace each detected postal code with the placeholder.
         """
 
         def _replacer(match: Match) -> str:
             # No additional validation needed – the regex guarantees correct format.
-            return self._PLACEHOLDER
+            return (
+                anonymizer_fn(match.group(0), self.tag_type)
+                if anonymizer_fn
+                else self._PLACEHOLDER
+            )
 
         return self._compiled_regex.sub(_replacer, text)

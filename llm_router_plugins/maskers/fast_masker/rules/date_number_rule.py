@@ -1,6 +1,7 @@
 import re
+from typing import Optional, Callable
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from .base_rule import BaseRule
 
 
 class DateNumberRule(BaseRule):
@@ -46,7 +47,9 @@ class DateNumberRule(BaseRule):
             placeholder=DateNumberRule._MASKING_TAG_PLACEHOLDER,
         )
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> str:
         """
         Replace every detected date (any of the supported formats) with the
         placeholder.

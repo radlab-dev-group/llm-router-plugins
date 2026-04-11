@@ -4,9 +4,9 @@ Optional helper base class for rules that share common behaviour.
 
 import abc
 import re
-from typing import Pattern
+from typing import Pattern, Optional, Callable
 
-from llm_router_plugins.maskers.fast_masker.core.rule_interface import MaskerRuleI
+from ..core.rule_interface import MaskerRuleI
 
 
 class BaseRule(MaskerRuleI, abc.ABC):
@@ -18,6 +18,7 @@ class BaseRule(MaskerRuleI, abc.ABC):
 
     pattern: Pattern
     placeholder: str
+    tag_type: str
 
     def __init__(self, regex: str, placeholder: str, flags: int = 0):
         """
@@ -33,14 +34,27 @@ class BaseRule(MaskerRuleI, abc.ABC):
         self.pattern = re.compile(regex, flags)
         self.placeholder = placeholder
 
-    def apply(self, text: str) -> str:
+        # Extract tag type from placeholder, e.g., "{{PESEL}}" -> "PESEL"
+        self.tag_type = placeholder.strip("{}")
+        # self.tag_type = placeholder.strip("{}")
+
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> str:
         """
         Replace all occurrences of ``self.pattern`` in *text* with the
-        configured placeholder.
+        configured placeholder or a dynamic pseudonym.
 
         Returns
         -------
         str
             The transformed text.
         """
-        return self.pattern.sub(self.placeholder, text)
+
+        def replacer(match: re.Match) -> str:
+            val = match.group(0)
+            if anonymizer_fn:
+                return "{" + anonymizer_fn(val, self.tag_type) + "}"
+            return self.placeholder
+
+        return self.pattern.sub(replacer, text)

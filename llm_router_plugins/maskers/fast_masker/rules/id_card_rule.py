@@ -4,7 +4,7 @@ Rule that masks Polish national ID card numbers (9‑character alphanumeric).
 
 import re
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from .base_rule import BaseRule
 
 
 class IdCardRule(BaseRule):

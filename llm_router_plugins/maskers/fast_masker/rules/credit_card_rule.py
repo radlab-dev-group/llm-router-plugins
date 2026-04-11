@@ -3,9 +3,10 @@ Rule that masks credit‑card numbers.
 """
 
 import re
+from typing import Optional, Callable
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
-from llm_router_plugins.maskers.fast_masker.utils.validators import (
+from .base_rule import BaseRule
+from ..utils.validators import (
     is_valid_credit_card,
 )
 
@@ -31,11 +32,13 @@ class CreditCardRule(BaseRule):
             flags=re.IGNORECASE | re.VERBOSE,
         )
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> str:
         """Replace only syntactically valid credit‑card numbers."""
 
         def _replace(match: re.Match) -> str:
             candidate = match.group(0)
-            return self.placeholder if is_valid_credit_card(candidate) else candidate
+            self.placeholder if is_valid_credit_card(candidate) else candidate
 
         return re.sub(self.pattern, _replace, text)

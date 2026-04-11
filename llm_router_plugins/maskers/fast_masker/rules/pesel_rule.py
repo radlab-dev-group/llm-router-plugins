@@ -3,9 +3,10 @@ Rule that masks valid Polish PESEL numbers.
 """
 
 import re
+from typing import Optional, Callable
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
-from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_pesel
+from .base_rule import BaseRule
+from ..utils.validators import is_valid_pesel
 
 
 class PeselRule(BaseRule):
@@ -26,16 +27,26 @@ class PeselRule(BaseRule):
             placeholder=PeselRule._MASK_TAG_PLACEHOLDER,
         )
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> str:
         """
-        Replace each *valid* PESEL occurrence with the placeholder.
+        Replace each *valid* PESEL occurrence with the placeholder or pseudonym.
 
         Invalid PESEL strings (wrong checksum) are left untouched.
         """
 
         def replacer(match: re.Match) -> str:
-
             pesel = match.group("pesel")
-            return self._MASK_TAG_PLACEHOLDER if is_valid_pesel(pesel) else pesel
+            if is_valid_pesel(pesel):
+                replacement = (
+                    anonymizer_fn(pesel, self.tag_type)
+                    if anonymizer_fn
+                    else self.placeholder
+                )
+                # We replace the numeric part inside the full match (including markdown)
+                full_match = match.group(0)
+                return full_match.replace(pesel, replacement)
+            return match.group(0)
 
-        return self._PESEL_REGEX.sub(replacer, text)
+        return self.pattern.sub(replacer, text)

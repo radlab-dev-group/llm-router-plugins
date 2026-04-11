@@ -21,9 +21,9 @@ for masking is ``{{BANK_ACCOUNT}}``.
 """
 
 import re
-from typing import Match
+from typing import Optional, Callable, Match
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from .base_rule import BaseRule
 
 
 class BankAccountRule(BaseRule):
@@ -72,7 +72,9 @@ class BankAccountRule(BaseRule):
             self._REGEX, flags=re.IGNORECASE | re.VERBOSE
         )
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> str:
         """
         Replace each detected (possibly masked) bank account number with the
         ``{{BANK_ACCOUNT}}`` placeholder.
@@ -82,6 +84,10 @@ class BankAccountRule(BaseRule):
             # No further validation is required – the regex guarantees the
             # exact 28‑character IBAN structure (with optional masking) and
             # therefore will not match shorter numbers like ``64001000152``.
-            return self._PLACEHOLDER
+            return (
+                anonymizer_fn(match.group(0), self.tag_type)
+                if anonymizer_fn
+                else self._PLACEHOLDER
+            )
 
         return self._compiled_regex.sub(_replacer, text)

@@ -3,6 +3,7 @@ Definition of the rule interface that every masking rule must implement.
 """
 
 from abc import ABC, abstractmethod
+from typing import Callable, Optional
 
 
 class MaskerRuleI(ABC):
@@ -15,7 +16,9 @@ class MaskerRuleI(ABC):
     """
 
     @abstractmethod
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> str:
         """
         Apply the rule to *text* and return the transformed string.
 
@@ -23,6 +26,9 @@ class MaskerRuleI(ABC):
         ----------
         text: str
             The input text to be processed.
+        anonymizer_fn: Callable[[str, str], str] | None
+            A function that takes (original_value, tag_type) and returns a pseudonym.
+            If None, the rule should use its default static placeholder.
 
         Returns
         -------

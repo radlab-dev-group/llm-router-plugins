@@ -3,9 +3,10 @@ Rule that masks JSON Web Tokens (JWT).
 """
 
 import re
+from typing import Optional, Callable
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
-from llm_router_plugins.maskers.fast_masker.utils.validators import is_possible_jwt
+from .base_rule import BaseRule
+from ..utils.validators import is_possible_jwt
 
 
 class JwtRule(BaseRule):
@@ -26,8 +27,10 @@ class JwtRule(BaseRule):
             flags=re.VERBOSE,
         )
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> str:
         def _replace(m: re.Match) -> str:
-            return self.placeholder if is_possible_jwt(m.group(0)) else m.group(0)
+            self.placeholder if is_possible_jwt(m.group(0)) else m.group(0)
 
         return re.sub(self.pattern, _replace, text)

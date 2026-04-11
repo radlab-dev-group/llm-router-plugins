@@ -3,9 +3,10 @@ Rule that masks Vehicle Identification Numbers (VIN).
 """
 
 import re
+from typing import Optional, Callable
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
-from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_vin
+from .base_rule import BaseRule
+from ..utils.validators import is_valid_vin
 
 
 class VinRule(BaseRule):
@@ -26,9 +27,11 @@ class VinRule(BaseRule):
             flags=re.IGNORECASE | re.VERBOSE,
         )
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> str:
         def _replace(m: re.Match) -> str:
             vin = m.group(0)
-            return self.placeholder if is_valid_vin(vin) else vin
+            self.placeholder if is_valid_vin(vin) else vin
 
         return re.sub(self.pattern, _replace, text)

@@ -3,8 +3,9 @@ Rule that mask IPv4 and IPv6 addresses.
 """
 
 import re
+from typing import Optional, Callable
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from .base_rule import BaseRule
 
 
 class IpRule(BaseRule):
@@ -66,7 +67,9 @@ class IpRule(BaseRule):
         # Compile the pattern for direct use in ``apply``.
         self._compiled_regex = re.compile(self._IP_REGEX, flags=re.VERBOSE)
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> str:
         """
         Replace each address with ``{{IP}}`` and, if a port is present,
         replace it with ``{{PORT}}`` while preserving the separating colon.
@@ -74,10 +77,19 @@ class IpRule(BaseRule):
 
         def replacer(match: re.Match) -> str:
             # Always replace the address part
-            result = self._IP_PLACEHOLDER
+            addr = match.group("addr")
+            result = (
+                anonymizer_fn(addr, "IP") if anonymizer_fn else self._IP_PLACEHOLDER
+            )
             # If a port was captured, append ``:{{PORT}}``
-            if match.group("port"):
-                result = f"{result}:{self._PORT_PLACEHOLDER}"
+            port = match.group("port")
+            if port:
+                port_replacement = (
+                    anonymizer_fn(port, "PORT")
+                    if anonymizer_fn
+                    else self._PORT_PLACEHOLDER
+                )
+                result = f"{result}:{port_replacement}"
             return result
 
         return self._compiled_regex.sub(replacer, text)

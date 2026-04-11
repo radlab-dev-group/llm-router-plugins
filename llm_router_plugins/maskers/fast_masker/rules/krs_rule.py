@@ -3,10 +3,10 @@ Rule that masks valid Polish KRS numbers.
 """
 
 import re
-from typing import Match
+from typing import Optional, Callable, Match
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
-from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_krs
+from .base_rule import BaseRule
+from ..utils.validators import is_valid_krs
 
 
 class KrsRule(BaseRule):
@@ -40,7 +40,9 @@ class KrsRule(BaseRule):
             self._KRS_REGEX, flags=re.IGNORECASE | re.VERBOSE
         )
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> str:
         """
         Replace each *valid* KRS occurrence with the placeholder.
         Invalid KRS strings (wrong checksum) are left untouched.
@@ -48,6 +50,6 @@ class KrsRule(BaseRule):
 
         def _replacer(match: Match) -> str:
             raw_krs = match.group("krs")
-            return self._PLACEHOLDER if is_valid_krs(raw_krs) else raw_krs
+            self._PLACEHOLDER if is_valid_krs(raw_krs) else raw_krs
 
         return self._compiled_regex.sub(_replacer, text)

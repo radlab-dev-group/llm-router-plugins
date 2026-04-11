@@ -4,7 +4,7 @@ Rule that masks Polish health‑insurance identifiers (NFZ).
 
 import re
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from .base_rule import BaseRule
 
 
 class HealthIdRule(BaseRule):

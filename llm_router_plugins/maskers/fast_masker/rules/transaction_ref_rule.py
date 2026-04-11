@@ -3,9 +3,10 @@ Rule that masks generic transaction reference strings.
 """
 
 import re
+from typing import Optional, Callable
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
-from llm_router_plugins.maskers.fast_masker.utils.validators import (
+from .base_rule import BaseRule
+from ..utils.validators import (
     is_possible_transaction_ref,
 )
 
@@ -28,9 +29,11 @@ class TransactionRefRule(BaseRule):
             flags=re.IGNORECASE | re.VERBOSE,
         )
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> str:
         def _replace(m: re.Match) -> str:
             ref = m.group(0)
-            return self.placeholder if is_possible_transaction_ref(ref) else ref
+            self.placeholder if is_possible_transaction_ref(ref) else ref
 
         return re.sub(self.pattern, _replace, text)

@@ -3,9 +3,10 @@ Rule that masks SSL/TLS certificate serial numbers.
 """
 
 import re
+from typing import Optional, Callable
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
-from llm_router_plugins.maskers.fast_masker.utils.validators import (
+from .base_rule import BaseRule
+from ..utils.validators import (
     is_valid_ssl_serial,
 )
 
@@ -29,7 +30,9 @@ class SslCertRule(BaseRule):
             flags=re.VERBOSE,
         )
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> str:
         def _replace(m: re.Match) -> str:
             return (
                 self.placeholder if is_valid_ssl_serial(m.group(0)) else m.group(0)
