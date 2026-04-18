@@ -79,13 +79,15 @@ class IpRule(BaseRule):
             # Always replace the address part
             addr = match.group("addr")
             result = (
-                anonymizer_fn(addr, "IP") if anonymizer_fn else self._IP_PLACEHOLDER
+                "{" + anonymizer_fn(addr, "IP") + "}"
+                if anonymizer_fn
+                else self._IP_PLACEHOLDER
             )
             # If a port was captured, append ``:{{PORT}}``
             port = match.group("port")
             if port:
                 port_replacement = (
-                    anonymizer_fn(port, "PORT")
+                    "{" + anonymizer_fn(port, "PORT") + "}"
                     if anonymizer_fn
                     else self._PORT_PLACEHOLDER
                 )

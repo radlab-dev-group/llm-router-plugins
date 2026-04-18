@@ -12,10 +12,11 @@ exposes a default rule set (``ALL_MASKER_RULES``) that can be overridden
 by supplying a custom list to the constructor.
 """
 
-from typing import List, Optional, Dict
-import time
 import re
+import datetime
 import pandas as pd
+
+from typing import List
 
 from ..rules import *
 from .rule_interface import MaskerRuleI
@@ -30,45 +31,38 @@ class FastMasker(MaskerPayloadTraveler):
     # Rules ordered from most specific/certain to least specific
     # Priority: checksum-validated > structured formats > pattern-based
     __ALL_MASKER_RULES = [
-        # 1. HIGHEST CERTAINTY - Checksum validated identifiers
-        CreditCardRule(),  # Luhn checksum
-        VinRule(),  # VIN checksum (ISO 3779)
-        PeselTaggedRule() if "PeselTaggedRule" in globals() else None,
+        EmailRule(),  # Email addresses (before URLs!)
+        UrlRule(),  # URLs and domains
+        IpRule(),  # IP addresses with optional ports
+        PeselTaggedRule(),  # PESEL: + PESEL with checksum
         PeselRule(),  # PESEL with checksum
         NipRule(),  # NIP with checksum
         KrsRule(),  # KRS with checksum
         RegonRule(),  # REGON with checksum
-        # 2. HIGH CERTAINTY - Strict formats with validation
-        NrbRule(),  # 26 digits (bank account)
+        DateWordRule(),  # Textual dates
+        DateNumberRule(),  # Numeric dates
+        MoneyRule(),  # Amounts with currency
+        VinRule(),  # VIN checksum (ISO 3779)
+        PhoneInternationalRule(),  # + prefix with country code
+        PhoneRule(),  # Local phone (9 digits),
+        CarPlateRule(),  # License plates
+        PostalCodeRule(),  # DD-DDD format
         MacAddressRule(),  # MAC address format
+        CreditCardRule(),  # Luhn checksum
+        NrbRule(),  # 26 digits (bank account)
+        BankAccountRule(),  # Polish IBAN
         PassportRule(),  # 2 letters + 7 digits
         IdCardRule(),  # 3 letters + 6 digits
         SsnRule(),  # SSN format AAA-GG-SSSS
-        # 3. MEDIUM-HIGH - International phone numbers (more specific than local)
-        PhoneInternationalRule(),  # + prefix with country code
-        # 4. MEDIUM - Well-structured formats
-        EmailRule(),  # Email addresses (before URLs!)
-        UrlRule(),  # URLs and domains
-        IpRule(),  # IP addresses with optional ports
-        BankAccountRule(),  # Polish IBAN
-        # 5. MEDIUM-LOW - Business identifiers with structure
+        HealthIdRule(),  # NFZ with slash
+        SslCertRule(),  # 16-40 hex chars
         JwtRule(),  # JWT tokens (3 parts)
         InvoiceNumberRule(),  # FV/INV patterns
         OrderNumberRule(),  # ORD patterns
         TransactionRefRule(),  # Transaction IDs
-        # 6. LOWER CERTAINTY - Pattern-based with context
-        DateWordRule(),  # Textual dates
-        DateNumberRule(),  # Numeric dates
-        MoneyRule(),  # Amounts with currency
-        # 7. FORMAT-BASED - Specific patterns
-        PostalCodeRule(),  # DD-DDD format
-        HealthIdRule(),  # NFZ with slash
-        CarPlateRule(),  # License plates
         SimCardRule(),  # 19-20 digit ICCID
-        SslCertRule(),  # 16-40 hex chars
-        # 8. LOWEST CERTAINTY - Generic patterns (potentially noisy)
-        PhoneRule(),  # Local phone (9 digits)
         SocialIdRule(),  # fbid only
+        EuVatRule(),  # fbid only
     ]
 
     ALL_MASKER_RULES = [cls for cls in __ALL_MASKER_RULES if cls]
@@ -77,7 +71,6 @@ class FastMasker(MaskerPayloadTraveler):
         self.rules = rules or self.ALL_MASKER_RULES
         self.mapping = {}  # original -> pseudo
         self.reverse_mapping = {}  # pseudo -> original
-        self.timestamp = int(time.time())
 
     def _get_pseudo(self, value: str, tag_type: str = None) -> str:
         # We should NOT strip punctuation from the value we are replacing in text
@@ -89,7 +82,8 @@ class FastMasker(MaskerPayloadTraveler):
 
         # Use the tag_type if provided, otherwise default to "ENTITY"
         base_tag = tag_type or "ENTITY"
-        pseudo = f"{base_tag}_{self.timestamp}_{len(self.mapping) + 1}"
+        dt_str = int(datetime.datetime.now().timestamp() * 1_000_000)
+        pseudo = f"{base_tag}_{dt_str}_{len(self.mapping) + 1}"
         # If it's a simple value (not inside text), we might want a simpler tag
         # but for consistency with the traveler, we use the same.
         self.mapping[val_norm] = pseudo

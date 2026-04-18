@@ -2,8 +2,8 @@
 Optional helper base class for rules that share common behaviour.
 """
 
-import abc
 import re
+import abc
 from typing import Pattern, Optional, Callable
 
 from ..core.rule_interface import MaskerRuleI
@@ -31,6 +31,7 @@ class BaseRule(MaskerRuleI, abc.ABC):
         flags: int, optional
             Flags passed to :func:`re.compile`. Default is ``0``.
         """
+        # self.regex = regex
         self.pattern = re.compile(regex, flags)
         self.placeholder = placeholder
 

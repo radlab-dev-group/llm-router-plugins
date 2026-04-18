@@ -34,7 +34,7 @@ class PostalCodeRule(BaseRule):
         (?<!\d)                     # not preceded by another digit
         (?:[_*]+)?                  # optional leading markdown markers
         (?P<code>
-            \d{2}-?\d{3}            # two digits, optional hyphen, three digits
+            \d{2}-\d{3}            # two digits, optional hyphen, three digits
         )
         (?:[_*]+)?                  # optional trailing markdown markers
         (?!\d)                      # not followed by another digit
@@ -63,7 +63,7 @@ class PostalCodeRule(BaseRule):
         def _replacer(match: Match) -> str:
             # No additional validation needed – the regex guarantees correct format.
             return (
-                anonymizer_fn(match.group(0), self.tag_type)
+                "{" + anonymizer_fn(match.group(0), self.tag_type) + "}"
                 if anonymizer_fn
                 else self._PLACEHOLDER
             )

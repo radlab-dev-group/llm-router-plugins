@@ -1,5 +1,14 @@
 """
 Rule that masks valid Polish KRS numbers.
+
+Supported formats:
+* Plain ``1234567890`` (10 digits)
+* Formatted with optional hyphens **or** spaces, e.g.
+  ``123-456-78-90`` or ``123 456 78 90`` or mixed ``123-456 78-90``
+
+The rule validates the checksum via :func:`is_valid_krs` and replaces
+**valid** numbers with ``{{KRS}}``.  If an ``anonymizer_fn`` is supplied,
+its result (wrapped in ``{}``) is used instead of the static placeholder.
 """
 
 import re
@@ -11,45 +20,62 @@ from ..utils.validators import is_valid_krs
 
 class KrsRule(BaseRule):
     """
-    Detects KRS numbers (plain ``1234567890`` or formatted ``123-456-78-90``),
-    validates the checksum and replaces **only** the valid ones with
-    ``{{KRS}}``.
+    Detects Polish KRS numbers, validates the checksum and masks them.
     """
 
-    # Named group ``krs`` captures the whole match (including optional hyphens)
-    _KRS_REGEX = r"""
+    # Named group ``krs`` captures the whole match (including optional
+    # hyphens or spaces).  The separator may be ``-`` or a single space;
+    # it is optional between each block.
+    _REGEX = r"""
         \b
         (?P<krs>
-            (?:\d{3}-?\d{3}-?\d{2}-?\d{2})   # formatted with optional hyphens
+            (?:\d{3}[-\s]?\d{3}[-\s]?\d{2}[-\s]?\d{2})   # formatted with hyphens/spaces
             |
-            \d{10}                           # plain 10‑digit string
+            \d{10}                                        # plain 10‑digit string
         )
         \b
     """
 
     _PLACEHOLDER = "{{KRS}}"
 
-    def __init__(self):
+    # Pre‑compile for performance.
+    _COMPILED = re.compile(_REGEX, flags=re.IGNORECASE | re.VERBOSE)
+
+    def __init__(self) -> None:
         super().__init__(
-            regex=self._KRS_REGEX,
+            regex=self._REGEX,
             placeholder=self._PLACEHOLDER,
             flags=re.IGNORECASE | re.VERBOSE,
         )
-        # Pre‑compile the pattern for fast reuse in ``apply``.
-        self._compiled_regex = re.compile(
-            self._KRS_REGEX, flags=re.IGNORECASE | re.VERBOSE
-        )
 
     def apply(
-        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+        self,
+        text: str,
+        anonymizer_fn: Optional[Callable[[str, str], str]] = None,
     ) -> str:
         """
         Replace each *valid* KRS occurrence with the placeholder.
-        Invalid KRS strings (wrong checksum) are left untouched.
+
+        Parameters
+        ----------
+        text :
+            Input string that may contain KRS numbers.
+        anonymizer_fn :
+            Optional callable ``fn(krs: str, tag_type: str) -> str``.
+            If supplied, its return value is used (wrapped in ``{}``) instead of
+            ``{{KRS}}``.
         """
 
         def _replacer(match: Match) -> str:
             raw_krs = match.group("krs")
-            self._PLACEHOLDER if is_valid_krs(raw_krs) else raw_krs
+            if is_valid_krs(raw_krs):
+                replacement = (
+                    "{" + anonymizer_fn(raw_krs, self.tag_type) + "}"
+                    if anonymizer_fn
+                    else self.placeholder
+                )
+                return replacement
+            # Invalid KRS – leave original text untouched.
+            return raw_krs
 
-        return self._compiled_regex.sub(_replacer, text)
+        return self._COMPILED.sub(_replacer, text)

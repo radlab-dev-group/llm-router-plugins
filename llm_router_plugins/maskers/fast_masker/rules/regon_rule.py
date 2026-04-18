@@ -71,7 +71,7 @@ class RegonRule(BaseRule):
             raw_regon = match.group("reg")
             if is_valid_regon(raw_regon):
                 replacement = (
-                    anonymizer_fn(raw_regon, self.tag_type)
+                    "{" + anonymizer_fn(raw_regon, self.tag_type) + "}"
                     if anonymizer_fn
                     else self.placeholder
                 )

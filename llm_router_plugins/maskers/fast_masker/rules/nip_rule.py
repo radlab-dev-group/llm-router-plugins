@@ -82,7 +82,7 @@ class NipRule(BaseRule):
             raw_nip = match.group("digits")
             if _is_valid_nip(raw_nip):
                 replacement = (
-                    anonymizer_fn(raw_nip, self.tag_type)
+                    "{" + anonymizer_fn(raw_nip, self.tag_type) + "}"
                     if anonymizer_fn
                     else self._PLACEHOLDER
                 )

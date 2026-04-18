@@ -85,7 +85,7 @@ class BankAccountRule(BaseRule):
             # exact 28‑character IBAN structure (with optional masking) and
             # therefore will not match shorter numbers like ``64001000152``.
             return (
-                anonymizer_fn(match.group(0), self.tag_type)
+                "{" + anonymizer_fn(match.group(0), self.tag_type) + "}"
                 if anonymizer_fn
                 else self._PLACEHOLDER
             )

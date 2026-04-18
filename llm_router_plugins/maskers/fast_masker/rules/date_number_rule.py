@@ -1,3 +1,17 @@
+"""
+Rule that masks dates written in numeric form.
+
+Supported formats (separator may be ``.``, ``-``, ``/`` or whitespace‑wrapped
+variants):
+
+* ``YYYY.MM.DD``   – year‑month‑day
+* ``DD.MM.YYYY``   – day‑month‑year
+
+All matches are replaced with ``{{DATE}}``.  If an ``anonymizer_fn`` is
+provided, its result (wrapped in ``{}``) is used instead of the static
+placeholder, matching the behaviour of the other masking rules.
+"""
+
 import re
 from typing import Optional, Callable
 
@@ -6,22 +20,14 @@ from .base_rule import BaseRule
 
 class DateNumberRule(BaseRule):
     """
-    Detects dates in the following numeric forms (separator may be ``.``, ``-``,
-    ``/`` or whitespace‑wrapped variants):
-
-    * ``YYYY.MM.DD``   – year‑month‑day
-    * ``DD.MM.YYYY``   – day‑month‑year
-
-    Whitespace may appear accidentally around the separators, e.g.
-    ``2023 . 04 . 05`` or ``05 - 04 - 2023``.  All matches are replaced with
-    ``{{DATE}}``.
+    Detects numeric dates and masks them.
     """
 
     # Regex with two alternatives:
     #   1) YYYY‑MM‑DD
     #   2) DD‑MM‑YYYY
     # Separators: dot, dash, slash, optionally surrounded by whitespace.
-    REGEX = (
+    _REGEX = (
         r"(?<!\d)"  # not preceded by a digit
         r"(?:"
         # 1) YYYY‑MM‑DD
@@ -37,21 +43,11 @@ class DateNumberRule(BaseRule):
         r"(?!\d)"  # not followed by a digit
     )
 
-    _MASKING_TAG_PLACEHOLDER = "{{DATE_NUM}}"
+    _PLACEHOLDER = "{{DATE}}"
 
-    _DATE_REGEX = re.compile(REGEX)
-
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__(
-            regex=DateNumberRule.REGEX,
-            placeholder=DateNumberRule._MASKING_TAG_PLACEHOLDER,
+            regex=self._REGEX,
+            placeholder=self._PLACEHOLDER,
+            flags=re.IGNORECASE | re.VERBOSE,
         )
-
-    def apply(
-        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
-    ) -> str:
-        """
-        Replace every detected date (any of the supported formats) with the
-        placeholder.
-        """
-        return self._DATE_REGEX.sub(self._MASKING_TAG_PLACEHOLDER, text)

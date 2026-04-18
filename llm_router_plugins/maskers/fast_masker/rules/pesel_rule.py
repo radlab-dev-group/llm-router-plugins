@@ -40,7 +40,7 @@ class PeselRule(BaseRule):
             pesel = match.group("pesel")
             if is_valid_pesel(pesel):
                 replacement = (
-                    anonymizer_fn(pesel, self.tag_type)
+                    "{" + anonymizer_fn(pesel, self.tag_type) + "}"
                     if anonymizer_fn
                     else self.placeholder
                 )

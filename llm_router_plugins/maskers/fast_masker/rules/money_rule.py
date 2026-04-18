@@ -119,7 +119,7 @@ class MoneyRule(BaseRule):
             # The regex guarantees that a currency identifier is present, so we
             # can safely replace the whole match with the placeholder.
             return (
-                anonymizer_fn(match.group(0), self.tag_type)
+                "{" + anonymizer_fn(match.group(0), self.tag_type) + "}"
                 if anonymizer_fn
                 else self._PLACEHOLDER
             )

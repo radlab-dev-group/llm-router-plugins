@@ -35,7 +35,7 @@ class PeselTaggedRule(BaseRule):
             if is_valid_pesel(pesel):
                 # Keep the leading label, replace only the number
                 replacement = (
-                    anonymizer_fn(pesel, self.tag_type)
+                    "{" + anonymizer_fn(pesel, self.tag_type) + "}"
                     if anonymizer_fn
                     else self.placeholder
                 )
