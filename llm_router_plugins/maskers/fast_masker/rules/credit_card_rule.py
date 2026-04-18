@@ -14,7 +14,7 @@ The rule:
 """
 
 import re
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple, List
 
 from .base_rule import BaseRule
 from ..utils.validators import is_valid_credit_card
@@ -48,7 +48,7 @@ class CreditCardRule(BaseRule):
         self,
         text: str,
         anonymizer_fn: Optional[Callable[[str, str], str]] = None,
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* credit‑card occurrence with the placeholder.
 
@@ -61,17 +61,20 @@ class CreditCardRule(BaseRule):
             If supplied, its return value is used (wrapped in ``{}``) instead of
             ``{{CREDIT_CARD}}``.
         """
+        mappings = []
 
         def _replacer(match: re.Match) -> str:
             candidate = match.group(0)
             if is_valid_credit_card(candidate):
-                replacement = (
-                    "{" + anonymizer_fn(candidate, self.tag_type) + "}"
-                    if anonymizer_fn
-                    else self.placeholder
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(candidate, self.tag_type)
+                    mappings.append({"original": candidate, "replacement": pseudo})
+                    return "{" + pseudo + "}"
+                mappings.append(
+                    {"original": candidate, "replacement": self.placeholder}
                 )
-                return replacement
+                return self.placeholder
             # Invalid number – leave it unchanged.
             return candidate
 
-        return self._COMPILED.sub(_replacer, text)
+        return self._COMPILED.sub(_replacer, text), mappings

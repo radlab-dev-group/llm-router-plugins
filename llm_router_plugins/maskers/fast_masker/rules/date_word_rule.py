@@ -16,7 +16,7 @@ The rule:
 """
 
 import re
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple, List
 
 from .base_rule import BaseRule
 
@@ -94,7 +94,7 @@ class DateWordRule(BaseRule):
         self,
         text: str,
         anonymizer_fn: Optional[Callable[[str, str], str]] = None,
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace any recognised textual date with the placeholder.
 
@@ -107,13 +107,17 @@ class DateWordRule(BaseRule):
             If supplied, its return value is used (wrapped in ``{}``) instead
             of ``{{DATE}}``.
         """
+        mappings = []
 
         def _replacer(match: re.Match) -> str:
             original = match.group(0)
             if anonymizer_fn:
                 # Custom anonymisation – wrap the result in curly braces.
-                return "{" + anonymizer_fn(original, self.tag_type) + "}"
+                pseudo = anonymizer_fn(original, self.tag_type)
+                mappings.append({"original": original, "replacement": pseudo})
+                return "{" + pseudo + "}"
             # Default behaviour – static placeholder.
+            mappings.append({"original": original, "replacement": self.placeholder})
             return self.placeholder
 
-        return self._COMPILED.sub(_replacer, text)
+        return self._COMPILED.sub(_replacer, text), mappings

@@ -3,7 +3,7 @@ Rule that masks valid Polish PESEL numbers.
 """
 
 import re
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple, List
 
 from .base_rule import BaseRule
 from ..utils.validators import is_valid_pesel
@@ -29,24 +29,29 @@ class PeselRule(BaseRule):
 
     def apply(
         self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* PESEL occurrence with the placeholder or pseudonym.
 
         Invalid PESEL strings (wrong checksum) are left untouched.
         """
+        mappings = []
 
         def replacer(match: re.Match) -> str:
             pesel = match.group("pesel")
             if is_valid_pesel(pesel):
-                replacement = (
-                    "{" + anonymizer_fn(pesel, self.tag_type) + "}"
-                    if anonymizer_fn
-                    else self.placeholder
-                )
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(pesel, self.tag_type)
+                    mappings.append({"original": pesel, "replacement": pseudo})
+                    replacement = "{" + pseudo + "}"
+                else:
+                    mappings.append(
+                        {"original": pesel, "replacement": self.placeholder}
+                    )
+                    replacement = self.placeholder
                 # We replace the numeric part inside the full match (including markdown)
                 full_match = match.group(0)
                 return full_match.replace(pesel, replacement)
             return match.group(0)
 
-        return self.pattern.sub(replacer, text)
+        return self.pattern.sub(replacer, text), mappings

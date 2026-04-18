@@ -11,7 +11,7 @@ The rule:
 """
 
 import re
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple, List
 
 from .base_rule import BaseRule
 from ..utils.validators import is_valid_sim_iccid
@@ -45,20 +45,21 @@ class SimCardRule(BaseRule):
         self,
         text: str,
         anonymizer_fn: Optional[Callable[[str, str], str]] = None,
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* ICCID occurrence with the placeholder.
         """
+        mappings = []
 
         def _replacer(match: re.Match) -> str:
             iccid = match.group(0)
             if is_valid_sim_iccid(iccid):
-                replacement = (
-                    "{" + anonymizer_fn(iccid, self.tag_type) + "}"
-                    if anonymizer_fn
-                    else self.placeholder
-                )
-                return replacement
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(iccid, self.tag_type)
+                    mappings.append({"original": iccid, "replacement": pseudo})
+                    return "{" + pseudo + "}"
+                mappings.append({"original": iccid, "replacement": self.placeholder})
+                return self.placeholder
             return iccid
 
-        return self._COMPILED.sub(_replacer, text)
+        return self._COMPILED.sub(_replacer, text), mappings

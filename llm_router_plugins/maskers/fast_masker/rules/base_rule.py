@@ -4,7 +4,7 @@ Optional helper base class for rules that share common behaviour.
 
 import re
 import abc
-from typing import Pattern, Optional, Callable
+from typing import Pattern, Optional, Callable, Tuple, List
 
 from ..core.rule_interface import MaskerRuleI
 
@@ -41,21 +41,25 @@ class BaseRule(MaskerRuleI, abc.ABC):
 
     def apply(
         self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace all occurrences of ``self.pattern`` in *text* with the
         configured placeholder or a dynamic pseudonym.
 
         Returns
         -------
-        str
-            The transformed text.
+        Tuple[str, List]
+            The transformed text and mappings.
         """
+        mappings = []
 
         def replacer(match: re.Match) -> str:
             val = match.group(0)
             if anonymizer_fn:
-                return "{" + anonymizer_fn(val, self.tag_type) + "}"
+                pseudo = anonymizer_fn(val, self.tag_type)
+                mappings.append({"original": val, "replacement": pseudo})
+                return "{" + pseudo + "}"
+            mappings.append({"original": val, "replacement": self.placeholder})
             return self.placeholder
 
-        return self.pattern.sub(replacer, text)
+        return self.pattern.sub(replacer, text), mappings

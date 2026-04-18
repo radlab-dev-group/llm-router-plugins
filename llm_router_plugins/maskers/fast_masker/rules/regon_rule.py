@@ -20,7 +20,7 @@ regular expression for speed).
 """
 
 import re
-from typing import Optional, Callable, Match
+from typing import Optional, Callable, Match, Tuple, List
 
 from .base_rule import BaseRule
 from ..utils.validators import is_valid_regon
@@ -61,21 +61,26 @@ class RegonRule(BaseRule):
 
     def apply(
         self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* REGON occurrence with the placeholder.
         Invalid numbers are left untouched.
         """
+        mappings = []
 
         def _replacer(match: Match) -> str:
             raw_regon = match.group("reg")
             if is_valid_regon(raw_regon):
-                replacement = (
-                    "{" + anonymizer_fn(raw_regon, self.tag_type) + "}"
-                    if anonymizer_fn
-                    else self.placeholder
-                )
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(raw_regon, self.tag_type)
+                    mappings.append({"original": raw_regon, "replacement": pseudo})
+                    replacement = "{" + pseudo + "}"
+                else:
+                    mappings.append(
+                        {"original": raw_regon, "replacement": self.placeholder}
+                    )
+                    replacement = self.placeholder
                 return match.group(0).replace(raw_regon, replacement)
             return match.group(0)
 
-        return self.pattern.sub(_replacer, text)
+        return self.pattern.sub(_replacer, text), mappings

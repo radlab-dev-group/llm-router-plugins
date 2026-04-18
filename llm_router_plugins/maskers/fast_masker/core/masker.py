@@ -16,7 +16,7 @@ import re
 import datetime
 import pandas as pd
 
-from typing import List
+from typing import List, Tuple, Dict
 
 from ..rules import *
 from .rule_interface import MaskerRuleI
@@ -45,7 +45,7 @@ class FastMasker(MaskerPayloadTraveler):
         VinRule(),  # VIN checksum (ISO 3779)
         PhoneInternationalRule(),  # + prefix with country code
         PhoneRule(),  # Local phone (9 digits),
-        CarPlateRule(),  # License plates
+        # CarPlateRule(),  # License plates
         PostalCodeRule(),  # DD-DDD format
         MacAddressRule(),  # MAC address format
         CreditCardRule(),  # Luhn checksum
@@ -90,30 +90,35 @@ class FastMasker(MaskerPayloadTraveler):
         self.reverse_mapping[pseudo] = val_norm
         return pseudo
 
-    def mask(self, text: str) -> str:
+    def mask(self, text: str) -> Tuple[str, Dict]:
         """
         Apply all configured rules to a plain‑text string with de-anonymization support.
         """
         # Ensure we are working with a string
         if not isinstance(text, str):
-            return text
+            return text, {}
 
         # If the text is already a pseudonym from a previous rule, don't mask it further
         if re.fullmatch(r"[A-Z]+_\d+_\d+", text):
-            return text
+            return text, {}
 
         result = text
+        all_mappings = []
         # List of rules to apply
         for rule in self.rules:
             # We want to avoid masking already masked parts in a larger text.
             # This is tricky with simple regex replacement.
             # For now, let's at least avoid the common case where a rule
             # matches parts of our own pseudonyms (like NIP matching digits in the timestamp).
-            result = rule.apply(result, anonymizer_fn=self._get_pseudo)
+            [result, mappings] = rule.apply(result, anonymizer_fn=self._get_pseudo)
+            all_mappings.extend(mappings)
 
-        return result
+        mappings = {}
+        for m in all_mappings:
+            mappings[m["replacement"]] = m["original"]
+        return result, mappings
 
-    def _mask_text(self, text: str) -> str:
+    def _mask_text(self, text: str) -> Tuple[str, Dict]:
         """
         Implements the traveler interface by calling the mask method.
         """

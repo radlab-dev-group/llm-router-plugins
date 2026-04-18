@@ -13,7 +13,7 @@ The rule:
 """
 
 import re
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple, List
 
 from .base_rule import BaseRule
 from ..utils.validators import is_valid_car_plate
@@ -52,7 +52,7 @@ class CarPlateRule(BaseRule):
         self,
         text: str,
         anonymizer_fn: Optional[Callable[[str, str], str]] = None,
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* car‑plate occurrence with the placeholder.
 
@@ -65,17 +65,18 @@ class CarPlateRule(BaseRule):
             supplied, its return value is used (wrapped in ``{}``) instead of
             ``{{CAR_PLATE}}``.
         """
+        mappings = []
 
         def _replacer(match: re.Match) -> str:
             plate = match.group(0)
             if is_valid_car_plate(plate):
-                replacement = (
-                    "{" + anonymizer_fn(plate, self.tag_type) + "}"
-                    if anonymizer_fn
-                    else self.placeholder
-                )
-                return replacement
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(plate, self.tag_type)
+                    mappings.append({"original": plate, "replacement": pseudo})
+                    return "{" + pseudo + "}"
+                mappings.append({"original": plate, "replacement": self.placeholder})
+                return self.placeholder
             # Invalid plate – keep original text.
             return plate
 
-        return self.pattern.sub(_replacer, text)
+        return self.pattern.sub(_replacer, text), mappings

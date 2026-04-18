@@ -12,7 +12,7 @@ The rule:
 """
 
 import re
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple, List
 
 from .base_rule import BaseRule
 from ..utils.validators import is_valid_nrb
@@ -48,7 +48,7 @@ class NrbRule(BaseRule):
         self,
         text: str,
         anonymizer_fn: Optional[Callable[[str, str], str]] = None,
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* NRB occurrence with the placeholder.
 
@@ -61,17 +61,20 @@ class NrbRule(BaseRule):
             If supplied, its return value is used (wrapped in ``{}``) instead of
             ``{{NRB}}``.
         """
+        mappings = []
 
         def _replacer(match: re.Match) -> str:
             candidate = match.group(0)
             if is_valid_nrb(candidate):
-                replacement = (
-                    "{" + anonymizer_fn(candidate, self.tag_type) + "}"
-                    if anonymizer_fn
-                    else self.placeholder
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(candidate, self.tag_type)
+                    mappings.append({"original": candidate, "replacement": pseudo})
+                    return "{" + pseudo + "}"
+                mappings.append(
+                    {"original": candidate, "replacement": self.placeholder}
                 )
-                return replacement
+                return self.placeholder
             # Invalid NRB – keep original text.
             return candidate
 
-        return self._COMPILED.sub(_replacer, text)
+        return self._COMPILED.sub(_replacer, text), mappings

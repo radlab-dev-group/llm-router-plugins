@@ -12,7 +12,7 @@ The rule:
 """
 
 import re
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple, List
 
 from .base_rule import BaseRule
 from ..utils.validators import is_valid_ssl_serial
@@ -45,7 +45,7 @@ class SslCertRule(BaseRule):
         self,
         text: str,
         anonymizer_fn: Optional[Callable[[str, str], str]] = None,
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* SSL certificate serial with the placeholder.
 
@@ -58,17 +58,20 @@ class SslCertRule(BaseRule):
             If supplied, its return value is used (wrapped in ``{}``) instead of
             ``{{SSL_CERT}}``.
         """
+        mappings = []
 
         def _replacer(match: re.Match) -> str:
             serial = match.group(0)
             if is_valid_ssl_serial(serial):
-                replacement = (
-                    "{" + anonymizer_fn(serial, self.tag_type) + "}"
-                    if anonymizer_fn
-                    else self.placeholder
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(serial, self.tag_type)
+                    mappings.append({"original": serial, "replacement": pseudo})
+                    return "{" + pseudo + "}"
+                mappings.append(
+                    {"original": serial, "replacement": self.placeholder}
                 )
-                return replacement
+                return self.placeholder
             # Invalid serial – keep original text.
             return serial
 
-        return self._COMPILED.sub(_replacer, text)
+        return self._COMPILED.sub(_replacer, text), mappings

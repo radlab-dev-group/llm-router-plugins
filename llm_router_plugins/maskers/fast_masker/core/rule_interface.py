@@ -3,7 +3,7 @@ Definition of the rule interface that every masking rule must implement.
 """
 
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple, List
 
 
 class MaskerRuleI(ABC):
@@ -18,9 +18,9 @@ class MaskerRuleI(ABC):
     @abstractmethod
     def apply(
         self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
-        Apply the rule to *text* and return the transformed string.
+        Apply the rule to *text* and return the transformed string and mappings.
 
         Parameters
         ----------
@@ -32,7 +32,7 @@ class MaskerRuleI(ABC):
 
         Returns
         -------
-        str
-            The text after the rule has been applied.
+        Tuple[str, List]
+            The text after the rule has been applied and a list of mappings.
         """
         raise NotImplementedError

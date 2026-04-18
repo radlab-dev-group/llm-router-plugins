@@ -13,7 +13,7 @@ The rule:
 """
 
 import re
-from typing import Optional, Callable, Match
+from typing import Optional, Callable, Match, Tuple, List
 
 from .base_rule import BaseRule
 from ..utils.validators import is_valid_mac
@@ -47,7 +47,7 @@ class MacAddressRule(BaseRule):
         self,
         text: str,
         anonymizer_fn: Optional[Callable[[str, str], str]] = None,
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* MAC address with the placeholder.
 
@@ -60,17 +60,18 @@ class MacAddressRule(BaseRule):
             If supplied, its return value is used (wrapped in ``{}``) instead of
             ``{{MAC_ADDRESS}}``.
         """
+        mappings = []
 
         def _replacer(match: Match) -> str:
             mac = match.group(0)
             if is_valid_mac(mac):
-                replacement = (
-                    "{" + anonymizer_fn(mac, self.tag_type) + "}"
-                    if anonymizer_fn
-                    else self.placeholder
-                )
-                return replacement
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(mac, self.tag_type)
+                    mappings.append({"original": mac, "replacement": pseudo})
+                    return "{" + pseudo + "}"
+                mappings.append({"original": mac, "replacement": self.placeholder})
+                return self.placeholder
             # Invalid MAC – leave original text unchanged.
             return mac
 
-        return self._COMPILED.sub(_replacer, text)
+        return self._COMPILED.sub(_replacer, text), mappings

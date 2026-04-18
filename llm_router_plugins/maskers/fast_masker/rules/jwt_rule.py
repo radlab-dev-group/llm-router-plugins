@@ -11,7 +11,7 @@ The rule:
 """
 
 import re
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple, List
 
 from .base_rule import BaseRule
 from ..utils.validators import is_possible_jwt
@@ -44,7 +44,7 @@ class JwtRule(BaseRule):
         self,
         text: str,
         anonymizer_fn: Optional[Callable[[str, str], str]] = None,
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* JWT occurrence with the placeholder.
 
@@ -57,17 +57,18 @@ class JwtRule(BaseRule):
             If supplied, its return value is used (wrapped in ``{}``) instead of
             ``{{JWT}}``.
         """
+        mappings = []
 
         def _replacer(match: re.Match) -> str:
             token = match.group(0)
             if is_possible_jwt(token):
-                replacement = (
-                    "{" + anonymizer_fn(token, self.tag_type) + "}"
-                    if anonymizer_fn
-                    else self.placeholder
-                )
-                return replacement
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(token, self.tag_type)
+                    mappings.append({"original": token, "replacement": pseudo})
+                    return "{" + pseudo + "}"
+                mappings.append({"original": token, "replacement": self.placeholder})
+                return self.placeholder
             # Not a valid JWT – keep original text.
             return token
 
-        return self._COMPILED.sub(_replacer, text)
+        return self._COMPILED.sub(_replacer, text), mappings

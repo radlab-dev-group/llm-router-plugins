@@ -13,7 +13,7 @@ The placeholder used for masking is ``{{STREET}}``.
 """
 
 import re
-from typing import Match
+from typing import Match, Tuple, List, Optional, Callable
 
 from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
 
@@ -64,13 +64,22 @@ class StreetNameRule(BaseRule):
             self._REGEX, flags=re.IGNORECASE | re.VERBOSE
         )
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> Tuple[str, List]:
         """
         Replace each detected street name (with optional house number) with the
         ``{{STREET}}`` placeholder.
         """
+        mappings = []
 
         def _replacer(match: Match) -> str:
-            return self._PLACEHOLDER
+            val = match.group(0)
+            if anonymizer_fn:
+                pseudo = anonymizer_fn(val, self.tag_type)
+                mappings.append({"original": val, "replacement": pseudo})
+                return "{" + pseudo + "}"
+            mappings.append({"original": val, "replacement": self.placeholder})
+            return self.placeholder
 
-        return self._compiled_regex.sub(_replacer, text)
+        return self._compiled_regex.sub(_replacer, text), mappings

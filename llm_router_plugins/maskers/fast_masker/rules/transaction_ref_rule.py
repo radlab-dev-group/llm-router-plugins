@@ -13,7 +13,7 @@ The rule:
 """
 
 import re
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple, List
 
 from .base_rule import BaseRule
 from ..utils.validators import is_possible_transaction_ref
@@ -46,7 +46,7 @@ class TransactionRefRule(BaseRule):
         self,
         text: str,
         anonymizer_fn: Optional[Callable[[str, str], str]] = None,
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* transaction reference with the placeholder.
 
@@ -59,17 +59,18 @@ class TransactionRefRule(BaseRule):
             If supplied, its return value is used (wrapped in ``{}``) instead of
             ``{{TRANSACTION_REF}}``.
         """
+        mappings = []
 
         def _replacer(match: re.Match) -> str:
             ref = match.group(0)
             if is_possible_transaction_ref(ref):
-                replacement = (
-                    "{" + anonymizer_fn(ref, self.tag_type) + "}"
-                    if anonymizer_fn
-                    else self.placeholder
-                )
-                return replacement
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(ref, self.tag_type)
+                    mappings.append({"original": ref, "replacement": pseudo})
+                    return "{" + pseudo + "}"
+                mappings.append({"original": ref, "replacement": self.placeholder})
+                return self.placeholder
             # Invalid reference – keep original text.
             return ref
 
-        return self._COMPILED.sub(_replacer, text)
+        return self._COMPILED.sub(_replacer, text), mappings

@@ -13,7 +13,7 @@ The rule:
 """
 
 import re
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple, List
 
 from .base_rule import BaseRule
 from ..utils.validators import is_valid_ssn
@@ -46,7 +46,7 @@ class SsnRule(BaseRule):
         self,
         text: str,
         anonymizer_fn: Optional[Callable[[str, str], str]] = None,
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* SSN occurrence with the placeholder.
 
@@ -59,17 +59,18 @@ class SsnRule(BaseRule):
             supplied, its return value is used (wrapped in ``{}``) instead of
             ``{{SSN}}``.
         """
+        mappings = []
 
         def _replacer(match: re.Match) -> str:
             ssn = match.group(0)
             if is_valid_ssn(ssn):
-                replacement = (
-                    "{" + anonymizer_fn(ssn, self.tag_type) + "}"
-                    if anonymizer_fn
-                    else self.placeholder
-                )
-                return replacement
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(ssn, self.tag_type)
+                    mappings.append({"original": ssn, "replacement": pseudo})
+                    return "{" + pseudo + "}"
+                mappings.append({"original": ssn, "replacement": self.placeholder})
+                return self.placeholder
             # Invalid SSN – keep original text.
             return ssn
 
-        return self.pattern.sub(_replacer, text)
+        return self.pattern.sub(_replacer, text), mappings

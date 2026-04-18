@@ -14,7 +14,7 @@ placeholder only when the token is present in the surname set.
 import csv
 import re
 from pathlib import Path
-from typing import Set
+from typing import Set, Tuple, List, Optional, Callable
 
 from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
 
@@ -235,13 +235,16 @@ class SimplePersonalDataRule(BaseRule):
         # Compile the regex at once for the ``apply`` method.
         self._compiled_regex = re.compile(self._WORD_REGEX, flags=re.IGNORECASE)
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> Tuple[str, List]:
         """
         Replace each surname found in *text* with ``{{SURNAME_SIMPLE}}``.
         The rule now substitutes only when the token starts with an
         uppercase letter (e.g., ``Maj``) and leaves a lower‑case
         occurrence (e.g., ``maj``) untouched.
         """
+        mappings = []
 
         def _replacer(match: re.Match) -> str:
             token = match.group(0)
@@ -250,7 +253,12 @@ class SimplePersonalDataRule(BaseRule):
             #  - a known surname
             #  - *and* begins with an uppercase character.
             if lowered in _SURNAME_SET and token[:1].isupper() and len(token) > 2:
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(token, self.tag_type)
+                    mappings.append({"original": token, "replacement": pseudo})
+                    return "{" + pseudo + "}"
+                mappings.append({"original": token, "replacement": self.placeholder})
                 return self.placeholder
             return token
 
-        return self._compiled_regex.sub(_replacer, text)
+        return self._compiled_regex.sub(_replacer, text), mappings

@@ -12,7 +12,7 @@ its result (wrapped in ``{}``) is used instead of the static placeholder.
 """
 
 import re
-from typing import Optional, Callable, Match
+from typing import Optional, Callable, Match, Tuple, List
 
 from .base_rule import BaseRule
 from ..utils.validators import is_valid_krs
@@ -52,7 +52,7 @@ class KrsRule(BaseRule):
         self,
         text: str,
         anonymizer_fn: Optional[Callable[[str, str], str]] = None,
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* KRS occurrence with the placeholder.
 
@@ -65,17 +65,20 @@ class KrsRule(BaseRule):
             If supplied, its return value is used (wrapped in ``{}``) instead of
             ``{{KRS}}``.
         """
+        mappings = []
 
         def _replacer(match: Match) -> str:
             raw_krs = match.group("krs")
             if is_valid_krs(raw_krs):
-                replacement = (
-                    "{" + anonymizer_fn(raw_krs, self.tag_type) + "}"
-                    if anonymizer_fn
-                    else self.placeholder
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(raw_krs, self.tag_type)
+                    mappings.append({"original": raw_krs, "replacement": pseudo})
+                    return "{" + pseudo + "}"
+                mappings.append(
+                    {"original": raw_krs, "replacement": self.placeholder}
                 )
-                return replacement
+                return self.placeholder
             # Invalid KRS – leave original text untouched.
             return raw_krs
 
-        return self._COMPILED.sub(_replacer, text)
+        return self._COMPILED.sub(_replacer, text), mappings

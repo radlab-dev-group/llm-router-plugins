@@ -35,7 +35,7 @@ the recursive traversal of complex structures.
 """
 
 import abc
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 
 class MaskerPayloadTraveler(abc.ABC):
@@ -55,7 +55,7 @@ class MaskerPayloadTraveler(abc.ABC):
     """
 
     @abc.abstractmethod
-    def _mask_text(self, text: str) -> str:
+    def _mask_text(self, text: str) -> Tuple[str, Dict]:
         """
         Abstract helper that performs the actual masking of a single string.
 
@@ -75,7 +75,7 @@ class MaskerPayloadTraveler(abc.ABC):
 
         pass
 
-    def mask_text(self, text: str) -> str:
+    def mask_text(self, text: str) -> Tuple[str, Dict]:
         """
         Mask a plain‑text string using the concrete implementation of
         :meth:`_mask_text`.
@@ -87,8 +87,8 @@ class MaskerPayloadTraveler(abc.ABC):
 
         Returns
         -------
-        str
-            The text after all configured masking rules have been applied.
+        Tuple[str, List]
+            The text after all configured masking rules have been applied and mappings.
         """
         return self._mask_text(text=text)
 

@@ -3,7 +3,7 @@ Rule that masks valid Polish NIP numbers.
 """
 
 import re
-from typing import Optional, Callable, Match
+from typing import Optional, Callable, Match, Tuple, List
 
 from .base_rule import BaseRule
 
@@ -72,21 +72,26 @@ class NipRule(BaseRule):
 
     def apply(
         self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* NIP occurrence with the placeholder.
         Invalid NIPs are left unchanged.
         """
+        mappings = []
 
         def _replacer(match: Match) -> str:
             raw_nip = match.group("digits")
             if _is_valid_nip(raw_nip):
-                replacement = (
-                    "{" + anonymizer_fn(raw_nip, self.tag_type) + "}"
-                    if anonymizer_fn
-                    else self._PLACEHOLDER
-                )
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(raw_nip, self.tag_type)
+                    mappings.append({"original": raw_nip, "replacement": pseudo})
+                    replacement = "{" + pseudo + "}"
+                else:
+                    mappings.append(
+                        {"original": raw_nip, "replacement": self._PLACEHOLDER}
+                    )
+                    replacement = self._PLACEHOLDER
                 return match.group(0).replace(raw_nip, replacement)
             return match.group(0)
 
-        return self._compiled_regex.sub(_replacer, text)
+        return self._compiled_regex.sub(_replacer, text), mappings

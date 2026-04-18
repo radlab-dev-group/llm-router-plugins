@@ -3,7 +3,7 @@ Rule that mask IPv4 and IPv6 addresses.
 """
 
 import re
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple, List
 
 from .base_rule import BaseRule
 
@@ -69,29 +69,39 @@ class IpRule(BaseRule):
 
     def apply(
         self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace each address with ``{{IP}}`` and, if a port is present,
         replace it with ``{{PORT}}`` while preserving the separating colon.
         """
+        mappings = []
 
         def replacer(match: re.Match) -> str:
             # Always replace the address part
             addr = match.group("addr")
-            result = (
-                "{" + anonymizer_fn(addr, "IP") + "}"
-                if anonymizer_fn
-                else self._IP_PLACEHOLDER
-            )
+            if anonymizer_fn:
+                pseudo_addr = anonymizer_fn(addr, "IP")
+                mappings.append({"original": addr, "replacement": pseudo_addr})
+                result = "{" + pseudo_addr + "}"
+            else:
+                mappings.append(
+                    {"original": addr, "replacement": self._IP_PLACEHOLDER}
+                )
+                result = self._IP_PLACEHOLDER
+
             # If a port was captured, append ``:{{PORT}}``
             port = match.group("port")
             if port:
-                port_replacement = (
-                    "{" + anonymizer_fn(port, "PORT") + "}"
-                    if anonymizer_fn
-                    else self._PORT_PLACEHOLDER
-                )
+                if anonymizer_fn:
+                    pseudo_port = anonymizer_fn(port, "PORT")
+                    mappings.append({"original": port, "replacement": pseudo_port})
+                    port_replacement = "{" + pseudo_port + "}"
+                else:
+                    mappings.append(
+                        {"original": port, "replacement": self._PORT_PLACEHOLDER}
+                    )
+                    port_replacement = self._PORT_PLACEHOLDER
                 result = f"{result}:{port_replacement}"
             return result
 
-        return self._compiled_regex.sub(replacer, text)
+        return self._compiled_regex.sub(replacer, text), mappings

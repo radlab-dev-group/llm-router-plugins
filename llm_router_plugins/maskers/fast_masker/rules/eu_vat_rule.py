@@ -13,7 +13,7 @@ The rule:
 """
 
 import re
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple, List
 
 from .base_rule import BaseRule
 from ..utils.validators import is_valid_eu_vat
@@ -46,7 +46,7 @@ class EuVatRule(BaseRule):
         self,
         text: str,
         anonymizer_fn: Optional[Callable[[str, str], str]] = None,
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* EU VAT occurrence with the placeholder.
 
@@ -59,17 +59,18 @@ class EuVatRule(BaseRule):
             If supplied, its return value is used (wrapped in ``{}``) instead of
             ``{{EU_VAT}}``.
         """
+        mappings = []
 
         def _replacer(match: re.Match) -> str:
             vat = match.group(0)
             if is_valid_eu_vat(vat):
-                replacement = (
-                    "{" + anonymizer_fn(vat, self.tag_type) + "}"
-                    if anonymizer_fn
-                    else self.placeholder
-                )
-                return replacement
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(vat, self.tag_type)
+                    mappings.append({"original": vat, "replacement": pseudo})
+                    return "{" + pseudo + "}"
+                mappings.append({"original": vat, "replacement": self.placeholder})
+                return self.placeholder
             # Invalid VAT – keep original text.
             return vat
 
-        return self._COMPILED.sub(_replacer, text)
+        return self._COMPILED.sub(_replacer, text), mappings

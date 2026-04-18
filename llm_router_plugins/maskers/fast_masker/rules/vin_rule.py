@@ -12,7 +12,7 @@ The rule:
 """
 
 import re
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple, List
 
 from .base_rule import BaseRule
 from ..utils.validators import is_valid_vin
@@ -49,7 +49,7 @@ class VinRule(BaseRule):
         self,
         text: str,
         anonymizer_fn: Optional[Callable[[str, str], str]] = None,
-    ) -> str:
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* VIN occurrence with the placeholder.
 
@@ -64,21 +64,22 @@ class VinRule(BaseRule):
 
         Returns
         -------
-        str
-            The text with all valid VINs replaced.
+        Tuple[str, List]
+            The text with all valid VINs replaced and a list of mappings.
         """
+        mappings = []
 
         def _replacer(match: re.Match) -> str:
             vin = match.group(0)
             if is_valid_vin(vin):
                 # Use the custom anonymiser if supplied; otherwise, the default placeholder.
-                replacement = (
-                    "{" + anonymizer_fn(vin, self.tag_type) + "}"
-                    if anonymizer_fn
-                    else self.placeholder
-                )
-                return replacement
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(vin, self.tag_type)
+                    mappings.append({"original": vin, "replacement": pseudo})
+                    return "{" + pseudo + "}"
+                mappings.append({"original": vin, "replacement": self.placeholder})
+                return self.placeholder
             # Invalid VIN – leave it untouched.
             return vin
 
-        return self.pattern.sub(_replacer, text)
+        return self.pattern.sub(_replacer, text), mappings
