@@ -92,7 +92,7 @@ class MaskerPayloadTraveler(abc.ABC):
         """
         return self._mask_text(text=text)
 
-    def mask_payload(self, payload: Dict | str | List | Any):
+    def mask_payload(self, payload: Dict | str | List | Any) -> Tuple[Any, Dict]:
         """
         Recursively mask a payload of arbitrary type.
 
@@ -115,9 +115,9 @@ class MaskerPayloadTraveler(abc.ABC):
 
         Returns
         -------
-        Union[Dict, str, List, Any]
+        Tuple[Union[Dict, str, List, Any], Dict]
             The masked representation of *payload*, preserving the original
-            container types.
+            container types, and the aggregated mappings.
         """
         if type(payload) is str:
             return self._mask_text(text=payload)
@@ -125,9 +125,9 @@ class MaskerPayloadTraveler(abc.ABC):
             return self._mask_dict(dict_payload=payload)
         elif type(payload) is list:
             return self._mask_list(list_payload=payload)
-        return payload
+        return payload, {}
 
-    def _mask_list(self, list_payload: List[Any]) -> List:
+    def _mask_list(self, list_payload: List[Any]) -> Tuple[List, Dict]:
         """
         Mask each element of a list recursively.
 
@@ -141,16 +141,19 @@ class MaskerPayloadTraveler(abc.ABC):
 
         Returns
         -------
-        List[Any]
+        Tuple[List[Any], Dict]
             A new list containing the masked elements, in the same order as
-            the input.
+            the input, and aggregated mappings.
         """
         _p = []
+        _m = {}
         for _e in list_payload:
-            _p.append(self.mask_payload(payload=_e))
-        return _p
+            _masked, _mappings = self.mask_payload(payload=_e)
+            _p.append(_masked)
+            _m.update(_mappings)
+        return _p, _m
 
-    def _mask_dict(self, dict_payload: Dict[Any, Any]) -> Dict[Any, Any]:
+    def _mask_dict(self, dict_payload: Dict[Any, Any]) -> Tuple[Dict, Dict]:
         """
         Mask the keys and values of a dictionary recursively.
 
@@ -165,12 +168,16 @@ class MaskerPayloadTraveler(abc.ABC):
 
         Returns
         -------
-        Dict[Any, Any]
+        Tuple[Dict[Any, Any], Dict]
             A new dictionary with masked keys and values, preserving the
-            original mapping semantics.
+            original mapping semantics, and aggregated mappings.
         """
         _p = {}
+        _m = {}
         for k, v in dict_payload.items():
-            _k = self.mask_payload(payload=k)
-            _p[_k] = self.mask_payload(payload=v)
-        return _p
+            _k, _km = self.mask_payload(payload=k)
+            _v, _vm = self.mask_payload(payload=v)
+            _p[_k] = _v
+            _m.update(_km)
+            _m.update(_vm)
+        return _p, _m

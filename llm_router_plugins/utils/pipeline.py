@@ -38,7 +38,7 @@ class UtilsPipeline:
         # Resolve concrete plugin instances.
         self._plugin_instances = [UtilsRegistry.get(name) for name in plugin_names]
 
-    def apply(self, payload: Dict) -> Tuple[bool, Dict]:
+    def apply(self, payload: Dict) -> Tuple[Tuple[bool, Dict], Dict]:
         """
         Execute the pipeline.
 
@@ -50,7 +50,8 @@ class UtilsPipeline:
             ``True`` when all plugins approve the payload; otherwise ``False``
             and ``result`` contains the error information.
         """
+        mappings = {}
         result = payload
         for plugin_instance in self._plugin_instances:
-            result = plugin_instance.apply(result)
-        return result
+            result, mappins = plugin_instance.apply(result)
+        return result, mappings
