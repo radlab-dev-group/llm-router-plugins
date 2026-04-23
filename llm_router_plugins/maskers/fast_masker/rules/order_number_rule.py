@@ -4,7 +4,7 @@ Rule that masks order numbers.
 
 import re
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from .base_rule import BaseRule
 
 
 class OrderNumberRule(BaseRule):

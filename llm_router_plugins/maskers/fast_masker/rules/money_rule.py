@@ -19,9 +19,9 @@ replaced with the placeholder ``{{MONEY}}``.
 """
 
 import re
-from typing import Match
+from typing import Optional, Callable, Match, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from .base_rule import BaseRule
 
 
 class MoneyRule(BaseRule):
@@ -106,16 +106,23 @@ class MoneyRule(BaseRule):
             self._MONEY_REGEX, flags=re.IGNORECASE | re.VERBOSE
         )
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> Tuple[str, List]:
         """
         Replace each detected monetary amount (with a currency identifier) with
         ``{{MONEY}}``.  Markdown emphasis markers are discarded – the placeholder
         stands alone.
         """
+        mappings = []
 
         def _replacer(match: Match) -> str:
-            # The regex guarantees that a currency identifier is present, so we
-            # can safely replace the whole match with the placeholder.
+            val = match.group(0)
+            if anonymizer_fn:
+                pseudo = anonymizer_fn(val, self.tag_type)
+                mappings.append({"original": val, "replacement": pseudo})
+                return "{" + pseudo + "}"
+            mappings.append({"original": val, "replacement": self._PLACEHOLDER})
             return self._PLACEHOLDER
 
-        return self._compiled_regex.sub(_replacer, text)
+        return self._compiled_regex.sub(_replacer, text), mappings

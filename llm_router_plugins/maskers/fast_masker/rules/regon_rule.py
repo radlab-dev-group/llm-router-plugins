@@ -20,10 +20,10 @@ regular expression for speed).
 """
 
 import re
-from typing import Match
+from typing import Optional, Callable, Match, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
-from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_regon
+from .base_rule import BaseRule
+from ..utils.validators import is_valid_regon
 
 
 class RegonRule(BaseRule):
@@ -59,14 +59,28 @@ class RegonRule(BaseRule):
             self._REGEX, flags=re.IGNORECASE | re.VERBOSE
         )
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* REGON occurrence with the placeholder.
         Invalid numbers are left untouched.
         """
+        mappings = []
 
         def _replacer(match: Match) -> str:
             raw_regon = match.group("reg")
-            return self._PLACEHOLDER if is_valid_regon(raw_regon) else raw_regon
+            if is_valid_regon(raw_regon):
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(raw_regon, self.tag_type)
+                    mappings.append({"original": raw_regon, "replacement": pseudo})
+                    replacement = "{" + pseudo + "}"
+                else:
+                    mappings.append(
+                        {"original": raw_regon, "replacement": self.placeholder}
+                    )
+                    replacement = self.placeholder
+                return match.group(0).replace(raw_regon, replacement)
+            return match.group(0)
 
-        return self._compiled_regex.sub(_replacer, text)
+        return self.pattern.sub(_replacer, text), mappings

@@ -10,9 +10,9 @@ Valid matches are replaced with the placeholder ``{{POSTAL_CODE}}``.
 """
 
 import re
-from typing import Match
+from typing import Optional, Callable, Match, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from .base_rule import BaseRule
 
 
 class PostalCodeRule(BaseRule):
@@ -34,7 +34,7 @@ class PostalCodeRule(BaseRule):
         (?<!\d)                     # not preceded by another digit
         (?:[_*]+)?                  # optional leading markdown markers
         (?P<code>
-            \d{2}-?\d{3}            # two digits, optional hyphen, three digits
+            \d{2}-\d{3}            # two digits, optional hyphen, three digits
         )
         (?:[_*]+)?                  # optional trailing markdown markers
         (?!\d)                      # not followed by another digit
@@ -53,13 +53,21 @@ class PostalCodeRule(BaseRule):
             self._POSTAL_REGEX, flags=re.IGNORECASE | re.VERBOSE
         )
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> Tuple[str, List]:
         """
         Replace each detected postal code with the placeholder.
         """
+        mappings = []
 
         def _replacer(match: Match) -> str:
-            # No additional validation needed – the regex guarantees correct format.
+            val = match.group(0)
+            if anonymizer_fn:
+                pseudo = anonymizer_fn(val, self.tag_type)
+                mappings.append({"original": val, "replacement": pseudo})
+                return "{" + pseudo + "}"
+            mappings.append({"original": val, "replacement": self._PLACEHOLDER})
             return self._PLACEHOLDER
 
-        return self._compiled_regex.sub(_replacer, text)
+        return self._compiled_regex.sub(_replacer, text), mappings

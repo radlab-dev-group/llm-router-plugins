@@ -3,9 +3,9 @@ Rule that masks valid Polish NIP numbers.
 """
 
 import re
-from typing import Match
+from typing import Optional, Callable, Match, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from .base_rule import BaseRule
 
 
 def _is_valid_nip(raw_nip: str) -> bool:
@@ -70,14 +70,28 @@ class NipRule(BaseRule):
             self._NIP_REGEX, flags=re.IGNORECASE | re.VERBOSE
         )
 
-    def apply(self, text: str) -> str:
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> Tuple[str, List]:
         """
         Replace each *valid* NIP occurrence with the placeholder.
         Invalid NIPs are left unchanged.
         """
+        mappings = []
 
         def _replacer(match: Match) -> str:
             raw_nip = match.group("digits")
-            return self._PLACEHOLDER if _is_valid_nip(raw_nip) else match.group(0)
+            if _is_valid_nip(raw_nip):
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(raw_nip, self.tag_type)
+                    mappings.append({"original": raw_nip, "replacement": pseudo})
+                    replacement = "{" + pseudo + "}"
+                else:
+                    mappings.append(
+                        {"original": raw_nip, "replacement": self._PLACEHOLDER}
+                    )
+                    replacement = self._PLACEHOLDER
+                return match.group(0).replace(raw_nip, replacement)
+            return match.group(0)
 
-        return self._compiled_regex.sub(_replacer, text)
+        return self._compiled_regex.sub(_replacer, text), mappings

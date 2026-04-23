@@ -2,11 +2,11 @@
 Optional helper base class for rules that share common behaviour.
 """
 
-import abc
 import re
-from typing import Pattern
+import abc
+from typing import Pattern, Optional, Callable, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.core.rule_interface import MaskerRuleI
+from ..core.rule_interface import MaskerRuleI
 
 
 class BaseRule(MaskerRuleI, abc.ABC):
@@ -18,6 +18,7 @@ class BaseRule(MaskerRuleI, abc.ABC):
 
     pattern: Pattern
     placeholder: str
+    tag_type: str
 
     def __init__(self, regex: str, placeholder: str, flags: int = 0):
         """
@@ -30,17 +31,35 @@ class BaseRule(MaskerRuleI, abc.ABC):
         flags: int, optional
             Flags passed to :func:`re.compile`. Default is ``0``.
         """
+        # self.regex = regex
         self.pattern = re.compile(regex, flags)
         self.placeholder = placeholder
 
-    def apply(self, text: str) -> str:
+        # Extract tag type from placeholder, e.g., "{{PESEL}}" -> "PESEL"
+        self.tag_type = placeholder.strip("{}")
+        # self.tag_type = placeholder.strip("{}")
+
+    def apply(
+        self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
+    ) -> Tuple[str, List]:
         """
         Replace all occurrences of ``self.pattern`` in *text* with the
-        configured placeholder.
+        configured placeholder or a dynamic pseudonym.
 
         Returns
         -------
-        str
-            The transformed text.
+        Tuple[str, List]
+            The transformed text and mappings.
         """
-        return self.pattern.sub(self.placeholder, text)
+        mappings = []
+
+        def replacer(match: re.Match) -> str:
+            val = match.group(0)
+            if anonymizer_fn:
+                pseudo = anonymizer_fn(val, self.tag_type)
+                mappings.append({"original": val, "replacement": pseudo})
+                return "{" + pseudo + "}"
+            mappings.append({"original": val, "replacement": self.placeholder})
+            return self.placeholder
+
+        return self.pattern.sub(replacer, text), mappings

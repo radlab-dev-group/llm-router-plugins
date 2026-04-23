@@ -22,7 +22,7 @@ The plugin:
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple, Any
 
 from llm_router_plugins.plugin_interface import PluginInterface
 from llm_router_plugins.maskers.fast_masker.core import FastMasker
@@ -54,8 +54,8 @@ class FastMaskerPlugin(PluginInterface):
         super().__init__(logger=logger)
         self._fast_masker = FastMasker()
 
-    def apply(self, payload: Dict) -> str | list | Dict:
+    def apply(self, payload: Dict) -> Tuple[Any, Dict]:
         """
-        Mask *payload* and return the redacted version.
+        Mask *payload* and return the redacted version and its mappings.
         """
         return self._fast_masker.mask_payload(payload=payload)

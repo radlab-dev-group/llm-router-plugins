@@ -1,41 +1,80 @@
 """
 Rule that masks credit‑card numbers.
+
+The rule:
+
+1. Detects 13‑ to 19‑digit credit‑card numbers (optionally separated by
+   spaces or dashes).
+2. Validates the number with the Luhn algorithm via
+   :func:`is_valid_credit_card`.
+3. Replaces **valid** numbers with the placeholder ``{{CREDIT_CARD}}``.
+4. If an ``anonymizer_fn`` is supplied, its result (wrapped in ``{}``) is
+   used instead of the static placeholder – consistent with the other
+   masking rules.
 """
 
 import re
+from typing import Optional, Callable, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
-from llm_router_plugins.maskers.fast_masker.utils.validators import (
-    is_valid_credit_card,
-)
+from .base_rule import BaseRule
+from ..utils.validators import is_valid_credit_card
 
 
 class CreditCardRule(BaseRule):
     """
-    Detects 16‑digit credit‑card numbers (optionally separated by spaces or dashes)
-    and replaces them with ``{{CREDIT_CARD}}`` **only if the Luhn checksum passes**.
+    Detects credit‑card numbers and masks them.
     """
 
-    # Regex captures the raw number; validation is performed in ``apply``.
-    # Match 13-19 digits with optional spaces or dashes between groups
-    _CC_REGEX = r"""
+    # Regex captures 13‑19 digits, allowing optional spaces or dashes between groups.
+    _REGEX = r"""
         \b
-        \d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{1,7}   # Standard grouping: 4-4-4-(1-7)
+        \d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{1,7}   # 4‑4‑4‑(1‑7) grouping
         \b
     """
 
-    def __init__(self):
+    _PLACEHOLDER = "{{CREDIT_CARD}}"
+
+    # Pre‑compile for performance.
+    _COMPILED = re.compile(_REGEX, flags=re.IGNORECASE | re.VERBOSE)
+
+    def __init__(self) -> None:
         super().__init__(
-            regex=self._CC_REGEX,
-            placeholder="{{CREDIT_CARD}}",
+            regex=self._REGEX,
+            placeholder=self._PLACEHOLDER,
             flags=re.IGNORECASE | re.VERBOSE,
         )
 
-    def apply(self, text: str) -> str:
-        """Replace only syntactically valid credit‑card numbers."""
+    def apply(
+        self,
+        text: str,
+        anonymizer_fn: Optional[Callable[[str, str], str]] = None,
+    ) -> Tuple[str, List]:
+        """
+        Replace each *valid* credit‑card occurrence with the placeholder.
 
-        def _replace(match: re.Match) -> str:
+        Parameters
+        ----------
+        text :
+            Input string that may contain credit‑card numbers.
+        anonymizer_fn :
+            Optional callable ``fn(card_number: str, tag_type: str) -> str``.
+            If supplied, its return value is used (wrapped in ``{}``) instead of
+            ``{{CREDIT_CARD}}``.
+        """
+        mappings = []
+
+        def _replacer(match: re.Match) -> str:
             candidate = match.group(0)
-            return self.placeholder if is_valid_credit_card(candidate) else candidate
+            if is_valid_credit_card(candidate):
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(candidate, self.tag_type)
+                    mappings.append({"original": candidate, "replacement": pseudo})
+                    return "{" + pseudo + "}"
+                mappings.append(
+                    {"original": candidate, "replacement": self.placeholder}
+                )
+                return self.placeholder
+            # Invalid number – leave it unchanged.
+            return candidate
 
-        return re.sub(self.pattern, _replace, text)
+        return self._COMPILED.sub(_replacer, text), mappings

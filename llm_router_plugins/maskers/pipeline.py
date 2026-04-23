@@ -30,9 +30,11 @@ class MaskerPipeline:
             *args, **kwargs: Additional arguments forwarded to each plugin's ``apply`` method.
 
         Returns:
-            The result produced by the last plugin in the sequence.
+            The result produced by the last plugin in the sequence and aggregated mappings.
         """
         result = payload
+        all_mappings = {}
         for plugin_instance in self._plugin_classes:
-            result = plugin_instance.apply(result, *args, **kwargs)
-        return result
+            result, mappings = plugin_instance.apply(result, *args, **kwargs)
+            all_mappings.update(mappings)
+        return result, all_mappings

@@ -1,34 +1,85 @@
 """
 Rule that masks Vehicle Identification Numbers (VIN).
+
+The rule:
+
+1. Detects a 17‑character VIN (letters A‑H, J‑N, P‑R, Z and digits).
+2. Validates the checksum (position 9) using :func:`is_valid_vin`.
+3. Replaces **valid** VINs with the placeholder ``{{VIN}}``.
+4. If an ``anonymizer_fn`` is supplied, its result (wrapped in ``{}``) is
+   used instead of the default placeholder – this mirrors the behaviour of
+   the ``RegonRule`` implementation.
 """
 
 import re
+from typing import Optional, Callable, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
-from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_vin
+from .base_rule import BaseRule
+from ..utils.validators import is_valid_vin
 
 
 class VinRule(BaseRule):
     """
     Detects 17‑character VINs and masks them with ``{{VIN}}`` **only if the
-    checksum (position 9) is correct**.
+    checksum (position 9) is correct**.  When an ``anonymizer_fn`` is provided,
+    the function is called with the original VIN and the rule’s ``tag_type``,
+    and its return value is wrapped in curly braces.
     """
 
-    _VIN_REGEX = r"""
+    # Regex that matches a 17‑character VIN surrounded by word boundaries.
+    _REGEX = r"""
         \b
         [A-HJ-NPR-Z0-9]{17}\b
     """
 
-    def __init__(self):
+    _PLACEHOLDER = "{{VIN}}"
+
+    def __init__(self) -> None:
         super().__init__(
-            regex=self._VIN_REGEX,
-            placeholder="{{VIN}}",
+            regex=self._REGEX,
+            placeholder=self._PLACEHOLDER,
             flags=re.IGNORECASE | re.VERBOSE,
         )
+        # Compile once for fast reuse in ``apply``.
+        self._compiled_regex = re.compile(
+            self._REGEX, flags=re.IGNORECASE | re.VERBOSE
+        )
 
-    def apply(self, text: str) -> str:
-        def _replace(m: re.Match) -> str:
-            vin = m.group(0)
-            return self.placeholder if is_valid_vin(vin) else vin
+    def apply(
+        self,
+        text: str,
+        anonymizer_fn: Optional[Callable[[str, str], str]] = None,
+    ) -> Tuple[str, List]:
+        """
+        Replace each *valid* VIN occurrence with the placeholder.
 
-        return re.sub(self.pattern, _replace, text)
+        Parameters
+        ----------
+        text:
+            The input string that may contain VINs.
+        anonymizer_fn:
+            Optional callable ``fn(vin: str, tag_type: str) -> str``.  If
+            provided, its return value is used (wrapped in ``{}``) instead of
+            ``{{VIN}}``.  This enables custom anonymisation strategies.
+
+        Returns
+        -------
+        Tuple[str, List]
+            The text with all valid VINs replaced and a list of mappings.
+        """
+        mappings = []
+
+        def _replacer(match: re.Match) -> str:
+            vin = match.group(0)
+            if is_valid_vin(vin):
+                # Use the custom anonymiser if supplied; otherwise, the default placeholder.
+                if anonymizer_fn:
+                    pseudo = anonymizer_fn(vin, self.tag_type)
+                    mappings.append({"original": vin, "replacement": pseudo})
+                    return "{" + pseudo + "}"
+                mappings.append({"original": vin, "replacement": self.placeholder})
+                return self.placeholder
+            # Invalid VIN – leave it untouched.
+            return vin
+
+        return self.pattern.sub(_replacer, text), mappings
