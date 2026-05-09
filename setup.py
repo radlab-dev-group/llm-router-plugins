@@ -18,10 +18,14 @@ setup(
     packages=find_packages(exclude=("tests", "docs")),
     include_package_data=True,
     python_requires=">=3.8",
-    install_requires=[],
+    install_requires=[
+        "pii-classification @ "
+        "git+https://github.com/radlab-dev-group/anonymizer-model"
+    ],
     entry_points={
         "console_scripts": [
-            "llm-router-rag-langchain=llm_router_plugins.cli.plugins.utils.rag.langchain:main",
+            "llm-router-rag-langchain="
+            "llm_router_plugins.cli.plugins.utils.rag.langchain:main",
         ],
     },
     classifiers=[

@@ -20,7 +20,10 @@ available plugins.
 from llm_router_plugins.maskers.fast_masker.fast_masker_plugin import (
     FastMaskerPlugin,
 )
-from pii.pii_masker_plugin import PiiMaskerPlugin, PII_MASKER_HOST
+from llm_router_plugins.maskers.pii.pii_masker_plugin import (
+    PiiMaskerPlugin,
+    PII_MASKER_HOST,
+)
 
 MAIN_MASKERS_REGISTRY = {
     FastMaskerPlugin.name: FastMaskerPlugin,
