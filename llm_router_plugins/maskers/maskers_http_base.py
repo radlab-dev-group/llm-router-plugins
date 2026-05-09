@@ -25,9 +25,9 @@ class HttpMaskersBase(HttpPluginInterface, ABC):
         """
         try:
             response = self._request(payload)
-            text = response.get("text", "")
+            ann_payload = response.get("anonymized", "")
             mappings = response.get("mappings", {})
-            return text, mappings
+            return ann_payload, mappings
         except Exception as exc:
             if self._logger:
                 self._logger.error(
