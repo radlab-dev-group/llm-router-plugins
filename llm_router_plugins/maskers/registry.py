@@ -17,7 +17,9 @@ they are actually requested, while keeping a single source of truth for
 available plugins.
 """
 
-from llm_router_plugins.maskers.fast_masker_plugin import FastMaskerPlugin
+from llm_router_plugins.maskers.fast_masker.fast_masker_plugin import (
+    FastMaskerPlugin,
+)
 
 MAIN_MASKERS_REGISTRY = {FastMaskerPlugin.name: FastMaskerPlugin}
 
