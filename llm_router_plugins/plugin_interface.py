@@ -60,16 +60,26 @@ class HttpPluginInterface(PluginInterface, abc.ABC):
     to post‑process the response as required.
     """
 
+    host_url = None
+    endpoint_path = None
+
+    def __init__(self, logger: Optional[logging.Logger] = None):
+        if not self.host_url or not self.endpoint_path:
+            raise Exception(
+                "host_url and endpoint_path must be set before initialization!"
+            )
+
+        super().__init__(logger=logger)
+
     @property
-    @abc.abstractmethod
     def endpoint_url(self) -> str:
         """
         URL of the remote host to which the payload will be sent.
         """
-        pass
+        return self.host_url.rstrip("/") + "/" + self.endpoint_path
 
     @abc.abstractmethod
-    def apply(self, payload: Dict) -> Tuple[bool, Dict]:
+    def apply(self, payload: Dict) -> Tuple[bool | str, Dict]:
         """
         Process *payload* using the common HTTP request mechanism.
 

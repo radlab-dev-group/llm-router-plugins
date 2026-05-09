@@ -29,83 +29,33 @@ missing keys, etc.) the method returns ``{'success': False}``.
 
 import os
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Optional
 
 from llm_router_plugins.constants import _DontChangeMe
-
+from llm_router_plugins.guardrails.guardrails_base import GuardrailsBase
 
 GUARDRAIL_SOJKA_GUARD_HOST = str(
     os.environ.get(f"{_DontChangeMe.MAIN_ENV_PREFIX}GUARDRAIL_SOJKA_GUARD_HOST", "")
 )
 
 
-from llm_router_plugins.plugin_interface import HttpPluginInterface
-
-
-class SojkaGuardPlugin(HttpPluginInterface):
+class SojkaGuardPlugin(GuardrailsBase):
     """
-    Concrete implementation of :class:`HttpPluginInterface` that
+    Concrete implementation of :class:`GuardrailsBase` that
     talks to the Sojka guardrail HTTP endpoint.
     """
 
     name = "sojka_guard"
+    host_url = GUARDRAIL_SOJKA_GUARD_HOST
     endpoint_path = "api/guardrails/sojka_guard"
 
     def __init__(self, logger: Optional[logging.Logger] = None):
         if not len(GUARDRAIL_SOJKA_GUARD_HOST):
             raise RuntimeError(
                 f"When you are using `sojka_guard` plugin, you must provide a "
-                f"host with model, GUARDRAIL_SOJKA_GUARD_HOST must be set "
-                f"to valid host."
+                f"host with model, "
+                f"{_DontChangeMe.MAIN_ENV_PREFIX}GUARDRAIL_SOJKA_GUARD_HOST "
+                f"must be set to valid host."
             )
 
         super().__init__(logger=logger)
-
-    @property
-    def endpoint_url(self) -> str:
-        """
-        Resolve the endpoint URL from the environment variable or fall back to
-        the default value.
-        """
-        return GUARDRAIL_SOJKA_GUARD_HOST.rstrip("/") + "/" + self.endpoint_path
-
-    def apply(self, payload: Dict) -> Tuple[bool, Dict]:
-        """
-        Send ``payload`` to the guardrail service, parse the JSON response and
-        expose the most relevant fields.
-
-        Parameters
-        ----------
-        payload: Dict
-            The data that should be evaluated by the guardrail.
-
-        Returns
-        -------
-        Dict
-            ``{'success': True, 'safe': <bool>, 'chunk_index': <int>,
-            'chunk_text': <str>, 'label': <str>, 'score': <float>}``
-            on success, or ``{'success': False}`` on any error.
-        """
-        try:
-            response = self._request(payload)
-            results = response.get("results", {})
-            safe_overall: bool = bool(results.get("safe", False))
-
-            # detailed = results.get("detailed", [])
-            # if not detailed:
-            #     # No detailed information – treat as failure
-            #     raise ValueError("Missing 'detailed' entries in response")
-            # first_chunk = detailed[0]
-            # chunk_index: int = first_chunk.get("chunk_index", -1)
-            # chunk_text: str = first_chunk.get("chunk_text", "")
-            # label: str = first_chunk.get("label", "")
-            # safe_chunk: bool = first_chunk.get("safe", False)
-            # score: float = first_chunk.get("score", 0.0)
-            # Build a concise result dictionary
-            return safe_overall, response
-        except Exception as exc:
-            if self._logger:
-                self._logger.error(
-                    "SojkaGuardPlugin failed to process payload: %s", exc
-                )
-            return False, {}
