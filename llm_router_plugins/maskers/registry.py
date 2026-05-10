@@ -17,13 +17,23 @@ they are actually requested, while keeping a single source of truth for
 available plugins.
 """
 
-from llm_router_plugins.maskers.fast_masker_plugin import FastMaskerPlugin
+from llm_router_plugins.maskers.fast_masker.fast_masker_plugin import (
+    FastMaskerPlugin,
+)
+from llm_router_plugins.maskers.pii.pii_masker_plugin import (
+    PiiMaskerPlugin,
+    PII_MASKER_HOST,
+)
 
-MAIN_MASKERS_REGISTRY = {FastMaskerPlugin.name: FastMaskerPlugin}
+MAIN_MASKERS_REGISTRY = {
+    FastMaskerPlugin.name: FastMaskerPlugin,
+    PiiMaskerPlugin.name: PiiMaskerPlugin,
+}
 
 MASKERS_HOSTS_DEFINITION = {
-    # The Masker is available as a module, not as a service
-    FastMaskerPlugin.name: None
+    # Fast Masker is available as a module, not as a service
+    FastMaskerPlugin.name: None,
+    PiiMaskerPlugin.name: PII_MASKER_HOST,
 }
 
 MASKERS_REGISTRY_SESSION = {}

@@ -69,8 +69,8 @@ class MaskerPayloadTraveler(abc.ABC):
 
         Returns
         -------
-        str
-            The masked version of *text*.
+        Tuple[str, Dict]
+            The masked version of *text* and the mappings
         """
 
         pass

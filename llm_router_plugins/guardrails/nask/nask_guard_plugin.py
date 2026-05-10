@@ -39,10 +39,10 @@ Before using the plugin, ensure that your intended use complies with these licen
 
 import os
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Optional
 
 from llm_router_plugins.constants import _DontChangeMe
-
+from llm_router_plugins.guardrails.guardrails_base import GuardrailsBase
 
 # =============================================================================
 # Host with router service where NASK-PIB/HerBERT-PL-Guard model is served
@@ -51,16 +51,15 @@ GUARDRAIL_NASK_GUARD_HOST = str(
     os.environ.get(f"{_DontChangeMe.MAIN_ENV_PREFIX}GUARDRAIL_NASK_GUARD_HOST", "")
 )
 
-from llm_router_plugins.plugin_interface import HttpPluginInterface
 
-
-class NASKGuardPlugin(HttpPluginInterface):
+class NASKGuardPlugin(GuardrailsBase):
     """
     Concrete implementation of :class:`HttpPluginInterface` that
     talks to the NASK guardrail HTTP endpoint.
     """
 
     name = "nask_guard"
+    host_url = GUARDRAIL_NASK_GUARD_HOST
     endpoint_path = "api/guardrails/nask_guard"
 
     def __init__(self, logger: Optional[logging.Logger] = None):
@@ -72,52 +71,3 @@ class NASKGuardPlugin(HttpPluginInterface):
             )
 
         super().__init__(logger=logger)
-
-    @property
-    def endpoint_url(self) -> str:
-        """
-        Resolve the endpoint URL from the environment variable or fall back to
-        the default value.
-        """
-        return GUARDRAIL_NASK_GUARD_HOST.rstrip("/") + "/" + self.endpoint_path
-
-    def apply(self, payload: Dict) -> Tuple[bool, Dict]:
-        """
-        Send ``payload`` to the guardrail service, parse the JSON response and
-        expose the most relevant fields.
-
-        Parameters
-        ----------
-        payload: Dict
-            The data that should be evaluated by the guardrail.
-
-        Returns
-        -------
-        Dict
-            ``{'success': True, 'safe': <bool>, 'chunk_index': <int>,
-            'chunk_text': <str>, 'label': <str>, 'score': <float>}``
-            on success, or ``{'success': False}`` on any error.
-        """
-        try:
-            response = self._request(payload)
-            results = response.get("results", {})
-            safe_overall: bool = bool(results.get("safe", False))
-
-            # detailed = results.get("detailed", [])
-            # if not detailed:
-            #     # No detailed information – treat as failure
-            #     raise ValueError("Missing 'detailed' entries in response")
-            # first_chunk = detailed[0]
-            # chunk_index: int = first_chunk.get("chunk_index", -1)
-            # chunk_text: str = first_chunk.get("chunk_text", "")
-            # label: str = first_chunk.get("label", "")
-            # safe_chunk: bool = first_chunk.get("safe", False)
-            # score: float = first_chunk.get("score", 0.0)
-            # Build a concise result dictionary
-            return safe_overall, response
-        except Exception as exc:
-            if self._logger:
-                self._logger.error(
-                    "NASKGuardPlugin failed to process payload: %s", exc
-                )
-            return False, {}
