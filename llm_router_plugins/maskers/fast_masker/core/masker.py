@@ -43,14 +43,14 @@ class FastMasker(MaskerPayloadTraveler):
         DateNumberRule(),  # Numeric dates
         MoneyRule(),  # Amounts with currency
         VinRule(),  # VIN checksum (ISO 3779)
-        PhoneInternationalRule(),  # + prefix with country code
-        PhoneRule(),  # Local phone (9 digits),
         # CarPlateRule(),  # License plates
         PostalCodeRule(),  # DD-DDD format
-        MacAddressRule(),  # MAC address format
-        CreditCardRule(),  # Luhn checksum
         NrbRule(),  # 26 digits (bank account)
         BankAccountRule(),  # Polish IBAN
+        PhoneInternationalRule(),  # + prefix with country code
+        PhoneRule(),  # Local phone (9 digits),
+        MacAddressRule(),  # MAC address format
+        CreditCardRule(),  # Luhn checksum
         PassportRule(),  # 2 letters + 7 digits
         IdCardRule(),  # 3 letters + 6 digits
         SsnRule(),  # SSN format AAA-GG-SSSS
