@@ -1,10 +1,10 @@
 """
-Rule that masks Polish NRB (bank‑account) numbers.
+Rule that masks Polish NRB (bank-account) numbers.
 
 The rule:
 
 1. Detects NRB numbers – 26 digits, optionally separated by spaces in the
-   typical “2‑4‑4‑4‑4‑4‑4” grouping.
+   typical "2-4-4-4-4-4-4" grouping.
 2. Validates the number with :func:`is_valid_nrb`.
 3. Replaces **valid** NRBs with the placeholder ``{{NRB}}``.
 4. If an ``anonymizer_fn`` is supplied, its result (wrapped in ``{}``) is used
@@ -20,28 +20,22 @@ from ..utils.validators import is_valid_nrb
 
 class NrbRule(BaseRule):
     """
-    Detects Polish NRB numbers and masks them.
+    Detects Polish NRB numbers, validates the checksum and masks them.
     """
 
-    # Regex accepts either the spaced grouping or a plain 26‑digit string.
-    _REGEX = r"""
-        \b
-        (?:\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4})   # 2‑4‑4‑4‑4‑4‑4
-        |
-        (?:\d{26})                                                    # 26 digits, no spaces
-        \b
-    """
+    _REGEX = (
+        r"(?<!\w)"
+        r"(?:(?:\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4})"
+        r"|\d{26})"
+        r"(?!\w)"
+    )
 
     _PLACEHOLDER = "{{NRB}}"
 
-    # Pre‑compile for speed.
-    _COMPILED = re.compile(_REGEX, flags=re.VERBOSE)
-
     def __init__(self) -> None:
         super().__init__(
-            regex=self._REGEX,
-            placeholder=self._PLACEHOLDER,
-            flags=re.VERBOSE,
+            regex=NrbRule._REGEX,
+            placeholder=NrbRule._PLACEHOLDER,
         )
 
     def apply(
@@ -64,17 +58,17 @@ class NrbRule(BaseRule):
         mappings = []
 
         def _replacer(match: re.Match) -> str:
-            candidate = match.group(0)
-            if is_valid_nrb(candidate):
+            raw_nrb = match.group(0).replace(" ", "")
+            if is_valid_nrb(raw_nrb):
                 if anonymizer_fn:
-                    pseudo = anonymizer_fn(candidate, self.tag_type)
-                    mappings.append({"original": candidate, "replacement": pseudo})
+                    pseudo = anonymizer_fn(raw_nrb, self.tag_type)
+                    mappings.append({"original": raw_nrb, "replacement": pseudo})
                     return "{" + pseudo + "}"
                 mappings.append(
-                    {"original": candidate, "replacement": self.placeholder}
+                    {"original": raw_nrb, "replacement": self.placeholder}
                 )
                 return self.placeholder
             # Invalid NRB – keep original text.
-            return candidate
+            return match.group(0)
 
-        return self._COMPILED.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings
