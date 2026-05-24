@@ -23,7 +23,7 @@ ordering minimizes false positives and ensures the most reliable identifiers are
 | **PeselTaggedRule** | `{{PESEL_TAGGED}}` | Polish PESEL with label (e.g., `PESEL: 44051401359`).                                        | Validates checksum, preserves label prefix.                  |
 | **PeselRule**       | `{{PESEL}}`        | Polish PESEL numbers (11-digit personal identifiers).                                        | Validates checksum via `is_valid_pesel`.                     |
 | **NipRule**         | `{{NIP}}`          | Polish NIP numbers (plain, hyphen-separated, or wrapped in markdown).                        | Validates checksum with weights `[6,5,7,2,3,4,5,6,7]`.       |
-| **KrsRule**         | `{{KRS}}`          | Polish KRS numbers (10 digits, plain or hyphen-separated).                                   | Validates checksum with weights `[2,3,4,5,6,7,8,9,2]`.       |
+| **KrsRule**         | `{{KRS}}`          | Polish KRS numbers (10 digits, plain or hyphen-separated).                                   | Validates format only (10 digits).                           |
 | **RegonRule**       | `{{REGON}}`        | Polish REGON numbers (9 or 14 digits, optionally split by spaces).                           | Validates checksum; handles both 9-digit and 14-digit forms. |
 
 ### 2. High Certainty — Strict Format Validation
@@ -85,7 +85,14 @@ ordering minimizes false positives and ensures the most reliable identifiers are
 | **PhoneRule**    | `{{PHONE}}`     | Polish phone numbers (9 digits, e.g., `123 456 789`, `123-456-789`). | Supports `3-3-3` or `2-3-2-2` grouping with optional spaces/dashes. |
 | **SocialIdRule** | `{{SOCIAL_ID}}` | Facebook numeric IDs (e.g., `fbid1234567890`).                       | Matches only `fbid` prefix (removed `@` to avoid email collision).  |
 
-### 9. Disabled Rules (Too Noisy)
+### 9. Beta Features
+
+| Rule                                | Placeholder  | What it Detects                                                                               | Notes                                                                        |
+|-------------------------------------|--------------|-----------------------------------------------------------------------------------------------|------------------------------------------------------------------------------|
+| **StreetNameRule** *(beta)*         | `{{STREET}}` | Polish street names with house numbers (e.g., `ul. Mickiewicza 12`, `aleja Jana Pawła II 5`). | Recognizes common prefixes; limited to 1-5 words to prevent greedy matching. |
+| **SimplePersonalDataRule** *(beta)* | `{{MASKED}}` | Polish surnames from CSV resources; matches whole words starting with uppercase.              | Uses pre-loaded surname set with heuristic inflection handling.              |
+
+### Disabled Rules (Too Noisy)
 
 The following rules are available in the codebase but **commented out** in the default configuration due to high
 false-positive rates:
@@ -111,8 +118,8 @@ identified identifiers. All validators reside in `llm_router_plugins/maskers/fas
   `[1,3,7,9,1,3,7,9,1,3]`.
 - **`is_valid_nip(raw_nip: str) -> bool`** — Validates Polish NIP (Tax ID) numbers (10 digits) using checksum weights
   `[6,5,7,2,3,4,5,6,7]`. Strips hyphens and spaces.
-- **`is_valid_krs(raw_krs: str) -> bool`** — Validates Polish KRS (Court Register) numbers (10 digits) using checksum
-  weights `[2,3,4,5,6,7,8,9,2]`. Remainder 10 is invalid.
+- **`is_valid_krs(raw_krs: str) -> bool`** — Validates Polish KRS (Court Register) numbers format (10 digits, stripped
+  of hyphens/spaces).
 - **`is_valid_regon(raw_regon: str) -> bool`** — Validates Polish REGON numbers (9 or 14 digits) with checksums for both
   forms. Remainder 10 becomes 0.
 

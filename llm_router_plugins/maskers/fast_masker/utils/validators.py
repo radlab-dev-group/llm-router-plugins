@@ -67,33 +67,8 @@ def is_valid_nip(raw_nip: str) -> bool:
 
 
 def is_valid_krs(raw_krs: str) -> bool:
-    """
-    Validate a Polish KRS (National Court Register) number.
-
-    The KRS consists of 10 digits.  The checksum is calculated using the
-    weights ``[2, 3, 4, 5, 6, 7, 8, 9, 2]`` applied to the first nine digits.
-    The control digit (the 10‑th digit) is simply the **remainder of the weighted
-    sum divided by 11**.  If the remainder equals 10 the number is considered
-    invalid (the official specification does not define a replacement digit).
-
-    ``raw_krs`` may contain hyphens or spaces (e.g. ``123-456-78-90``) – they
-    are stripped before validation.
-    """
-    # Remove any hyphens or spaces that may be present
     digits = re.sub(r"[-\s]", "", raw_krs)
-
-    if not re.fullmatch(r"\d{10}", digits):
-        return False
-
-    weights = (2, 3, 4, 5, 6, 7, 8, 9, 2)
-    weighted_sum = sum(w * int(d) for w, d in zip(weights, digits[:9]))
-    control_digit = weighted_sum % 11
-
-    # A remainder of 10 is not a valid control digit
-    if control_digit == 10:
-        return False
-
-    return control_digit == int(digits[9])
+    return bool(re.fullmatch(r"\d{10}", digits))
 
 
 def is_valid_regon(raw_regon: str) -> bool:

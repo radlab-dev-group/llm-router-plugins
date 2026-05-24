@@ -12,7 +12,7 @@ its result (wrapped in ``{}``) is used instead of the static placeholder.
 """
 
 import re
-from typing import Optional, Callable, Match, Tuple, List
+from typing import Optional, Callable, Tuple, List
 
 from .base_rule import BaseRule
 from ..utils.validators import is_valid_krs
@@ -23,29 +23,19 @@ class KrsRule(BaseRule):
     Detects Polish KRS numbers, validates the checksum and masks them.
     """
 
-    # Named group ``krs`` captures the whole match (including optional
-    # hyphens or spaces).  The separator may be ``-`` or a single space;
-    # it is optional between each block.
-    _REGEX = r"""
-        \b
-        (?P<krs>
-            (?:\d{3}[-\s]?\d{3}[-\s]?\d{2}[-\s]?\d{2})   # formatted with hyphens/spaces
-            |
-            \d{10}                                        # plain 10‑digit string
-        )
-        \b
-    """
+    _REGEX = (
+        r"(?<!\w)"
+        r"(?:(?:\d{3}[-\s]?\d{3}[-\s]?\d{2}[-\s]?\d{2})"
+        r"|\d{10})"
+        r"(?!\w)"
+    )
 
     _PLACEHOLDER = "{{KRS}}"
 
-    # Pre‑compile for performance.
-    _COMPILED = re.compile(_REGEX, flags=re.IGNORECASE | re.VERBOSE)
-
     def __init__(self) -> None:
         super().__init__(
-            regex=self._REGEX,
-            placeholder=self._PLACEHOLDER,
-            flags=re.IGNORECASE | re.VERBOSE,
+            regex=KrsRule._REGEX,
+            placeholder=KrsRule._PLACEHOLDER,
         )
 
     def apply(
@@ -67,8 +57,8 @@ class KrsRule(BaseRule):
         """
         mappings = []
 
-        def _replacer(match: Match) -> str:
-            raw_krs = match.group("krs")
+        def _replacer(match: re.Match) -> str:
+            raw_krs = match.group(0).replace(" ", "").replace("-", "")
             if is_valid_krs(raw_krs):
                 if anonymizer_fn:
                     pseudo = anonymizer_fn(raw_krs, self.tag_type)
@@ -78,7 +68,7 @@ class KrsRule(BaseRule):
                     {"original": raw_krs, "replacement": self.placeholder}
                 )
                 return self.placeholder
-            # Invalid KRS – leave original text untouched.
-            return raw_krs
+            # Invalid KRS – keep original text.
+            return match.group(0)
 
-        return self._COMPILED.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings
