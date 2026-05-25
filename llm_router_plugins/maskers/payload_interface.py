@@ -92,9 +92,9 @@ class MaskerPayloadTraveler(abc.ABC):
         """
         return self._mask_text(text=text)
 
-    def mask_payload(self, payload: Dict | str | List | Any) -> Tuple[Any, Dict]:
+    def mask_payload(self, payload: Any) -> Tuple[Any, Dict]:
         """
-        Recursively mask a payload of arbitrary type.
+        Recursively mask a payload of an arbitrary type.
 
         The method inspects the runtime type of *payload* and dispatches to
         the appropriate private helper:
@@ -119,11 +119,11 @@ class MaskerPayloadTraveler(abc.ABC):
             The masked representation of *payload*, preserving the original
             container types, and the aggregated mappings.
         """
-        if type(payload) is str:
+        if isinstance(payload, str):
             return self._mask_text(text=payload)
-        elif type(payload) is dict:
+        elif isinstance(payload, dict):
             return self._mask_dict(dict_payload=payload)
-        elif type(payload) is list:
+        elif isinstance(payload, list):
             return self._mask_list(list_payload=payload)
         return payload, {}
 

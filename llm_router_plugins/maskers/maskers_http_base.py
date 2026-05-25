@@ -1,12 +1,12 @@
 from abc import ABC
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any
 
 from llm_router_plugins.plugin_interface import HttpPluginInterface
 
 
 class HttpMaskersBase(HttpPluginInterface, ABC):
 
-    def apply(self, payload: Dict) -> Tuple[str, Dict]:
+    def apply(self, payload: Any) -> Tuple[Any, Dict]:
         """
         Send ``payload`` to the guardrail service, parse the JSON response,
         and expose the most relevant fields.
@@ -25,7 +25,7 @@ class HttpMaskersBase(HttpPluginInterface, ABC):
         """
         try:
             response = self._request(payload)
-            ann_payload = response.get("anonymized", "")
+            ann_payload = response.get("anonymized", payload)
             mappings = response.get("mappings", {})
             return ann_payload, mappings
         except Exception as exc:
