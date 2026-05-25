@@ -133,8 +133,9 @@ class FastMasker(MaskerPayloadTraveler):
         if not isinstance(text, str):
             return text, {}
 
-        # If the text is already a pseudonym from a previous rule, don't mask it further
-        if re.fullmatch(r"[A-Z]+_\d+_\d+", text):
+        # If the text is already a pseudonym
+        # f.e. from a previous rule, don't mask it further
+        if re.fullmatch(r"\{[A-Z_]+_\d+(?:_\d+)?\}", text):
             return text, {}
 
         result = text
