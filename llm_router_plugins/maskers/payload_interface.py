@@ -115,7 +115,7 @@ class MaskerPayloadTraveler(abc.ABC):
 
         Returns
         -------
-        Tuple[Union[Dict, str, List, Any], Dict]
+        Tuple[Any, Dict]
             The masked representation of *payload*, preserving the original
             container types, and the aggregated mappings.
         """

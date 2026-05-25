@@ -54,7 +54,7 @@ class FastMaskerPlugin(PluginInterface):
         super().__init__(logger=logger)
         self._fast_masker = FastMasker()
 
-    def apply(self, payload: Dict) -> Tuple[Any, Dict]:
+    def apply(self, payload: Any) -> Tuple[Any, Dict]:
         """
         Mask *payload* and return the redacted version and its mappings.
         """
