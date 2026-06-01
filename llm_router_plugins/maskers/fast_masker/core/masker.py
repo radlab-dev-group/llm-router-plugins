@@ -16,11 +16,44 @@ import re
 import datetime
 import pandas as pd
 
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 
-from ..rules import *
-from .rule_interface import MaskerRuleI
 from llm_router_plugins.maskers.payload_interface import MaskerPayloadTraveler
+
+from .rule_interface import MaskerRuleI
+from ..rules import (
+    EmailRule,
+    UrlRule,
+    IpRule,
+    PeselTaggedRule,
+    PeselRule,
+    NipRule,
+    KrsRule,
+    RegonRule,
+    DateWordRule,
+    DateNumberRule,
+    MoneyRule,
+    VinRule,
+    PostalCodeRule,
+    NrbRule,
+    BankAccountRule,
+    PhoneInternationalRule,
+    PhoneRule,
+    MacAddressRule,
+    CreditCardRule,
+    PassportRule,
+    IdCardRule,
+    SsnRule,
+    HealthIdRule,
+    SslCertRule,
+    JwtRule,
+    InvoiceNumberRule,
+    OrderNumberRule,
+    TransactionRefRule,
+    SimCardRule,
+    SocialIdRule,
+    EuVatRule,
+)
 
 
 class FastMasker(MaskerPayloadTraveler):
@@ -28,47 +61,49 @@ class FastMasker(MaskerPayloadTraveler):
     Orchestrates the application of a list of simple masking rules.
     """
 
-    # Rules ordered from most specific/certain to least specific
-    # Priority: checksum-validated > structured formats > pattern-based
-    __ALL_MASKER_RULES = [
-        EmailRule(),  # Email addresses (before URLs!)
-        UrlRule(),  # URLs and domains
-        IpRule(),  # IP addresses with optional ports
-        PeselTaggedRule(),  # PESEL: + PESEL with checksum
-        PeselRule(),  # PESEL with checksum
-        NipRule(),  # NIP with checksum
-        KrsRule(),  # KRS with checksum
-        RegonRule(),  # REGON with checksum
-        DateWordRule(),  # Textual dates
-        DateNumberRule(),  # Numeric dates
-        MoneyRule(),  # Amounts with currency
-        VinRule(),  # VIN checksum (ISO 3779)
-        # CarPlateRule(),  # License plates
-        PostalCodeRule(),  # DD-DDD format
-        NrbRule(),  # 26 digits (bank account)
-        BankAccountRule(),  # Polish IBAN
-        PhoneInternationalRule(),  # + prefix with country code
-        PhoneRule(),  # Local phone (9 digits),
-        MacAddressRule(),  # MAC address format
-        CreditCardRule(),  # Luhn checksum
-        PassportRule(),  # 2 letters + 7 digits
-        IdCardRule(),  # 3 letters + 6 digits
-        SsnRule(),  # SSN format AAA-GG-SSSS
-        HealthIdRule(),  # NFZ with slash
-        SslCertRule(),  # 16-40 hex chars
-        JwtRule(),  # JWT tokens (3 parts)
-        InvoiceNumberRule(),  # FV/INV patterns
-        OrderNumberRule(),  # ORD patterns
-        TransactionRefRule(),  # Transaction IDs
-        SimCardRule(),  # 19-20 digit ICCID
-        SocialIdRule(),  # fbid only
-        EuVatRule(),  # fbid only
-    ]
+    _rules_cache: List[MaskerRuleI] | None = None
 
-    ALL_MASKER_RULES = [cls for cls in __ALL_MASKER_RULES if cls]
+    @classmethod
+    def _get_rules(cls) -> List[MaskerRuleI]:
+        if cls._rules_cache is None:
+
+            cls._rules_cache = [
+                EmailRule(),
+                UrlRule(),
+                IpRule(),
+                PeselTaggedRule(),
+                PeselRule(),
+                NipRule(),
+                KrsRule(),
+                RegonRule(),
+                DateWordRule(),
+                DateNumberRule(),
+                MoneyRule(),
+                VinRule(),
+                PostalCodeRule(),
+                NrbRule(),
+                BankAccountRule(),
+                PhoneInternationalRule(),
+                PhoneRule(),
+                MacAddressRule(),
+                CreditCardRule(),
+                PassportRule(),
+                IdCardRule(),
+                SsnRule(),
+                HealthIdRule(),
+                SslCertRule(),
+                JwtRule(),
+                InvoiceNumberRule(),
+                OrderNumberRule(),
+                TransactionRefRule(),
+                SimCardRule(),
+                SocialIdRule(),
+                EuVatRule(),
+            ]
+        return cls._rules_cache
 
     def __init__(self, rules: Optional[List[MaskerRuleI]] = None):
-        self.rules = rules or self.ALL_MASKER_RULES
+        self.rules = rules or self._get_rules()
         self.mapping = {}  # original -> pseudo
         self.reverse_mapping = {}  # pseudo -> original
 
@@ -98,8 +133,9 @@ class FastMasker(MaskerPayloadTraveler):
         if not isinstance(text, str):
             return text, {}
 
-        # If the text is already a pseudonym from a previous rule, don't mask it further
-        if re.fullmatch(r"[A-Z]+_\d+_\d+", text):
+        # If the text is already a pseudonym
+        # f.e. from a previous rule, don't mask it further
+        if re.fullmatch(r"\{[A-Z_]+_\d+(?:_\d+)?\}", text):
             return text, {}
 
         result = text

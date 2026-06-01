@@ -59,6 +59,87 @@ automatically by the endpoint logic in `endpoint_i.py`.
 4. The first plugin that reports `is_safe=False` short‑circuits the pipeline and the request is rejected with a 400/500
    error payload.
 
+---
+
+## 2.5 ML-Based PII Classification
+
+For cases where regex patterns alone are insufficient (e.g. context-dependent PII detection), the project integrates
+with the **anonymizer-model** repository:
+
+**Repository**: [radlab-dev-group/anonymizer-model](https://github.com/radlab-dev-group/anonymizer-model)
+
+| Feature               | Description                                                                                     |
+|-----------------------|-------------------------------------------------------------------------------------------------|
+| **Approach**          | NER (Named Entity Recognition) model based on Hugging Face `AutoModelForTokenClassification`    |
+| **What it does**      | Identifies PII entities in Polish text with context-aware detection (not just pattern matching) |
+| **Training pipeline** | Configurable via JSON, logs to W&B, exports best model (F1 macro) to `final_model/`             |
+| **REST API**          | Flask service supporting multiple model versions with optional dynamic quantization             |
+| **CLI**               | `pii-classifier convert` / `generalise` / `report` for data prep and analysis                   |
+| **Inference**         | Sub-token merging, punctuation cleaning, gap preservation for human-readable entity spans       |
+| **Web tester**        | HTML/JS interface for real-time PII detection testing                                           |
+
+### How it complements regex maskers
+
+| Approach                              | Strength                                                           | Best for                                                    |
+|---------------------------------------|--------------------------------------------------------------------|-------------------------------------------------------------|
+| **Regex maskers** (FastMasker)        | Deterministic, zero false negatives for known formats, fast        | Structured IDs (KRS, NIP, PESEL, NRB, REGON, VIN, etc.)     |
+| **PII classifier** (anonymizer-model) | Context-aware, handles unknown formats, generalizes across domains | Free-text entities, names, addresses, context-dependent PII |
+
+### Quick start
+
+```bash
+# Clone and install
+git clone https://github.com/radlab-dev-group/anonymizer-model.git
+cd anonymizer-model
+pip install .
+
+# Run the API (serves multiple model versions)
+python3 -m pii_classification.api.app
+
+# API endpoints
+#   GET  /models   — list available models + default
+#   POST /predict   — { "text": "...", "model": "optional_name" }
+```
+
+---
+
+## 2.6 Polish Identification Regex Patterns
+
+The **FastMaskerPlugin** ships with a comprehensive set of rules for detecting Polish business and personal identifiers.
+These rules use regex matching + checksum/form validation to minimize false positives.
+
+### Available Polish rules
+
+| Rule                | Placeholder        | Format                                            | Validation                                           |
+|---------------------|--------------------|---------------------------------------------------|------------------------------------------------------|
+| **KrsRule**         | `{{KRS}}`          | `1234567890` or `123-456-78-90` / `123 456 78 90` | 10 digits (format-only)                              |
+| **NrbRule**         | `{{NRB}}`          | `PL58105012981000009062923173` (26 digits)        | 26 digits                                            |
+| **NipRule**         | `{{NIP}}`          | `1234567890` or `123-456-78-90`                   | Checksum with weights `[6,5,7,2,3,4,5,6,7]` mod 11   |
+| **PeselRule**       | `{{PESEL}}`        | 11 digits                                         | Checksum with weights `[1,3,7,9,1,3,7,9,1,3]` mod 10 |
+| **RegonRule**       | `{{REGON}}`        | 9 or 14 digits                                    | Checksum (different weights per form)                |
+| **BankAccountRule** | `{{BANK_ACCOUNT}}` | `PL58 1050 1298 1000 0090 6292 3173`              | Polish IBAN (28 chars), supports masked `XX` groups  |
+
+### How they work
+
+Each rule follows the same pattern:
+
+1. **Regex match** — detects candidate strings (e.g. 10-digit sequences for KRS)
+2. **Checksum validation** — validates the candidate against the official algorithm
+3. **Placeholder replacement** — valid matches are replaced with `{{PLACEHOLDER}}`; invalid ones are left untouched
+4. **Optional anonymizer** — if an `anonymizer_fn` is provided, it's called with `(original, tag_type)` and its result (
+   wrapped in `{}`) is used instead
+
+### Adding rules to the pipeline
+
+To enable Polish rules in your masking pipeline, add their plugin IDs to `MASKING_STRATEGY_PIPELINE`:
+
+```python
+MASKING_STRATEGY_PIPELINE = ["fast_masker"]
+```
+
+All Polish rules are included in the FastMasker plugin by default. For a full list of available rules, see
+the [fast_masker README](llm_router_plugins/maskers/fast_masker/README.md).
+
 ---  
 
 ## 3. Pipelines

@@ -9,7 +9,10 @@ logger (optional) and how they process incoming payloads via the
 
 import abc
 import logging
-from typing import Dict, Optional, Tuple
+import requests
+
+from typing import Dict, Optional, Tuple, Any
+from requests.exceptions import RequestException
 
 
 class PluginInterface(abc.ABC):
@@ -34,7 +37,7 @@ class PluginInterface(abc.ABC):
         self._logger = logger
 
     @abc.abstractmethod
-    def apply(self, payload: Dict) -> Dict:
+    def apply(self, payload: Any) -> Any:
         """
         Process an input payload and return a transformed payload.
 
@@ -79,7 +82,7 @@ class HttpPluginInterface(PluginInterface, abc.ABC):
         return self.host_url.rstrip("/") + "/" + self.endpoint_path
 
     @abc.abstractmethod
-    def apply(self, payload: Dict) -> Tuple[bool | str, Dict]:
+    def apply(self, payload: Any) -> Tuple[bool | str, Dict]:
         """
         Process *payload* using the common HTTP request mechanism.
 
@@ -93,8 +96,6 @@ class HttpPluginInterface(PluginInterface, abc.ABC):
         Send *payload* to ``self.base_url`` via an HTTP POST request and return
         the JSON response.
         """
-        import requests
-        from requests.exceptions import RequestException
 
         try:
             response = requests.post(self.endpoint_url, json=payload, timeout=60)

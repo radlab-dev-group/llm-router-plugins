@@ -1,4 +1,5 @@
 import logging
+from typing import Dict, Tuple, Any
 
 from llm_router_plugins.maskers.plugin_registrator import MaskerRegistry
 
@@ -21,7 +22,7 @@ class MaskerPipeline:
 
         self._plugin_classes = [MaskerRegistry.get(name) for name in plugin_names]
 
-    def apply(self, payload, *args, **kwargs):
+    def apply(self, payload) -> Tuple[Any, Dict]:
         """
         Execute the pipeline.
 
@@ -30,11 +31,11 @@ class MaskerPipeline:
             *args, **kwargs: Additional arguments forwarded to each plugin's ``apply`` method.
 
         Returns:
-            The result produced by the last plugin in the sequence and aggregated mappings.
+            The result is produced by the last plugin in the sequence and aggregated mappings.
         """
         result = payload
         all_mappings = {}
         for plugin_instance in self._plugin_classes:
-            result, mappings = plugin_instance.apply(result, *args, **kwargs)
+            result, mappings = plugin_instance.apply(result)
             all_mappings.update(mappings)
         return result, all_mappings
