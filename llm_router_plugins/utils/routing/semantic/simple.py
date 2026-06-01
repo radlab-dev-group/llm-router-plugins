@@ -219,7 +219,7 @@ class DefaultSemanticRoutingPlugin(PluginInterface):
     * ``LLM_ROUTER_ROUTING_DEFAULT_MODEL`` – fallback model name.
     """
 
-    name = "default_semantic_routing"
+    name = "simple_semantic_routing"
 
     def __init__(self, logger: Optional[logging.Logger] = None):
         super().__init__(logger=logger)
