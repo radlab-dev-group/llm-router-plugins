@@ -8,14 +8,16 @@ All configuration is loaded from ``resources/routing/semantic/simple.json``.
 """
 
 import os
+import re
 import json
 import logging
 import pathlib
-import re
+
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from llm_router_plugins.plugin_interface import PluginInterface
+
 
 _CONFIG_PATH = (
     pathlib.Path(__file__).resolve().parent.parent.parent.parent
@@ -28,7 +30,8 @@ _CONFIG_PATH = (
 
 @dataclass(frozen=True)
 class RoutingConfig:
-    """Immutable snapshot of routing configuration from *simple.json*.
+    """
+    Immutable snapshot of routing configuration from *simple.json*.
 
     JSON structure::
 
@@ -153,14 +156,12 @@ class DefaultSemanticRoutingPlugin(PluginInterface):
                 cfg.thresholds["medium"],
             ]
 
-        # --- models ---
         models_str = os.getenv("LLM_ROUTER_ROUTING_MODELS", "")
         if models_str:
             self._models = [m.strip() for m in models_str.split("|") if m.strip()]
         else:
             self._models = cfg.models_list
 
-        # --- intent categories ---
         intents: Dict[str, Dict[str, List[str]]] = cfg.intent_categories
 
         # Environment variables override JSON
@@ -176,7 +177,7 @@ class DefaultSemanticRoutingPlugin(PluginInterface):
                         ph_list.append(entry)  # treated as phrase:"weight"
                     else:
                         kw_list.append(entry)
-                merged: Dict[str, List[str]] = {
+                merged: Dict[str, List[Any]] = {
                     "keywords": kw_list,
                     "phrases": ph_list,
                     "patterns": [],
@@ -186,7 +187,6 @@ class DefaultSemanticRoutingPlugin(PluginInterface):
 
         self._intent_categories = intents
 
-        # --- default model ---
         dm_env = os.getenv("LLM_ROUTER_ROUTING_DEFAULT_MODEL")
         if dm_env:
             self._default_model = dm_env
@@ -194,8 +194,6 @@ class DefaultSemanticRoutingPlugin(PluginInterface):
             self._default_model = cfg.default_models.get(
                 "simple", cfg.models_list[0]
             )
-
-    # ---- routing -------------------------------------------------------
 
     def apply(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if payload.get("model") != "auto":
@@ -226,7 +224,8 @@ class DefaultSemanticRoutingPlugin(PluginInterface):
             )
         return payload
 
-    def _get_text_from_payload(self, payload: Dict[str, Any]) -> str:
+    @staticmethod
+    def _get_text_from_payload(payload: Dict[str, Any]) -> str:
         messages = payload.get("messages")
         if isinstance(messages, list) and messages:
             last_msg = messages[-1]
@@ -239,8 +238,10 @@ class DefaultSemanticRoutingPlugin(PluginInterface):
                 return str(val)
         return ""
 
-    def _estimate_tokens(self, text: str) -> int:
-        """Rough token count estimate: whitespace word count * 1.25.
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """
+        Rough token count estimate: whitespace word count * 1.25.
 
         This is not a real tokenizer -- it uses a simple heuristic.
         """
@@ -325,8 +326,6 @@ class DefaultSemanticRoutingPlugin(PluginInterface):
         # 4. Clamp to valid range
         idx = max(0, min(idx, n - 1))
         return self._models[idx]
-
-    # ---- internal helpers ------------------------------------------------
 
     def _complexity_to_model_index(self, target: str) -> int:
         """Map a complexity level name to a model index via the config."""
