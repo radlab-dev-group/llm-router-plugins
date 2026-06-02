@@ -11,20 +11,20 @@ import os
 import json
 import logging
 import pathlib
-
-from dataclasses import dataclass, fields
+import re
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from llm_router_plugins.plugin_interface import PluginInterface
 
 _CONFIG_PATH = (
-    pathlib.Path(__file__).resolve()
-    .parent.parent.parent.parent
+    pathlib.Path(__file__).resolve().parent.parent.parent.parent
     / "resources"
     / "routing"
     / "semantic"
     / "simple.json"
 )
+
 
 @dataclass(frozen=True)
 class RoutingConfig:
@@ -40,15 +40,26 @@ class RoutingConfig:
                                    "creative": "simple", "general": "simple",
                                    "none": "" }
           },
-          "intents": { "code": [...], "math": [...], ... },
-          "none": []
+          "intents": {
+            "code": {
+              "keywords":   ["code", "program", ...],
+              "phrases":    ["write code", "fix bug", ...],
+              "patterns":   ["function\\s+\\w+", "class\\s+\\w+", ...],
+              "weights":    { "debug": 3, "implement": 2, ... }
+            }
+          },
+          "none": {
+              "keywords":   ["hello", ...],
+              "phrases":    ["hi there", ...],
+              "patterns":   []
+          }
         }
     """
 
     thresholds: Dict[str, int]
     default_models: Dict[str, str]
     intent_adjustment: Dict[str, str]
-    intents: Dict[str, List[str]]
+    intents: Dict[str, Dict[str, List[str]]]
     none_keywords: List[str]
 
     @classmethod
@@ -71,10 +82,8 @@ class RoutingConfig:
         return list(self.default_models.values())
 
     @property
-    def intent_categories(self) -> Dict[str, List[str]]:
-        cats = dict(self.intents)
-        cats["none"] = list(self.none_keywords) if self.none_keywords else []
-        return cats
+    def intent_categories(self) -> Dict[str, Dict[str, List[str]]]:
+        return self.intents
 
     @property
     def complexity_thresholds(self) -> Tuple[int, int]:
@@ -152,15 +161,28 @@ class DefaultSemanticRoutingPlugin(PluginInterface):
             self._models = cfg.models_list
 
         # --- intent categories ---
-        intents: Dict[str, List[str]] = cfg.intent_categories
+        intents: Dict[str, Dict[str, List[str]]] = cfg.intent_categories
 
         # Environment variables override JSON
         for key, value in os.environ.items():
             if key.startswith("LLM_ROUTER_ROUTING_INTENT_"):
                 category = key[len("LLM_ROUTER_ROUTING_INTENT_") :]
-                keywords = [kw.strip() for kw in value.split("|") if kw.strip()]
-                if keywords:
-                    intents[category.lower()] = keywords
+                entries = [e.strip() for e in value.split("|") if e.strip()]
+                # Parse key:value pairs for weights
+                kw_list = []
+                ph_list = []
+                for entry in entries:
+                    if ":" in entry:
+                        ph_list.append(entry)  # treated as phrase:"weight"
+                    else:
+                        kw_list.append(entry)
+                merged: Dict[str, List[str]] = {
+                    "keywords": kw_list,
+                    "phrases": ph_list,
+                    "patterns": [],
+                    "weights": {},
+                }
+                intents[category.lower()] = merged
 
         self._intent_categories = intents
 
@@ -235,12 +257,44 @@ class DefaultSemanticRoutingPlugin(PluginInterface):
     def _classify_intent(self, text: str) -> str:
         text_lower = text.lower()
         best_category = "none"
-        best_score = 0
+        best_score = 0.0
 
-        for category, keywords in self._intent_categories.items():
+        for category, intent_def in self._intent_categories.items():
             if category == "none":
                 continue
-            score = sum(1 for kw in keywords if kw in text_lower)
+
+            keywords = intent_def.get("keywords", [])
+            phrases = intent_def.get("phrases", [])
+            patterns = intent_def.get("patterns", [])
+            weights = intent_def.get("weights", {})
+
+            score = 0.0
+
+            # --- weighted keyword scoring ---
+            for kw in keywords:
+                w = weights.get(kw, 1)
+                if kw in text_lower:
+                    score += w
+
+            # --- phrase scoring (multi-word expressions) ---
+            for phrase in phrases:
+                if isinstance(phrase, str) and ":" in phrase:
+                    # phrase:"weight" format
+                    parts = phrase.rsplit(":", 1)
+                    p_text, w = parts[0].strip().lower(), float(parts[1].strip())
+                else:
+                    p_text, w = phrase.lower(), 2.0
+                if p_text in text_lower:
+                    score += w
+
+            # --- regex pattern scoring ---
+            for pat in patterns:
+                try:
+                    if re.search(pat, text_lower):
+                        score += 3.0
+                except re.error:
+                    pass
+
             if score > best_score:
                 best_score = score
                 best_category = category
