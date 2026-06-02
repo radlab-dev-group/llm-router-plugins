@@ -3,7 +3,7 @@ Central registry for utils plugins.
 """
 
 from llm_router_plugins.utils.rag.langchain_plugin import LangchainRAGPlugin
-from llm_router_plugins.utils.routing.semantic.default_plugin import (
+from llm_router_plugins.utils.routing.semantic.simple import (
     DefaultSemanticRoutingPlugin,
 )
 

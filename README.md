@@ -140,6 +140,18 @@ MASKING_STRATEGY_PIPELINE = ["fast_masker"]
 All Polish rules are included in the FastMasker plugin by default. For a full list of available rules, see
 the [fast_masker README](llm_router_plugins/maskers/fast_masker/README.md).
 
+---
+
+## 2.7 Semantic Routing (Model Selection)
+
+The **Semantic Routing plugin** (`simple_semantic_routing`) performs two-stage heuristic model selection: it classifies
+the user's intent
+(code, math, creative, general) via weighted keywords, multi-word phrases, and regex patterns, then estimates input
+complexity
+(token count) to pick the most appropriate model from a configured pool. Configuration is entirely JSON-driven in
+[simple.json](llm_router_plugins/resources/routing/semantic/simple.json); full details are in the
+[plugin README](llm_router_plugins/utils/routing/semantic/README.md).
+
 ---  
 
 ## 3. Pipelines
