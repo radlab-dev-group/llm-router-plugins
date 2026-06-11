@@ -1,3 +1,4 @@
 langchain
 faiss-gpu
 faiss-cpu
+sentence-transformers

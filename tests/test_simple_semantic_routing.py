@@ -1,8 +1,8 @@
 """
-Tests for DefaultSemanticRoutingPlugin.
+Tests for SimpleSemanticRoutingPlugin.
 
 Run with:
-    pytest tests/test_default_semantic_routing.py -v
+    pytest tests/test_simple_semantic_routing.py -v
 """
 
 import json
@@ -15,8 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 import pytest
 
-from llm_router_plugins.utils.routing.semantic.simple import (
-    DefaultSemanticRoutingPlugin,
+from llm_router_plugins.utils.routing.simple_semantic import (
+    SimpleSemanticRoutingPlugin,
 )
 
 # ---------- derive default values from the JSON config (only for tests) ----------
@@ -25,8 +25,7 @@ _JSON_PATH = (
     / "llm_router_plugins"
     / "resources"
     / "routing"
-    / "semantic"
-    / "simple.json"
+    / "simple_semantic.json"
 )
 _json = json.load(open(_JSON_PATH, "r", encoding="utf-8"))
 _settings = _json["settings"]
@@ -34,11 +33,9 @@ _settings = _json["settings"]
 _DEFAULT_MODELS: list = list(_settings["default_models"].values())
 _DEFAULT_INTENT_CATEGORIES: dict = {
     **dict(_json["intents"]),
-    "none": _json.get("none", {}) or {},
 }
 _DEFAULT_COMPLEXITY_THRESHOLDS: tuple = (
     _settings["len_thresholds_max"]["simple"],
-    _settings["len_thresholds_max"]["medium"],
 )
 
 
@@ -71,7 +68,7 @@ def _make_plugin(
         os.environ["LLM_ROUTER_ROUTING_COMPLEXITY_THRESHOLDS"] = thresholds
     if default_model is not None:
         os.environ["LLM_ROUTER_ROUTING_DEFAULT_MODEL"] = default_model
-    return DefaultSemanticRoutingPlugin()
+    return SimpleSemanticRoutingPlugin()
 
 
 # ------------ model passthrough
