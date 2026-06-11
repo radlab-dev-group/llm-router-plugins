@@ -1,0 +1,127 @@
+{
+  "description": "Semantic routing configuration for embedding-based model selection.",
+  "embedding_model": "/mnt/data2/llms/models/radlab-open/semantic-euro-bert-encoder-v1",
+  "settings": {
+    "chunk_size": 256,
+    "chunk_overlap": 64,
+    "similarity_threshold": 0.0,
+    "top_k": 1
+  },
+  "routing_targets": [
+    {
+      "name": "code-generation",
+      "model_name": "qwen3.6:35b",
+      "description": "Model specialized for code-related tasks: writing, debugging, refactoring, and explaining code.",
+      "examples": [
+        "Write a Python function to sort a list of dictionaries by a key",
+        "Debug this React component that crashes on mount",
+        "Refactor this SQL query to use CTEs instead of subqueries",
+        "Create a FastAPI endpoint for user registration with validation",
+        "Explain how dependency injection works in Spring Boot",
+        "Napisać klasę w Pythonie która implementuje wzorzec Singleton",
+        "Popraw błąd w tym kodzie C++ który powoduje wyciek pamięci",
+        "Stworzyć funkcję do przetwarzania pliku CSV w Pandas",
+        "Jak zaimplementować autentykację JWT w Node.js?",
+        "Napisz testy jednostkowe dla modułu płatności",
+        "Write code to parse JSON and extract nested fields",
+        "Fix memory leak in Rust struct implementation",
+        "Implement binary search algorithm in JavaScript"
+      ]
+    },
+    {
+      "name": "math-analysis",
+      "model_name": "qwen3.6:35b",
+      "description": "Model for mathematical computations, statistical analysis, and quantitative reasoning.",
+      "examples": [
+        "Calculate the probability of getting at least two sixes in ten dice rolls",
+        "Compute the determinant of this 4x4 matrix",
+        "Perform linear regression on the given dataset",
+        "Solve the differential equation dy/dx = 2x + y",
+        "Oblicz prawdopodobieństwo warunkowe dla zdarzeń A i B",
+        "Rozwiąż równanie kwadratowe x² - 5x + 6 = 0",
+        "Oblicz średnią, odchylenie standardowe i medianę dla podanego zbioru danych",
+        "Wykonaj analizę statystyczną wyników eksperymentu",
+        "Zastosuj twierdzenie Bayesa do obliczenia prawdopodobieństwa",
+        "Calculate the Fourier transform of the given signal",
+        "Find the eigenvalues and eigenvectors of the given matrix",
+        "Compute the gradient descent for the loss function"
+      ]
+    },
+    {
+      "name": "creative-writing",
+      "model_name": "gpt-oss:120b",
+      "description": "Model optimized for creative and generative writing tasks: stories, poems, marketing content, and artistic text.",
+      "examples": [
+        "Write a short story about a time traveler who gets stuck in the Renaissance",
+        "Create a poem about the beauty of Polish countryside in autumn",
+        "Draft a marketing email for a new coffee shop opening in Warsaw",
+        "Write a product description for a premium mechanical keyboard",
+        "Napisać opowiadanie fantasy o młodym czarniku który odkrywa swoje moce",
+        "Stwórz wiersz o tematyce miłosnej w stylu Mickiewicza",
+        "Napisz post na social media dla marki odzieżowej",
+        "Stwórz scenariusz filmu krótkometrażowego o przyjaźni",
+        "Napisz recenzję książki w stylu bloga literackiego",
+        "Write a creative product launch announcement for a tech startup",
+        "Create a brand story for an eco-friendly fashion label",
+        "Draft a compelling blog post about remote work culture"
+      ]
+    },
+    {
+      "name": "general-assistant",
+      "model_name": "gpt-oss:120b",
+      "description": "General-purpose model for everyday questions, explanations, research, and conversation.",
+      "examples": [
+        "What is the difference between classical and quantum computing?",
+        "Explain how neural networks work in simple terms",
+        "What are the best practices for secure password storage?",
+        "Tell me about the history of the European Union",
+        "Jak działa mechanizm blockchain w Bitcoin?",
+        "Wyjaśnij różnicę między CNN a RNN w przetwarzaniu obrazu",
+        "Opowiedz o najnowszych osiągnięciach w medycynie",
+        "Jak przygotować skuteczną strategię marketingową?",
+        "Czym jest sztuczna inteligencja i jak działa?",
+        "What are the pros and cons of microservices architecture?",
+        "Explain the concept of blockchain to a non-technical person",
+        "What should I consider when choosing a cloud provider?"
+      ]
+    },
+    {
+      "name": "data-science",
+      "model_name": "qwen3.6:35b",
+      "description": "Model specialized for data science tasks: data analysis, visualization, machine learning pipelines, and reporting.",
+      "examples": [
+        "Create a data analysis pipeline for customer churn prediction",
+        "Write code to visualize sales data with matplotlib and seaborn",
+        "Build a machine learning model to classify customer feedback",
+        "Perform exploratory data analysis on the Titanic dataset",
+        "Napisz skrypt do analizy danych sprzedażowych w Pandas",
+        "Stworzyć pipeline ETL do przetwarzania danych z API",
+        "Zaimplementować model clustering dla danych klientów",
+        "Wygeneruj wykresy słupkowe i kołowe dla raportu kwartalnego",
+        "Przeprowadź analizę sentiment na opiniach klientów",
+        "Build a recommendation system using collaborative filtering",
+        "Create a time series forecast for stock prices with ARIMA",
+        "Implement feature engineering for a classification task"
+      ]
+    },
+    {
+      "name": "system-admin",
+      "model_name": "gpt-oss:120b",
+      "description": "Model for system administration, DevOps, infrastructure, and technical operations.",
+      "examples": [
+        "Write a bash script to monitor disk usage and send alerts",
+        "Configure Nginx as a reverse proxy with SSL termination",
+        "Set up a Docker Compose file for a microservices architecture",
+        "Debug a Kubernetes pod that keeps crashing with OOM errors",
+        "Skrypt Bash do automatycznego backupu baz danych PostgreSQL",
+        "Konfiguracja firewalla UFW dla serwera webowego",
+        "Ustaw monitorowanie infrastruktury z Prometheus i Grafana",
+        "Napisz playbook Ansible do wdrożenia aplikacji Django",
+        "Skonfiguruj CI/CD pipeline z GitHub Actions",
+        "Write Terraform code to provision AWS infrastructure",
+        "Set up log aggregation with Elasticsearch and Kibana",
+        "Configure HAProxy load balancing for web servers"
+      ]
+    }
+  ]
+}
