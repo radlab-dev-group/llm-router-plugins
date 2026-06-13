@@ -59,10 +59,14 @@ All configuration is loaded from
 ``llm_router_plugins/resources/routing/simple_semantic.json`` and can be
 overridden by environment variables:
 
-    LLM_ROUTER_ROUTING_COMPLEXITY_THRESHOLDS  - pipe-separated simple|medium
-    LLM_ROUTER_ROUTING_MODELS                 - pipe-separated model names
-    LLM_ROUTER_ROUTING_DEFAULT_MODEL          - fallback model name
-    LLM_ROUTER_ROUTING_INTENT_<name>          - override intent keywords
+    LLM_ROUTER_ROUTING_SEMANTIC_COMPLEXITY_THRESHOLDS
+        - pipe-separated simple|medium
+    LLM_ROUTER_ROUTING_SEMANTIC_MODELS
+        - pipe-separated model names
+    LLM_ROUTER_ROUTING_SEMANTIC_DEFAULT_MODEL
+        - fallback model name
+    LLM_ROUTER_ROUTING_SEMANTIC_INTENT_<name>
+        - override intent keywords
 
 Example JSON configuration::
 
@@ -99,6 +103,9 @@ from typing import Any, Dict, List, Optional
 from llm_router_plugins.plugin_interface import PluginInterface
 from llm_router_plugins.utils.routing.simple_semantic.config import (
     RoutingConfig,
+)
+from llm_router_plugins.utils.routing.constants import (
+    SEMANTIC_ROUTING_PREFIX,
 )
 
 
@@ -169,7 +176,7 @@ class SimpleSemanticRoutingPlugin(PluginInterface):
         cfg = self._config
 
         # --- complexity thresholds ---
-        thresh_str = os.getenv("LLM_ROUTER_ROUTING_COMPLEXITY_THRESHOLDS", "")
+        thresh_str = os.getenv(f"{SEMANTIC_ROUTING_PREFIX}COMPLEXITY_THRESHOLDS", "")
         if thresh_str:
             parts = thresh_str.split("|")
             if len(parts) == 2:
@@ -199,7 +206,7 @@ class SimpleSemanticRoutingPlugin(PluginInterface):
             ]
 
         # --- models ---
-        models_str = os.getenv("LLM_ROUTER_ROUTING_MODELS", "")
+        models_str = os.getenv(f"{SEMANTIC_ROUTING_PREFIX}MODELS", "")
         if models_str:
             self._models = [m.strip() for m in models_str.split("|") if m.strip()]
         else:
@@ -208,8 +215,8 @@ class SimpleSemanticRoutingPlugin(PluginInterface):
         # --- intents ---
         intents: Dict[str, Dict[str, Any]] = dict(cfg.intent_categories)
         for key, value in os.environ.items():
-            if key.startswith("LLM_ROUTER_ROUTING_INTENT_"):
-                category = key[len("LLM_ROUTER_ROUTING_INTENT_") :]
+            if key.startswith(f"{SEMANTIC_ROUTING_PREFIX}INTENT_"):
+                category = key[len(f"{SEMANTIC_ROUTING_PREFIX}INTENT_") :]
                 entries = [e.strip() for e in value.split("|") if e.strip()]
                 kw_list = [e for e in entries if ":" not in e]
                 ph_list = [e for e in entries if ":" in e]
@@ -222,7 +229,7 @@ class SimpleSemanticRoutingPlugin(PluginInterface):
         self._intent_categories = intents
 
         # --- default model ---
-        dm_env = os.getenv("LLM_ROUTER_ROUTING_DEFAULT_MODEL")
+        dm_env = os.getenv(f"{SEMANTIC_ROUTING_PREFIX}DEFAULT_MODEL")
         self._default_model = dm_env or cfg.default_models.get(
             "simple", cfg.models_list[0]
         )

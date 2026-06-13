@@ -16,10 +16,10 @@ import os
 import pickle
 import logging
 
+import numpy as np
+
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
-
-import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from llm_router_plugins.utils.routing.semantic_biencoder.config import (

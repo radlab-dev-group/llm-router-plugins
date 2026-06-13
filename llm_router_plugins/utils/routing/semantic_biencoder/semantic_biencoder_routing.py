@@ -10,11 +10,16 @@ Configuration is loaded from
 ``llm_router_plugins/resources/routing/semantic/semantic_biencoder.json``
 and can be overridden by environment variables:
 
-    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_MODEL - override the embedding model name
-    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_TARGETS - pipe-separated list of target names
-    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_SIZE - override chunk size
-    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_OVERLAP - override chunk overlap
-    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_PERSIST_DIR - directory for FAISS index persistence
+    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_MODEL
+        - override the embedding model name
+    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_TARGETS
+        - pipe-separated list of target names
+    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_SIZE
+        - override chunk size
+    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_OVERLAP
+        - override chunk overlap
+    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_PERSIST_DIR
+        - directory for FAISS index persistence
 
 Example JSON configuration::
 
@@ -48,6 +53,9 @@ from llm_router_plugins.utils.routing.semantic_biencoder.config import (
 )
 from llm_router_plugins.utils.routing.semantic_biencoder.embedder import (
     EmbeddingRouter,
+)
+from llm_router_plugins.utils.routing.constants import (
+    SEMANTIC_ROUTING_PREFIX,
 )
 
 
@@ -93,7 +101,7 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
 
         self._config = SemanticBiEncoderConfig.from_file()
         persist_dir = self._config.vector_store_path
-        env_persist = os.getenv("LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_PERSIST_DIR")
+        env_persist = os.getenv(f"{SEMANTIC_ROUTING_PREFIX}PERSIST_DIR")
         if env_persist:
             persist_dir = env_persist
             if self._logger:
@@ -229,6 +237,7 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
           in the config file are silently ignored)
         - ``CHUNK_SIZE`` — override the chunk size used for embedding
         - ``CHUNK_OVERLAP`` — override the chunk overlap used for embedding
+        - ``PERSIST_DIR`` — directory for FAISS index persistence
 
         Parameters
         ----------
@@ -242,13 +251,13 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
         ------
         None
         """
-        model_env = os.getenv("LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_MODEL")
+        model_env = os.getenv(f"{SEMANTIC_ROUTING_PREFIX}MODEL")
         if model_env:
             self._config.embedding_model = model_env
             if self._logger:
                 self._logger.info("Overriding embedding model: %s", model_env)
 
-        targets_env = os.getenv("LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_TARGETS")
+        targets_env = os.getenv(f"{SEMANTIC_ROUTING_PREFIX}TARGETS")
         if targets_env:
             allowed = set(self._config.target_names)
             selected = [
@@ -267,18 +276,14 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
                         "|".join(selected),
                     )
 
-        chunk_size_env = os.getenv(
-            "LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_SIZE"
-        )
+        chunk_size_env = os.getenv(f"{SEMANTIC_ROUTING_PREFIX}CHUNK_SIZE")
         if chunk_size_env:
             try:
                 self._config.chunk_size = int(chunk_size_env)
             except ValueError:
                 pass
 
-        chunk_overlap_env = os.getenv(
-            "LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_OVERLAP"
-        )
+        chunk_overlap_env = os.getenv(f"{SEMANTIC_ROUTING_PREFIX}CHUNK_OVERLAP")
         if chunk_overlap_env:
             try:
                 self._config.chunk_overlap = int(chunk_overlap_env)
