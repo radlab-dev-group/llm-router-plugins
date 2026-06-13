@@ -4,18 +4,19 @@ Embedding-based router using BiEncoder with FAISS vector store.
 For each routing target, the embedder pre-computes a set of embeddings from the
 target's description and examples using a sliding-window context.  At query time
 the user message is embedded and matched against all stored embeddings via FAISS
-(inner product on L2-normalised vectors = cosine similarity), returning the
+(inner product on L2-normalized vectors = cosine similarity), returning the
 best-matching target.
 
 When *persist_dir* is provided the FAISS index and docstore are saved to disk
 (on ``{persist_dir}/index.faiss`` and ``{persist_dir}/docstore.pkl``) and
-re-loaded on the next initialisation.
+re-loaded on the next initialization.
 """
 
-import logging
-from dataclasses import dataclass
 import os
 import pickle
+import logging
+
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -116,11 +117,12 @@ class EmbeddingRouter:
         self._persist_dir: Optional[str] = persist_dir
         self._model: Optional[SentenceTransformer] = None
         self._faiss_index: Any = None
-        self._docstore: Dict[int, str] = {}  # doc_id -> target_name
+
+        # doc_id -> target_name
+        self._doc_store: Dict[int, str] = {}
+
         self._id_counter: int = 0
         self._initialized = False
-
-    # -------------- init
 
     def initialize(self) -> None:
         """
@@ -155,6 +157,80 @@ class EmbeddingRouter:
         self._build_index()
         self._save_index()
         self._initialized = True
+
+    def route(self, user_message: str) -> Dict[str, Any]:
+        """
+        Embed *user_message* and return the best-matching routing target.
+
+        Parameters
+        ----------
+        user_message : str
+            The user's input text to route.
+
+        Returns
+        -------
+        dict
+            Dictionary with keys:
+            - ``model_name`` (str): the model to use
+            - ``target_name`` (str): the matched target name
+            - ``similarity`` (float): cosine similarity score (0–1)
+            - ``all_scores`` (List[dict]): full ranking
+
+        Raises
+        ------
+        RuntimeError
+            If the router has not been initialised.
+        """
+        self._ensure_initialized()
+        assert self._model is not None
+        assert self._faiss_index is not None
+
+        user_embedding = self._model.encode(
+            [user_message], show_progress_bar=False, convert_to_numpy=True
+        )
+        if isinstance(user_embedding, list):
+            user_embedding = np.array(user_embedding)
+        user_embedding = user_embedding.squeeze()  # (embed_dim,)
+
+        # L2-normalise the query
+        norm = float(np.linalg.norm(user_embedding))
+        if norm > 0:
+            user_embedding = user_embedding / norm
+        user_embedding = user_embedding.reshape(1, -1)  # (1, embed_dim)
+
+        # FAISS query
+        k = min(self._config.top_k, self._faiss_index.ntotal)
+        scores, doc_ids = self._faiss_index.search(user_embedding, k)
+
+        # Aggregate scores per target
+        target_scores: Dict[str, List[float]] = {}
+        for s, doc_id in zip(scores[0], doc_ids[0]):
+            if doc_id < 0:
+                continue
+            tname = self._doc_store.get(doc_id, "unknown")
+            target_scores.setdefault(tname, []).append(float(s))
+
+        # Build ranked list
+        target_models: Dict[str, str] = {
+            t.name: t.model_name for t in self._config.routing_targets
+        }
+        all_scores: List[Tuple[str, float, str]] = []
+        for tname, sims in target_scores.items():
+            avg_sim = float(np.mean(sims))
+            all_scores.append((tname, avg_sim, target_models.get(tname, "unknown")))
+        all_scores.sort(key=lambda x: x[1], reverse=True)
+
+        if all_scores:
+            best_name, best_sim, best_model = all_scores[0]
+        else:
+            best_name, best_sim, best_model = "unknown", 0.0, "unknown"
+
+        return {
+            "model_name": best_model,
+            "target_name": best_name,
+            "similarity": best_sim,
+            "all_scores": [{"target": n, "similarity": s} for n, s, _ in all_scores],
+        }
 
     def _load_model(self) -> None:
         """
@@ -229,7 +305,7 @@ class EmbeddingRouter:
             # Add each chunk individually with a monotonically increasing doc ID
             for i in range(len(normalized)):
                 self._faiss_index.add(normalized[i : i + 1])
-                self._docstore[self._id_counter] = target.name
+                self._doc_store[self._id_counter] = target.name
                 self._id_counter += 1
                 total_chunks += 1
 
@@ -239,124 +315,6 @@ class EmbeddingRouter:
                 len(self._config.routing_targets),
                 total_chunks,
             )
-
-    # ------ query
-
-    def route(self, user_message: str) -> Dict[str, Any]:
-        """
-        Embed *user_message* and return the best-matching routing target.
-
-        Parameters
-        ----------
-        user_message : str
-            The user's input text to route.
-
-        Returns
-        -------
-        dict
-            Dictionary with keys:
-            - ``model_name`` (str): the model to use
-            - ``target_name`` (str): the matched target name
-            - ``similarity`` (float): cosine similarity score (0–1)
-            - ``all_scores`` (List[dict]): full ranking
-
-        Raises
-        ------
-        RuntimeError
-            If the router has not been initialised.
-        """
-        self._ensure_initialized()
-        assert self._model is not None
-        assert self._faiss_index is not None
-
-        user_embedding = self._model.encode(
-            [user_message], show_progress_bar=False, convert_to_numpy=True
-        )
-        if isinstance(user_embedding, list):
-            user_embedding = np.array(user_embedding)
-        user_embedding = user_embedding.squeeze()  # (embed_dim,)
-
-        # L2-normalise the query
-        norm = float(np.linalg.norm(user_embedding))
-        if norm > 0:
-            user_embedding = user_embedding / norm
-        user_embedding = user_embedding.reshape(1, -1)  # (1, embed_dim)
-
-        # FAISS query
-        k = min(self._config.top_k, self._faiss_index.ntotal)
-        scores, doc_ids = self._faiss_index.search(user_embedding, k)
-
-        # Aggregate scores per target
-        target_scores: Dict[str, List[float]] = {}
-        for s, doc_id in zip(scores[0], doc_ids[0]):
-            if doc_id < 0:
-                continue
-            tname = self._docstore.get(doc_id, "unknown")
-            target_scores.setdefault(tname, []).append(float(s))
-
-        # Build ranked list
-        target_models: Dict[str, str] = {
-            t.name: t.model_name for t in self._config.routing_targets
-        }
-        all_scores: List[Tuple[str, float, str]] = []
-        for tname, sims in target_scores.items():
-            avg_sim = float(np.mean(sims))
-            all_scores.append((tname, avg_sim, target_models.get(tname, "unknown")))
-        all_scores.sort(key=lambda x: x[1], reverse=True)
-
-        if all_scores:
-            best_name, best_sim, best_model = all_scores[0]
-        else:
-            best_name, best_sim, best_model = "unknown", 0.0, "unknown"
-
-        return {
-            "model_name": best_model,
-            "target_name": best_name,
-            "similarity": best_sim,
-            "all_scores": [{"target": n, "similarity": s} for n, s, _ in all_scores],
-        }
-
-    # ------ I/O
-
-    def save_index(self) -> None:
-        """
-        Persist the current FAISS index and docstore to disk.
-
-        Returns
-        -------
-        None
-
-        Raises
-        ------
-        IOError
-            If the directory cannot be created or files cannot be written.
-        """
-        if not self._persist_dir or self._faiss_index is None:
-            return
-        os.makedirs(self._persist_dir, exist_ok=True)
-        faiss_module = _import_faiss()
-        faiss_module.write_index(
-            self._faiss_index, os.path.join(self._persist_dir, "index.faiss")
-        )
-        with open(os.path.join(self._persist_dir, "docstore.pkl"), "wb") as fh:
-            pickle.dump(self._docstore, fh)
-        if self._logger:
-            self._logger.info("FAISS index saved to %s", self._persist_dir)
-
-    def _save_index(self) -> None:
-        """
-        Internal save — always run after building the index.
-
-        Returns
-        -------
-        None
-
-        Raises
-        ------
-        IOError
-            If disk write fails.
-        """
-        self.save_index()
 
     def _load_index(self) -> bool:
         """
@@ -406,11 +364,50 @@ class EmbeddingRouter:
                 return False
 
         self._faiss_index = faiss_index
-        self._docstore = docstore
+        self._doc_store = docstore
         self._id_counter = faiss_index.ntotal
         return True
 
-    # ------ helpers
+    def save_index(self) -> None:
+        """
+        Persist the current FAISS index and docstore to disk.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        IOError
+            If the directory cannot be created or files cannot be written.
+        """
+        if not self._persist_dir or self._faiss_index is None:
+            return
+        os.makedirs(self._persist_dir, exist_ok=True)
+        faiss_module = _import_faiss()
+        faiss_module.write_index(
+            self._faiss_index, os.path.join(self._persist_dir, "index.faiss")
+        )
+        with open(os.path.join(self._persist_dir, "docstore.pkl"), "wb") as fh:
+            pickle.dump(self._doc_store, fh)
+        if self._logger:
+            self._logger.info("FAISS index saved to %s", self._persist_dir)
+
+    def _save_index(self) -> None:
+        """
+        Internal save — always run after building the index.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        IOError
+            If disk write fails.
+        """
+        self.save_index()
+
     def _ensure_initialized(self) -> None:
         """
         Ensure the router is initialised.
@@ -427,7 +424,6 @@ class EmbeddingRouter:
         if not self._initialized:
             self.initialize()
 
-    # ------ split / similarity utilities
     @staticmethod
     def _split_into_chunks(text: str, chunk_size: int, overlap: int) -> List[str]:
         """
