@@ -29,7 +29,18 @@ _faiss: Any = None
 
 
 def _import_faiss() -> Any:
-    """Lazy import of faiss to allow module loading without it installed."""
+    """
+    Lazy import of faiss to allow module loading without it installed.
+
+    Returns
+    -------
+    Any
+        The faiss module object.
+
+    Raises
+    ------
+    None
+    """
     global _faiss
     if _faiss is None:
         import faiss as _faiss_module
@@ -40,7 +51,16 @@ def _import_faiss() -> Any:
 
 @dataclass
 class _TargetEmbeddings:
-    """Legacy dataclass kept for backward compat — no longer used internally."""
+    """
+    Legacy dataclass kept for backward compat — no longer used internally.
+
+    Attributes
+    ----------
+    name : str
+    model_name : str
+    embeddings : np.ndarray
+    labels : List[str]
+    """
 
     name: str
     model_name: str
@@ -70,18 +90,53 @@ class EmbeddingRouter:
         logger: Optional[logging.Logger] = None,
         persist_dir: Optional[str] = None,
     ) -> None:
+        """
+        Initialize the router with configuration and optional persistence.
+
+        Parameters
+        ----------
+        config : SemanticBiEncoderConfig
+            Routing configuration (targets, chunking params, embedding model).
+        logger : logging.Logger, optional
+            Logger instance.
+        persist_dir : str, optional
+            Directory where the FAISS index and docstore are saved.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        ValueError
+            If *config* contains no routing targets.
+        """
         self._config = config
         self._logger = logger
         self._persist_dir: Optional[str] = persist_dir
         self._model: Optional[SentenceTransformer] = None
         self._faiss_index: Any = None
-        self._docstore: Dict[int, str] = {}  # doc_id → target_name
+        self._docstore: Dict[int, str] = {}  # doc_id -> target_name
         self._id_counter: int = 0
         self._initialized = False
 
-    # ------------------------------------------------------------------ init
+    # -------------- init
+
     def initialize(self) -> None:
-        """Load the model and pre-compute / load the FAISS index."""
+        """
+        Load the model and pre-compute / load the FAISS index.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        RuntimeError
+            If the embedding model cannot be loaded (e.g. network failure).
+        ValueError
+            If no routing targets are defined.
+        """
         if self._initialized:
             return
 
@@ -102,6 +157,18 @@ class EmbeddingRouter:
         self._initialized = True
 
     def _load_model(self) -> None:
+        """
+        Load the SentenceTransformer embedding model.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        RuntimeError
+            If the model cannot be loaded.
+        """
         model_name = self._config.embedding_model
         if self._logger:
             self._logger.info("Loading embedding model: %s", model_name)
@@ -112,7 +179,20 @@ class EmbeddingRouter:
             self._logger.info("Embedding model loaded successfully.")
 
     def _build_index(self) -> None:
-        """Encode all target chunks and build the FAISS index."""
+        """
+        Encode all target chunks and build the FAISS index.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        ValueError
+            If no embeddings can be produced.
+        RuntimeError
+            If FAISS fails to create the index.
+        """
         chunk_size = self._config.chunk_size
         overlap = self._config.chunk_overlap
         total_chunks = 0
@@ -160,16 +240,30 @@ class EmbeddingRouter:
                 total_chunks,
             )
 
-    # --------------------------------------------------------------- query
+    # ------ query
+
     def route(self, user_message: str) -> Dict[str, Any]:
         """
         Embed *user_message* and return the best-matching routing target.
 
-        Returns a dict with keys:
+        Parameters
+        ----------
+        user_message : str
+            The user's input text to route.
+
+        Returns
+        -------
+        dict
+            Dictionary with keys:
             - ``model_name`` (str): the model to use
             - ``target_name`` (str): the matched target name
             - ``similarity`` (float): cosine similarity score (0–1)
             - ``all_scores`` (List[dict]): full ranking
+
+        Raises
+        ------
+        RuntimeError
+            If the router has not been initialised.
         """
         self._ensure_initialized()
         assert self._model is not None
@@ -188,14 +282,14 @@ class EmbeddingRouter:
             user_embedding = user_embedding / norm
         user_embedding = user_embedding.reshape(1, -1)  # (1, embed_dim)
 
-        # FAISS query — scores are dot-products (= cosine for normalised vectors)
+        # FAISS query
         k = min(self._config.top_k, self._faiss_index.ntotal)
         scores, doc_ids = self._faiss_index.search(user_embedding, k)
 
-        # Aggregate cosine-similarity scores per target_name
+        # Aggregate scores per target
         target_scores: Dict[str, List[float]] = {}
         for s, doc_id in zip(scores[0], doc_ids[0]):
-            if doc_id < 0:  # FAISS padding sentinel
+            if doc_id < 0:
                 continue
             tname = self._docstore.get(doc_id, "unknown")
             target_scores.setdefault(tname, []).append(float(s))
@@ -222,9 +316,21 @@ class EmbeddingRouter:
             "all_scores": [{"target": n, "similarity": s} for n, s, _ in all_scores],
         }
 
-    # --------------------------------------------------------------- I/O
+    # ------ I/O
+
     def save_index(self) -> None:
-        """Persist the current FAISS index and docstore to disk."""
+        """
+        Persist the current FAISS index and docstore to disk.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        IOError
+            If the directory cannot be created or files cannot be written.
+        """
         if not self._persist_dir or self._faiss_index is None:
             return
         os.makedirs(self._persist_dir, exist_ok=True)
@@ -238,11 +344,36 @@ class EmbeddingRouter:
             self._logger.info("FAISS index saved to %s", self._persist_dir)
 
     def _save_index(self) -> None:
-        """Internal save — always run after building the index."""
+        """
+        Internal save — always run after building the index.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        IOError
+            If disk write fails.
+        """
         self.save_index()
 
     def _load_index(self) -> bool:
-        """Load a previously-saved FAISS index and docstore. Returns False on failure."""
+        """
+        Load a previously-saved FAISS index and docstore. Returns False on failure.
+
+        Returns
+        -------
+        bool
+            True if the index was loaded successfully, False otherwise.
+
+        Raises
+        ------
+        RuntimeError
+            If the FAISS index is corrupted.
+        pickle.UnpicklingError
+            If the docstore pickle file is corrupted.
+        """
         index_path = os.path.join(self._persist_dir, "index.faiss")
         docstore_path = os.path.join(self._persist_dir, "docstore.pkl")
         if not (
@@ -279,15 +410,48 @@ class EmbeddingRouter:
         self._id_counter = faiss_index.ntotal
         return True
 
-    # ------------------------------------------------------------- helpers
+    # ------ helpers
     def _ensure_initialized(self) -> None:
+        """
+        Ensure the router is initialised.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`initialize` fails.
+        """
         if not self._initialized:
             self.initialize()
 
-    # ------ split / similarity utilities (kept for backward compat)
+    # ------ split / similarity utilities
     @staticmethod
     def _split_into_chunks(text: str, chunk_size: int, overlap: int) -> List[str]:
-        """Split *text* into overlapping chunks of *chunk_size* tokens."""
+        """
+        Split *text* into overlapping chunks of *chunk_size* tokens.
+
+        Parameters
+        ----------
+        text : str
+            The input text to split.
+        chunk_size : int
+            Maximum number of tokens per chunk.
+        overlap : int
+            Number of overlapping tokens between consecutive chunks.
+
+        Returns
+        -------
+        List[str]
+            A list of overlapping text chunks.
+
+        Raises
+        ------
+        ValueError
+            If *chunk_size* <= 0 or *overlap* >= *chunk_size*.
+        """
         tokens = text.split()
         if len(tokens) <= chunk_size:
             return [text]
@@ -308,6 +472,23 @@ class EmbeddingRouter:
         """
         Compute cosine similarity between vector *a* (dim,) and matrix *b*
         (n, dim). Returns array of shape (n,).
+
+        Parameters
+        ----------
+        a : np.ndarray
+            Query vector of shape (embed_dim,).
+        b : np.ndarray
+            Reference matrix of shape (n, embed_dim).
+
+        Returns
+        -------
+        np.ndarray
+            Array of cosine similarities of shape (n,).
+
+        Raises
+        ------
+        ValueError
+            If the dimensions of *a* and *b* do not match.
         """
         a_norm = np.linalg.norm(a)
         if a_norm == 0:

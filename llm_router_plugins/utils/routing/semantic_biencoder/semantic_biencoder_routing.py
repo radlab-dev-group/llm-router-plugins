@@ -57,11 +57,37 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
     When ``payload["model"] == "auto"`` the plugin embeds the last user
     message and selects the nearest semantic target (and its associated model)
     using cosine similarity.
+
+    Attributes
+    ----------
+    name : str
+        Plugin identifier (``"semantic_biencoder_routing"``).
     """
 
     name = "semantic_biencoder_routing"
 
     def __init__(self, logger: Optional[logging.Logger] = None) -> None:
+        """
+        Initialize the plugin: load config, resolve persist dir, build FAISS index.
+
+        Parameters
+        ----------
+        logger : logging.Logger, optional
+            Logger instance. If ``None``, a default logger is used internally.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        FileNotFoundError
+            If the configuration file does not exist at the expected path.
+        KeyError
+            If the configuration file is missing required fields.
+        ValueError
+            If no routing targets are defined in the configuration.
+        """
         super().__init__(logger=logger)
 
         self._config = SemanticBiEncoderConfig.from_file()
@@ -86,7 +112,30 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
         self._router.initialize()
 
     def _override_from_env(self) -> None:
-        """Apply environment variable overrides to config."""
+        """
+        Apply environment variable overrides to config.
+
+        Supported environment variables (prefix
+        ``LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_``):
+
+        - ``MODEL`` — override the embedding model name
+        - ``TARGETS`` — pipe-separated target name whitelist (targets not
+          in the config file are silently ignored)
+        - ``CHUNK_SIZE`` — override the chunk size used for embedding
+        - ``CHUNK_OVERLAP`` — override the chunk overlap used for embedding
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        None
+        """
         model_env = os.getenv("LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_MODEL")
         if model_env:
             self._config.embedding_model = model_env
@@ -134,6 +183,34 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
         """
         Process *payload*.  If ``payload["model"] == "auto"`` route to the
         best-matching model via semantic similarity.
+
+        The last user message is extracted from the payload (via ``messages``,
+        ``user_last_statement``, ``query``, or ``prompt``), embedded, and
+        matched against the FAISS index.  The result replaces ``payload["model"]``
+        with the selected model name and adds a ``"routing"`` metadata dict.
+
+        Parameters
+        ----------
+        payload : dict
+            The incoming message payload containing at least the ``"model"``
+            key (set to ``"auto"`` for routing to activate) and either
+            ``"messages"`` or ``"query"``.
+
+        Returns
+        -------
+        dict
+            The modified payload. If ``payload["model"] != "auto"`` the
+            payload is returned unchanged.  If routing occurs,
+            ``payload["model"]`` is set to the selected model name and
+            ``payload["routing"]`` is added with:
+
+            - ``"plugin"`` (str): ``"semantic_biencoder_routing"``
+            - ``"target_name"`` (str): name of the matched target
+            - ``"similarity"`` (float): mean cosine similarity score
+
+        Raises
+        ------
+        None
         """
         if payload.get("model") != "auto":
             return payload
@@ -168,6 +245,31 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
 
     @staticmethod
     def _get_text_from_payload(payload: Dict[str, Any]) -> str:
+        """
+        Extract the user message text from *payload*.
+
+        The text is extracted using the following priority:
+
+        1. ``payload["messages"][-1]["content"]`` (last message in a chat history)
+        2. ``payload["user_last_statement"]``
+        3. ``payload["query"]``
+        4. ``payload["prompt"]``
+        5. ``payload["input"]``
+
+        Parameters
+        ----------
+        payload : dict
+            The message payload to extract text from.
+
+        Returns
+        -------
+        str
+            The extracted text, or an empty string if no text is found.
+
+        Raises
+        ------
+        None
+        """
         messages = payload.get("messages")
         if isinstance(messages, list) and messages:
             last_msg = messages[-1]
