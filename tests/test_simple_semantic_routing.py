@@ -34,9 +34,7 @@ _DEFAULT_MODELS: list = list(_settings["default_models"].values())
 _DEFAULT_INTENT_CATEGORIES: dict = {
     **dict(_json["intents"]),
 }
-_DEFAULT_COMPLEXITY_THRESHOLDS: tuple = (
-    _settings["len_thresholds_max"]["simple"],
-)
+_DEFAULT_COMPLEXITY_THRESHOLDS: tuple = (_settings["len_thresholds_max"]["simple"],)
 
 
 # --------------- fixtures

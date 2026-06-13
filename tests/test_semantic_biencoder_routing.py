@@ -10,9 +10,7 @@ import os
 import pathlib
 import sys
 
-sys.path.insert(
-    0, str(pathlib.Path(__file__).resolve().parent.parent)
-)
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import pytest
 
@@ -42,7 +40,7 @@ def _load_config() -> dict:
 def _clean_env():
     kept: dict = {}
     for key in list(os.environ.keys()):
-        if key.startswith("LLM_ROUTER_ROUTING_SEMANTIC_EURO"):
+        if key.startswith("LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER"):
             kept[key] = os.environ.pop(key)
     return kept
 
@@ -54,6 +52,7 @@ def _restore_env(kept: dict) -> None:
 
 # -------------------------- fixtures
 
+
 @pytest.fixture(autouse=True)
 def clean_semantic_biencoder_env():
     kept = _clean_env()
@@ -62,6 +61,7 @@ def clean_semantic_biencoder_env():
 
 
 # --------------- config tests
+
 
 def test_config_loads_from_file():
     cfg = SemanticBiEncoderConfig.from_file(_CONFIG_PATH)
@@ -90,6 +90,7 @@ def test_config_default_path():
 
 
 # --------------- embedder tests
+
 
 class TestEmbedder:
     """Tests for the EmbeddingRouter (without actually loading the model)."""
@@ -120,9 +121,7 @@ class TestEmbedder:
         # Check overlap: last 50 tokens of chunk 0 should overlap with first 50 of chunk 1
         chunk0_tokens = chunks[0].split()
         chunk1_tokens = chunks[1].split()
-        overlap_actual = len(
-            set(chunk0_tokens[-50:]) & set(chunk1_tokens[:50])
-        )
+        overlap_actual = len(set(chunk0_tokens[-50:]) & set(chunk1_tokens[:50]))
         assert overlap_actual > 0
 
     @staticmethod
@@ -130,6 +129,7 @@ class TestEmbedder:
         a = [1.0, 0.0, 0.0]
         b = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
         import numpy as np
+
         sims = EmbeddingRouter._cosine_similarity(np.array(a), np.array(b))
         assert sims[0] == pytest.approx(1.0, abs=1e-6)
         assert sims[1] == pytest.approx(0.0, abs=1e-6)
@@ -139,6 +139,7 @@ class TestEmbedder:
         a = [0.0, 0.0, 0.0]
         b = [[1.0, 0.0, 0.0]]
         import numpy as np
+
         sims = EmbeddingRouter._cosine_similarity(np.array(a), np.array(b))
         assert all(s == 0 for s in sims)
 
@@ -147,11 +148,13 @@ class TestEmbedder:
         a = [1.0, 0.0]
         b = [[-1.0, 0.0]]
         import numpy as np
+
         sims = EmbeddingRouter._cosine_similarity(np.array(a), np.array(b))
         assert sims[0] == pytest.approx(-1.0, abs=1e-6)
 
 
 # --------------- routing integration (mocked model)
+
 
 class TestRoutingIntegration:
     """Integration tests that patch SentenceTransformer to avoid downloading."""
@@ -190,7 +193,9 @@ class TestRoutingIntegration:
         plugin = SemanticBiEncoderRoutingPlugin()
         payload = {
             "model": "auto",
-            "messages": [{"role": "user", "content": "Write a Python function to sort a list"}],
+            "messages": [
+                {"role": "user", "content": "Write a Python function to sort a list"}
+            ],
         }
         result = plugin.apply(payload)
         assert result["model"] != "auto"
@@ -206,7 +211,9 @@ class TestRoutingIntegration:
         plugin = SemanticBiEncoderRoutingPlugin()
         payload = {
             "model": "auto",
-            "messages": [{"role": "user", "content": "Write a creative story about a dragon"}],
+            "messages": [
+                {"role": "user", "content": "Write a creative story about a dragon"}
+            ],
         }
         result = plugin.apply(payload)
         assert result["model"] != "auto"
@@ -220,7 +227,12 @@ class TestRoutingIntegration:
         plugin = SemanticBiEncoderRoutingPlugin()
         payload = {
             "model": "auto",
-            "messages": [{"role": "user", "content": "Calculate the probability of getting two sixes"}],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Calculate the probability of getting two sixes",
+                }
+            ],
         }
         result = plugin.apply(payload)
         assert result["model"] != "auto"
@@ -283,6 +295,7 @@ class TestRoutingIntegration:
 
 # --------------- env override tests
 
+
 class TestEnvOverrides:
     def test_env_override_embedding_model(self, monkeypatch):
         from llm_router_plugins.utils.routing.semantic_biencoder.semantic_biencoder_routing import (
@@ -290,14 +303,16 @@ class TestEnvOverrides:
         )
 
         monkeypatch.setenv(
-            "LLM_ROUTER_ROUTING_SEMANTIC_EURO_MODEL",
+            "LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_MODEL",
             "custom/embedding-model",
         )
 
         class MockModel:
             embed_dim = 768
+
             def __init__(self, *args, **kwargs):
                 pass
+
             def encode(self, texts, **kwargs):
                 return [[0.5] * 768] if isinstance(texts, list) else [0.5] * 768
 
@@ -315,14 +330,16 @@ class TestEnvOverrides:
         )
 
         monkeypatch.setenv(
-            "LLM_ROUTER_ROUTING_SEMANTIC_EURO_TARGETS",
+            "LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_TARGETS",
             "code-generation|creative-writing",
         )
 
         class MockModel:
             embed_dim = 768
+
             def __init__(self, *args, **kwargs):
                 pass
+
             def encode(self, texts, **kwargs):
                 return [[0.5] * 768] if isinstance(texts, list) else [0.5] * 768
 
@@ -341,14 +358,16 @@ class TestEnvOverrides:
         )
 
         monkeypatch.setenv(
-            "LLM_ROUTER_ROUTING_SEMANTIC_EURO_CHUNK_SIZE",
+            "LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_SIZE",
             "128",
         )
 
         class MockModel:
             embed_dim = 768
+
             def __init__(self, *args, **kwargs):
                 pass
+
             def encode(self, texts, **kwargs):
                 return [[0.5] * 768] if isinstance(texts, list) else [0.5] * 768
 
@@ -366,14 +385,16 @@ class TestEnvOverrides:
         )
 
         monkeypatch.setenv(
-            "LLM_ROUTER_ROUTING_SEMANTIC_EURO_TARGETS",
+            "LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_TARGETS",
             "code-generation|nonexistent-target",
         )
 
         class MockModel:
             embed_dim = 768
+
             def __init__(self, *args, **kwargs):
                 pass
+
             def encode(self, texts, **kwargs):
                 return [[0.5] * 768] if isinstance(texts, list) else [0.5] * 768
 
@@ -386,3 +407,85 @@ class TestEnvOverrides:
         target_names = [t.name for t in plugin._config.routing_targets]
         assert "nonexistent-target" not in target_names
         assert "code-generation" in target_names
+
+
+# ------ FAISS persistence tests
+
+
+class TestFAISSPersistence:
+    """Tests for FAISS index save/load disk persistence."""
+
+    @pytest.fixture(autouse=True)
+    def clean_semantic_biencoder_env(self):
+        kept = _clean_env()
+        yield
+        _restore_env(kept)
+
+    @pytest.fixture(autouse=True)
+    def patch_sentence_transformer(self, monkeypatch):
+        """Mock SentenceTransformer to return fake embeddings."""
+        import numpy as np
+
+        class MockModel:
+            embed_dim = 768
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def encode(self, texts, show_progress_bar=False, convert_to_numpy=True):
+                if isinstance(texts, str):
+                    texts = [texts]
+                result = np.random.RandomState(42).rand(len(texts), self.embed_dim)
+                norms = np.linalg.norm(result, axis=1, keepdims=True)
+                norms[norms == 0] = 1e-10
+                result = result / norms
+                if len(texts) == 1:
+                    return result[0]
+                return result
+
+        monkeypatch.setattr(
+            "llm_router_plugins.utils.routing.semantic_biencoder.embedder.SentenceTransformer",
+            MockModel,
+        )
+
+    def test_persist_and_reload_produces_same_results(self, tmp_path):
+        """Re-loading a saved FAISS index should give identical routing results."""
+        persist_dir = str(tmp_path / "persist")
+        cfg = SemanticBiEncoderConfig.from_file(_CONFIG_PATH)
+        cfg.vector_store_path = persist_dir
+
+        # Build first router
+        router1 = EmbeddingRouter(cfg, persist_dir=persist_dir)
+        router1.initialize()
+        result1 = router1.route("Write a Python function to sort a list")
+
+        # Create a second router that loads from disk
+        router2 = EmbeddingRouter(cfg, persist_dir=persist_dir)
+        router2.initialize()  # should load from disk, not rebuild
+        result2 = router2.route("Write a Python function to sort a list")
+
+        assert result1["model_name"] == result2["model_name"]
+        assert result1["target_name"] == result2["target_name"]
+        assert result1["similarity"] == result2["similarity"]
+
+    def test_persist_files_exist(self, tmp_path):
+        """Verify that build_index creates index.faiss and docstore.pkl."""
+        persist_dir = str(tmp_path / "persist")
+        cfg = SemanticBiEncoderConfig.from_file(_CONFIG_PATH)
+        cfg.vector_store_path = persist_dir
+
+        router = EmbeddingRouter(cfg, persist_dir=persist_dir)
+        router.initialize()
+
+        assert os.path.isfile(os.path.join(persist_dir, "index.faiss"))
+        assert os.path.isfile(os.path.join(persist_dir, "docstore.pkl"))
+
+    def test_no_persist_when_dir_is_none(self):
+        """Verify that persist_dir=None does not create any files."""
+        cfg = SemanticBiEncoderConfig.from_file(_CONFIG_PATH)
+
+        router = EmbeddingRouter(cfg, persist_dir=None)
+        router.initialize()
+
+        assert router._faiss_index is not None  # FAISS is still used in-memory
+        assert router._persist_dir is None
