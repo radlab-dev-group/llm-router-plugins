@@ -48,10 +48,13 @@ class SemanticBiEncoderConfig:
     chunk_overlap: int
     similarity_threshold: float
     top_k: int
+    vector_store_path: Optional[str]
     routing_targets: List[_TargetDef]
 
     @classmethod
-    def from_file(cls, path: Optional[pathlib.Path] = None) -> "SemanticBiEncoderConfig":
+    def from_file(
+        cls, path: Optional[pathlib.Path] = None
+    ) -> "SemanticBiEncoderConfig":
         """Load configuration from the bundled JSON file."""
         if path is None:
             _DEFAULT_PATH = (
@@ -65,11 +68,16 @@ class SemanticBiEncoderConfig:
 
         raw = cls._load_json(_DEFAULT_PATH)
         return cls(
-            embedding_model=raw.get("embedding_model", "radlab/semantic-euro-bert-encoder-v1"),
+            embedding_model=raw.get(
+                "embedding_model", "radlab/semantic-euro-bert-encoder-v1"
+            ),
             chunk_size=raw.get("settings", {}).get("chunk_size", 256),
             chunk_overlap=raw.get("settings", {}).get("chunk_overlap", 64),
-            similarity_threshold=raw.get("settings", {}).get("similarity_threshold", 0.0),
+            similarity_threshold=raw.get("settings", {}).get(
+                "similarity_threshold", 0.0
+            ),
             top_k=raw.get("settings", {}).get("top_k", 1),
+            vector_store_path=raw.get("settings", {}).get("vector_store_path", None),
             routing_targets=[
                 _TargetDef(
                     name=t["name"],

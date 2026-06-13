@@ -10,10 +10,11 @@ Configuration is loaded from
 ``llm_router_plugins/resources/routing/semantic/semantic_biencoder.json``
 and can be overridden by environment variables:
 
-    LLM_ROUTER_ROUTING_SEMANTIC_EURO_MODEL   - override the embedding model name
-    LLM_ROUTER_ROUTING_SEMANTIC_EURO_TARGETS - pipe-separated list of target names
-    LLM_ROUTER_ROUTING_SEMANTIC_EURO_CHUNK_SIZE    - override chunk size
-    LLM_ROUTER_ROUTING_SEMANTIC_EURO_CHUNK_OVERLAP - override chunk overlap
+    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_MODEL   - override the embedding model name
+    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_TARGETS - pipe-separated list of target names
+    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_SIZE    - override chunk size
+    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_OVERLAP - override chunk overlap
+    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_PERSIST_DIR   - directory for FAISS index persistence
 
 Example JSON configuration::
 
@@ -64,7 +65,21 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
         super().__init__(logger=logger)
 
         self._config = SemanticBiEncoderConfig.from_file()
-        self._router = EmbeddingRouter(self._config, logger=self._logger)
+        persist_dir = self._config.vector_store_path
+        env_persist = os.getenv("LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_PERSIST_DIR")
+        if env_persist:
+            persist_dir = env_persist
+            if self._logger:
+                self._logger.info(
+                    "Overriding vector store path: %s",
+                    persist_dir,
+                )
+
+        self._router = EmbeddingRouter(
+            self._config,
+            logger=self._logger,
+            persist_dir=persist_dir,
+        )
 
         # Environment overrides
         self._override_from_env()
@@ -72,15 +87,13 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
 
     def _override_from_env(self) -> None:
         """Apply environment variable overrides to config."""
-        model_env = os.getenv("LLM_ROUTER_ROUTING_SEMANTIC_EURO_MODEL")
+        model_env = os.getenv("LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_MODEL")
         if model_env:
             self._config.embedding_model = model_env
             if self._logger:
-                self._logger.info(
-                    "Overriding embedding model: %s", model_env
-                )
+                self._logger.info("Overriding embedding model: %s", model_env)
 
-        targets_env = os.getenv("LLM_ROUTER_ROUTING_SEMANTIC_EURO_TARGETS")
+        targets_env = os.getenv("LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_TARGETS")
         if targets_env:
             allowed = set(self._config.target_names)
             selected = [
@@ -99,7 +112,9 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
                         "|".join(selected),
                     )
 
-        chunk_size_env = os.getenv("LLM_ROUTER_ROUTING_SEMANTIC_EURO_CHUNK_SIZE")
+        chunk_size_env = os.getenv(
+            "LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_SIZE"
+        )
         if chunk_size_env:
             try:
                 self._config.chunk_size = int(chunk_size_env)
@@ -107,7 +122,7 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
                 pass
 
         chunk_overlap_env = os.getenv(
-            "LLM_ROUTER_ROUTING_SEMANTIC_EURO_CHUNK_OVERLAP"
+            "LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_OVERLAP"
         )
         if chunk_overlap_env:
             try:
@@ -132,10 +147,6 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
             return payload
 
         result = self._router.route(text)
-
-        print("Semantic bi-encoder routing b " * 3)
-        print(result)
-        print("Semantic bi-encoder routing e " * 3)
 
         payload["model"] = result["model_name"]
         payload["routing"] = {
