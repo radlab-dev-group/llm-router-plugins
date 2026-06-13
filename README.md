@@ -6,7 +6,7 @@ Each plugin implements a tiny, well‑defined interface (`apply`) and can be com
 *pipeline**. Pipelines are instantiated by the `MaskerPipeline` and `GuardrailPipeline` classes and are driven
 automatically by the endpoint logic in `endpoint_i.py`.
 
----  
+---
 
 ## 1. Anonymizers (Maskers)
 
@@ -31,7 +31,7 @@ automatically by the endpoint logic in `endpoint_i.py`.
 4. The final payload – now stripped of PII – proceeds to the rest of the request flow (guardrails, model dispatch,
    etc.).
 
----  
+---
 
 ## 2. Guardrails
 
@@ -255,7 +255,7 @@ size, overlap, and persist directory can all be overridden via environment varia
 | `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_OVERLAP` | Override chunk overlap                |
 | `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_PERSIST_DIR`   | Directory for FAISS index persistence |
 
----  
+---
 
 ## 3. Pipelines
 
@@ -285,7 +285,7 @@ GUARDRAIL_STRATEGY_PIPELINE_REQUEST = ["nask_guard", "sojka_guard"]
 These lists are consumed by the endpoint initialization (`EndpointI._prepare_masker_pipeline`,
 `EndpointI._prepare_guardrails_pipeline`).
 
----  
+---
 
 ## 4. Adding a New Plugin
 
@@ -320,7 +320,7 @@ class MyCustomMasker(PluginInterface):
 After placing the file in `llm_router_plugins/maskers/plugins/`, enable it by adding `"my_custom_masker"` to
 `MASKING_STRATEGY_PIPELINE`.
 
----  
+---
 
 ## 5. Retrieval‑Augmented Generation (RAG) Support
 
