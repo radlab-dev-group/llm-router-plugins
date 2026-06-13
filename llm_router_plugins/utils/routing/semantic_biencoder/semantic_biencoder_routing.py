@@ -10,11 +10,11 @@ Configuration is loaded from
 ``llm_router_plugins/resources/routing/semantic/semantic_biencoder.json``
 and can be overridden by environment variables:
 
-    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_MODEL   - override the embedding model name
+    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_MODEL - override the embedding model name
     LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_TARGETS - pipe-separated list of target names
-    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_SIZE    - override chunk size
+    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_SIZE - override chunk size
     LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_OVERLAP - override chunk overlap
-    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_PERSIST_DIR   - directory for FAISS index persistence
+    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_PERSIST_DIR - directory for FAISS index persistence
 
 Example JSON configuration::
 
@@ -37,8 +37,9 @@ Example JSON configuration::
     }
 """
 
-import logging
 import os
+import logging
+
 from typing import Any, Dict, Optional
 
 from llm_router_plugins.plugin_interface import PluginInterface
@@ -219,7 +220,8 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
         if not text:
             if self._logger:
                 self._logger.warning(
-                    "SemanticBiEncoderRouting: no text content found, returning payload unchanged."
+                    "SemanticBiEncoderRouting: no text content "
+                    "found, returning payload unchanged."
                 )
             return payload
 
@@ -234,7 +236,8 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
 
         if self._logger:
             self._logger.info(
-                "SemanticBiEncoderRouting: text='%s' target='%s' similarity=%.4f -> model=%s",
+                "SemanticBiEncoderRouting: text='%s' "
+                "target='%s' similarity=%.4f -> model=%s",
                 text[:80],
                 result["target_name"],
                 result["similarity"],

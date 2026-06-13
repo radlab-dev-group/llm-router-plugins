@@ -49,11 +49,11 @@ class SemanticBiEncoderConfig:
     similarity_threshold : float
         Minimum cosine similarity score for a target to be considered valid.
     top_k : int
-        Number of nearest neighbours to retrieve during routing queries.
+        Number of nearest neighbors to retrieve during routing queries.
     routing_targets : list
         List of :class:`RoutingTarget` dataclasses describing each target.
     vector_store_path : str or None
-        Directory path for persisting the FAISS index and docstore.
+        Directory path for persisting the FAISS index and doc_store.
         If ``None``, the index is kept in memory only.
     """
 
