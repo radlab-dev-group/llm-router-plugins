@@ -112,74 +112,6 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
         self._override_from_env()
         self._router.initialize()
 
-    def _override_from_env(self) -> None:
-        """
-        Apply environment variable overrides to config.
-
-        Supported environment variables (prefix
-        ``LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_``):
-
-        - ``MODEL`` — override the embedding model name
-        - ``TARGETS`` — pipe-separated target name whitelist (targets not
-          in the config file are silently ignored)
-        - ``CHUNK_SIZE`` — override the chunk size used for embedding
-        - ``CHUNK_OVERLAP`` — override the chunk overlap used for embedding
-
-        Parameters
-        ----------
-        None
-
-        Returns
-        -------
-        None
-
-        Raises
-        ------
-        None
-        """
-        model_env = os.getenv("LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_MODEL")
-        if model_env:
-            self._config.embedding_model = model_env
-            if self._logger:
-                self._logger.info("Overriding embedding model: %s", model_env)
-
-        targets_env = os.getenv("LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_TARGETS")
-        if targets_env:
-            allowed = set(self._config.target_names)
-            selected = [
-                t.strip()
-                for t in targets_env.split("|")
-                if t.strip() and t.strip() in allowed
-            ]
-            if selected and selected != list(self._config.target_names):
-                filtered = [
-                    t for t in self._config.routing_targets if t.name in selected
-                ]
-                self._config.routing_targets = filtered
-                if self._logger:
-                    self._logger.info(
-                        "Overriding routing targets: %s",
-                        "|".join(selected),
-                    )
-
-        chunk_size_env = os.getenv(
-            "LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_SIZE"
-        )
-        if chunk_size_env:
-            try:
-                self._config.chunk_size = int(chunk_size_env)
-            except ValueError:
-                pass
-
-        chunk_overlap_env = os.getenv(
-            "LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_OVERLAP"
-        )
-        if chunk_overlap_env:
-            try:
-                self._config.chunk_overlap = int(chunk_overlap_env)
-            except ValueError:
-                pass
-
     def apply(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Process *payload*.  If ``payload["model"] == "auto"`` route to the
@@ -284,3 +216,71 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
             if val:
                 return str(val)
         return ""
+
+    def _override_from_env(self) -> None:
+        """
+        Apply environment variable overrides to config.
+
+        Supported environment variables (prefix
+        ``LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_``):
+
+        - ``MODEL`` — override the embedding model name
+        - ``TARGETS`` — pipe-separated target name whitelist (targets not
+          in the config file are silently ignored)
+        - ``CHUNK_SIZE`` — override the chunk size used for embedding
+        - ``CHUNK_OVERLAP`` — override the chunk overlap used for embedding
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        None
+        """
+        model_env = os.getenv("LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_MODEL")
+        if model_env:
+            self._config.embedding_model = model_env
+            if self._logger:
+                self._logger.info("Overriding embedding model: %s", model_env)
+
+        targets_env = os.getenv("LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_TARGETS")
+        if targets_env:
+            allowed = set(self._config.target_names)
+            selected = [
+                t.strip()
+                for t in targets_env.split("|")
+                if t.strip() and t.strip() in allowed
+            ]
+            if selected and selected != list(self._config.target_names):
+                filtered = [
+                    t for t in self._config.routing_targets if t.name in selected
+                ]
+                self._config.routing_targets = filtered
+                if self._logger:
+                    self._logger.info(
+                        "Overriding routing targets: %s",
+                        "|".join(selected),
+                    )
+
+        chunk_size_env = os.getenv(
+            "LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_SIZE"
+        )
+        if chunk_size_env:
+            try:
+                self._config.chunk_size = int(chunk_size_env)
+            except ValueError:
+                pass
+
+        chunk_overlap_env = os.getenv(
+            "LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_OVERLAP"
+        )
+        if chunk_overlap_env:
+            try:
+                self._config.chunk_overlap = int(chunk_overlap_env)
+            except ValueError:
+                pass
