@@ -102,10 +102,7 @@ class EmbeddingRouter:
             Logger instance.
         persist_dir : str, optional
             Directory where the FAISS index and docstore are saved.
-
-        Returns
-        -------
-        None
+\
 
         Raises
         ------

@@ -160,6 +160,7 @@ class SimpleSemanticRoutingPlugin(PluginInterface):
         self._default_model: str = ""
 
         self._load_config()
+        self._validate_args()
 
     def _load_config(self) -> None:
         """
@@ -233,6 +234,42 @@ class SimpleSemanticRoutingPlugin(PluginInterface):
         self._default_model = dm_env or cfg.default_models.get(
             "simple", cfg.models_list[0]
         )
+
+    def _validate_args(self) -> None:
+        """
+        Validate that all required routing configuration is present.
+
+        Raises
+        ------
+        ValueError
+            If required config is missing or empty.
+        """
+        if not self._models:
+            raise ValueError(
+                "SimpleSemanticRouting: no models configured — "
+                "check 'default_models' in the JSON config or the "
+                f"{SEMANTIC_ROUTING_PREFIX}MODELS environment variable"
+            )
+
+        if len(self._complexity_thresholds) != 2:
+            raise ValueError(
+                "SimpleSemanticRouting: complexity thresholds must have "
+                f"exactly 2 values, got {len(self._complexity_thresholds)}"
+            )
+
+        valid_intents = {k for k in self._intent_categories if k != "none"}
+        if not valid_intents:
+            raise ValueError(
+                "SimpleSemanticRouting: no intent categories defined — "
+                "check 'intents' in the JSON config"
+            )
+
+        if not self._default_model:
+            raise ValueError(
+                "SimpleSemanticRouting: no default model configured — "
+                "check 'default_models' in the JSON config or the "
+                f"{SEMANTIC_ROUTING_PREFIX}DEFAULT_MODEL environment variable"
+            )
 
     def apply(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """

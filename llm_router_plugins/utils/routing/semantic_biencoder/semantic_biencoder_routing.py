@@ -111,7 +111,7 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
                 )
 
         self._router = EmbeddingRouter(
-            self._config,
+            config=self._config,
             logger=self._logger,
             persist_dir=persist_dir,
         )
@@ -119,6 +119,49 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
         # Environment overrides
         self._override_from_env()
         self._router.initialize()
+        self._validate_args()
+
+    def _validate_args(self) -> None:
+        """
+        Validate that all required routing configuration is present
+        after env overrides and router initialization.
+
+        Raises
+        ------
+        ValueError
+            If required config is missing, empty, or router failed to load vectors.
+        """
+        if not self._config.embedding_model:
+            raise ValueError(
+                "SemanticBiEncoderRouting: no embedding_model configured — "
+                "check 'embedding_model' in the JSON config or the "
+                f"{SEMANTIC_ROUTING_PREFIX}MODEL environment variable"
+            )
+
+        if not self._config.routing_targets:
+            raise ValueError(
+                "SemanticBiEncoderRouting: no routing targets defined — "
+                "check 'routing_targets' in the JSON config or the "
+                f"{SEMANTIC_ROUTING_PREFIX}TARGETS environment variable"
+            )
+
+        if self._config.chunk_size <= 0:
+            raise ValueError(
+                f"SemanticBiEncoderRouting: chunk_size must be > 0, got {self._config.chunk_size}"
+            )
+
+        if self._config.chunk_overlap < 0:
+            raise ValueError(
+                f"SemanticBiEncoderRouting: chunk_overlap must be >= 0, got {self._config.chunk_overlap}"
+            )
+
+        has_vectors = getattr(self._router, "has_vectors", False)
+        if not has_vectors:
+            raise ValueError(
+                "SemanticBiEncoderRouting: router loaded but has no vectors — "
+                "check routing_targets have non-empty descriptions/examples and the "
+                "FAISS index was built successfully"
+            )
 
     def apply(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
