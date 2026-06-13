@@ -1,6 +1,6 @@
 {
   "description": "Semantic routing configuration for embedding-based model selection.",
-  "embedding_model": "/mnt/data2/llms/models/radlab-open/semantic-euro-bert-encoder-v1",
+  "embedding_model": "radlab/semantic-euro-bert-encoder-v1",
   "settings": {
     "chunk_size": 256,
     "chunk_overlap": 64,
