@@ -4,7 +4,7 @@ Rule that masks phone numbers.
 
 import re
 
-from .base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
 
 
 class PhoneRule(BaseRule):
@@ -24,7 +24,22 @@ class PhoneRule(BaseRule):
         \b
     """
 
+    _PHONE_PLACEHOLDER = "{{PHONE}}"
+
     def __init__(self):
+        """
+        Initialise PhoneRule with its regex and placeholder.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        None
+        """
         super().__init__(
-            regex=self._PHONE_REGEX, placeholder="{{PHONE}}", flags=re.VERBOSE
+            regex=self._PHONE_REGEX,
+            placeholder=self._PHONE_PLACEHOLDER,
+            flags=re.VERBOSE,
         )

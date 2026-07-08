@@ -15,8 +15,8 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from .base_rule import BaseRule
-from ..utils.validators import is_possible_transaction_ref
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.utils.validators import is_possible_transaction_ref
 
 
 class TransactionRefRule(BaseRule):

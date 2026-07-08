@@ -14,8 +14,8 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from .base_rule import BaseRule
-from ..utils.validators import is_valid_nrb
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_nrb
 
 
 class NrbRule(BaseRule):
@@ -23,11 +23,19 @@ class NrbRule(BaseRule):
     Detects Polish NRB numbers, validates the checksum and masks them.
     """
 
+    # IBAN-like strings start with a two-letter country code (e.g. "PL") followed
+    # by 26 more characters.  Two negative lookbehinds block both spaced and
+    # compact IBAN formats so NRB doesn't steal digit groups from
+    # :class:`BankAccountRule`:
+    # * ``(?<![A-Z]{2})``   – blocks "PL12345…" (compact, letters immediately before digits)
+    # * ``(?<![A-Z]{2}\s)`` – blocks "PL 12345…" (spaced, letters+space before digits)
     _REGEX = (
-        r"(?<!\w)"
-        r"(?:(?:\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4})"
-        r"|\d{26})"
-        r"(?!\w)"
+        r"(?<![A-Z]{2})"  # not after two letters (blocks compact IBAN)
+        r"(?<![A-Z]{2}\s)"  # not after "LL " (blocks spaced IBAN)
+        r"(?:(?:\d{2}\s?\d{4}\s?\d{4}\s?"  # spaced groups: 2+6x4 digits
+        r"\d{4}\s?\d{4}\s?\d{4}\s?"
+        r"\d{4})"
+        r"|\d{26})"  # or 26 consecutive digits
     )
 
     _PLACEHOLDER = "{{NRB}}"

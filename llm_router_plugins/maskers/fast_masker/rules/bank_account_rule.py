@@ -23,7 +23,7 @@ for masking is ``{{BANK_ACCOUNT}}``.
 import re
 from typing import Optional, Callable, Match, Tuple, List
 
-from .base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
 
 
 class BankAccountRule(BaseRule):
@@ -32,27 +32,28 @@ class BankAccountRule(BaseRule):
     masking with ``X`` characters and optional whitespace between groups.
     """
 
-    # Country code – two letters (e.g. PL) or masked ``XX`` (must be present)
-    _CC = r"(?:[A-Z]{2}|XX)"
+    # Country code – exactly two uppercase letters (e.g. PL).  Made mandatory
+    # to prevent matching arbitrary 24+ digit sequences that have no country prefix.
+    _CC = r"[A-Z]{2}"
 
-    # Two check digits – either two digits or masked ``XX`` (must be present)
-    _CHECK = r"(?:\d{2}|XX)"
+    # Two check digits – must be two numeric digits.
+    _CHECK = r"\d{2}"
 
     # One group of four characters – digits, X or any mixture (e.g. X1X2)
     _GROUP = r"(?:[0-9X]{4})"
 
     # Full pattern:
-    #   - optional country code (or masked)
-    #   - optional whitespace
-    #   - check digits
+    #   - mandatory country code (two uppercase letters)
+    #   - optional whitespace between country code and check digits (handles "PL 12...")
+    #   - mandatory check digits (two numeric digits)
     #   - exactly six groups of four characters, each optionally preceded by
     #     whitespace (including the possibility of no whitespace at all)
     #   - word boundaries on both sides to avoid partial matches
     _FULL_PATTERN = rf"""
                 \b                      # start of word
-                (?:{_CC})?              # optional country code (or masked)
-                \s*                     # optional whitespace
-                {_CHECK}                # check digits (or masked)
+                {_CC}                   # mandatory country code (2 uppercase letters)
+                \s*                     # optional whitespace between CC and check digits
+                {_CHECK}                # mandatory check digits (2 digits)
                 (?:\s*{_GROUP}){{6}}   # six groups of 4 chars, whitespace optional
                 \b                      # end of word
             """

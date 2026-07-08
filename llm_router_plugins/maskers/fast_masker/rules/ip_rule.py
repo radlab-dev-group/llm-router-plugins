@@ -5,7 +5,7 @@ Rule that mask IPv4 and IPv6 addresses.
 import re
 from typing import Optional, Callable, Tuple, List
 
-from .base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
 
 
 class IpRule(BaseRule):
