@@ -31,8 +31,16 @@ class PluginInterface(abc.ABC):
         """
         Initialise the plugin base class.
 
-        Stores the supplied ``logger`` for later use by concrete plugin
-        implementations.
+        Parameters
+        ----------
+        logger : logging.Logger, optional
+            Logger instance for plugin use.  If ``None``, the plugin
+            will have ``self._logger`` set to ``None`` and can choose
+            to skip logging.
+
+        Returns
+        -------
+        None
         """
         self._logger = logger
 
@@ -43,8 +51,25 @@ class PluginInterface(abc.ABC):
 
         Concrete plugins must implement this method.  The method receives a
         dictionary representing the input data and must return a dictionary
-        with the processed result. Each plugin defines the exact semantics
+        with the processed result.  Each plugin defines the exact semantics
         of the transformation.
+
+        Parameters
+        ----------
+        payload : Any
+            The incoming payload to process.  The exact shape depends on the
+            concrete plugin implementation.
+
+        Returns
+        -------
+        Any
+            The transformed payload.  The type and structure depend on the
+            concrete plugin implementation.
+
+        Raises
+        ------
+        NotImplementedError
+            If the method is not overridden by a subclass.
         """
         pass
 
@@ -54,19 +79,48 @@ class HttpPluginInterface(PluginInterface, abc.ABC):
     Abstract base class for plugins that need to communicate with a remote HTTP
     endpoint.
 
-    Sub‑classes must define the ``base_url`` property that points to the host
-    they will query.  The ``_request`` helper performs a POST request with the
-    supplied ``payload`` and returns the decoded JSON response.  Any HTTP‑
-    related errors are logged (if a logger is available) and re‑raised.
+    Sub‑classes must define the ``host_url`` and ``endpoint_path`` properties
+    that point to the host and API path they will query.  The ``_request``
+    helper performs a POST request with the supplied ``payload`` and returns
+    the decoded JSON response.  Any HTTP‑related errors are logged (if a
+    logger is available) and re‑raised.
 
     The concrete ``apply`` method remains abstract – implementations are free
     to post‑process the response as required.
+
+    Attributes
+    ----------
+    host_url : str
+        Base URL of the remote service (e.g. ``"https://api.example.com"``).
+    endpoint_path : str
+        API path appended to *host_url* (e.g. ``"api/guardrails/nask"``).
     """
 
     host_url = None
     endpoint_path = None
 
     def __init__(self, logger: Optional[logging.Logger] = None):
+        """
+        Initialise the HTTP plugin base class.
+
+        Validates that ``host_url`` and ``endpoint_path`` are set (non‑empty)
+        on the subclass before delegating to ``super().__init__``.
+
+        Parameters
+        ----------
+        logger : logging.Logger, optional
+            Logger instance for plugin use.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        Exception
+            If ``host_url`` or ``endpoint_path`` are not set (``None`` or
+            empty string).
+        """
         if not self.host_url or not self.endpoint_path:
             raise Exception(
                 "host_url and endpoint_path must be set before initialization!"
@@ -77,7 +131,15 @@ class HttpPluginInterface(PluginInterface, abc.ABC):
     @property
     def endpoint_url(self) -> str:
         """
-        URL of the remote host to which the payload will be sent.
+        URL of the remote endpoint to which the payload will be sent.
+
+        Constructs the full URL by appending *endpoint_path* to *host_url*,
+        trimming any trailing slash from the host.
+
+        Returns
+        -------
+        str
+            The full endpoint URL (e.g. ``"https://api.example.com/api/guardrails/nask"``).
         """
         return self.host_url.rstrip("/") + "/" + self.endpoint_path
 
@@ -88,13 +150,48 @@ class HttpPluginInterface(PluginInterface, abc.ABC):
 
         Concrete plugins should call ``self._request(payload)`` and then
         transform the returned data as needed.
+
+        Parameters
+        ----------
+        payload : Any
+            The incoming payload to send to the remote service.
+
+        Returns
+        -------
+        Tuple[bool | str, Dict]
+            A tuple of (success indicator, response data).  The exact types
+            of the success indicator depend on the concrete plugin.
+
+        Raises
+        ------
+        NotImplementedError
+            If the method is not overridden by a subclass.
         """
         pass
 
     def _request(self, payload: Dict) -> Dict:
         """
-        Send *payload* to ``self.base_url`` via an HTTP POST request and return
+        Send *payload* to ``self.host_url`` via an HTTP POST request and return
         the JSON response.
+
+        If the request fails (network error, non‑2xx status), the error is
+        logged (if a logger is available) and re‑raised.
+
+        Parameters
+        ----------
+        payload : dict
+            The data to send as the JSON body of the POST request.
+
+        Returns
+        -------
+        Dict
+            The JSON response body decoded as a dictionary.
+
+        Raises
+        ------
+        requests.exceptions.RequestException
+            If the HTTP request fails (e.g. connection error, timeout,
+            non‑2xx status code).
         """
 
         try:
