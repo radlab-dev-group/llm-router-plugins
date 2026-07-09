@@ -227,6 +227,9 @@ def is_valid_car_plate(plate: str) -> bool:
     # Format: 2 letters + 4 digits + 1 letter (post-2022 new-style, e.g. WA12345A)
     if re.fullmatch(r"[A-Z]{2}\d{4}[A-Z]", plate):
         return True
+    # Format: 3 letters + 4–5 digits + optional trailing letter (e.g. PKN5670K, PKO12345)
+    if re.fullmatch(r"[A-Z]{3}\d{4,5}[A-Z]?", plate):
+        return True
 
     return False
 

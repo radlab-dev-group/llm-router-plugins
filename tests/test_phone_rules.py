@@ -231,11 +231,12 @@ class TestPhoneInternationalRule:
         assert "{{PHONE_INTERNATIONAL}}" in result
 
     def test_adjacent_to_paren(self):
-        """Phone inside parens — paren is non-whitespace so (?<!\\S) prevents match."""
+        """Phone inside parens — should now match since we removed (?<!\\S) on +."""
         text = "Call (+48 592 722 765) now"
         result, mappings = self.rule.apply(text)
-        # The '(' before + is non-whitespace, so the pattern does not match.
-        assert "{{PHONE_INTERNATIONAL}}" not in result
+        # The '(' before + no longer prevents matching — international numbers
+        # in parentheses like (+48 ...) should be masked.
+        assert "{{PHONE_INTERNATIONAL}}" in result
 
     # ---- anonymizer_fn ----
 

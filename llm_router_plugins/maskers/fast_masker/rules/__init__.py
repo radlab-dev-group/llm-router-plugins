@@ -54,5 +54,6 @@ from llm_router_plugins.maskers.fast_masker.rules.postal_code_rule import (
 )
 from llm_router_plugins.maskers.fast_masker.rules.regon_rule import RegonRule
 from llm_router_plugins.maskers.fast_masker.rules.social_id_rule import SocialIdRule
+from llm_router_plugins.maskers.fast_masker.rules.time_rule import TimeRule
 from llm_router_plugins.maskers.fast_masker.rules.ssn_rule import SsnRule
 from llm_router_plugins.maskers.fast_masker.rules.eu_vat_rule import EuVatRule

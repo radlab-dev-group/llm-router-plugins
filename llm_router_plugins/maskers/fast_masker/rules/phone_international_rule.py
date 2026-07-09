@@ -20,7 +20,7 @@ class PhoneInternationalRule(BaseRule):
     """
 
     _PHONE_INTL_REGEX = r"""
-        (?<!\S)\+             # leading + (not preceded by non-whitespace)
+        \+                   # leading +
         \d{1,3}              # country code (1-3 digits)
         (?:[\s\-]?\d{1,4}){2,5}  # 2-5 groups of subscriber digits with optional separator
         (?!\d)               # not followed by another digit (allows trailing punctuation like ) , . etc.)

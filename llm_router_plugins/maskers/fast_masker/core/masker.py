@@ -22,6 +22,7 @@ from llm_router_plugins.maskers.payload_interface import MaskerPayloadTraveler
 
 from llm_router_plugins.maskers.fast_masker.core.rule_interface import MaskerRuleI
 from llm_router_plugins.maskers.fast_masker.rules import (
+    CarPlateRule,
     EmailRule,
     UrlRule,
     IpRule,
@@ -32,6 +33,7 @@ from llm_router_plugins.maskers.fast_masker.rules import (
     RegonRule,
     DateWordRule,
     DateNumberRule,
+    TimeRule,
     MoneyRule,
     VinRule,
     PostalCodeRule,
@@ -124,8 +126,10 @@ class FastMasker(MaskerPayloadTraveler):
                 RegonRule(),
                 DateWordRule(),
                 DateNumberRule(),
+                TimeRule(),  # time-of-day (HH:MM / HH.MM)
                 MoneyRule(),
                 VinRule(),
+                CarPlateRule(),  # Polish car registration plates
                 PostalCodeRule(),
                 NrbRule(),
                 BankAccountRule(),
