@@ -32,9 +32,12 @@ class PostalCodeRule(BaseRule):
     # allowed, but they are not part of the captured group.
     _POSTAL_REGEX = r"""
         (?<!\d)                     # not preceded by another digit
+        (?!.*\/)                    # not inside a /-delimited token
         (?:[_*]+)?                  # optional leading markdown markers
         (?P<code>
-            \d{2}-\d{3}            # two digits, optional hyphen, three digits
+            \d{2}-\d{3}            # hyphenated: dd-ddd
+            |
+            (?<!\/)\d{5}(?!\d)     # unhyphenated: ddddd (not inside /-delimited token)
         )
         (?:[_*]+)?                  # optional trailing markdown markers
         (?!\d)                      # not followed by another digit
@@ -47,10 +50,6 @@ class PostalCodeRule(BaseRule):
             regex=self._POSTAL_REGEX,
             placeholder=self._PLACEHOLDER,
             flags=re.IGNORECASE | re.VERBOSE,
-        )
-        # Pre‑compile for speed
-        self._compiled_regex = re.compile(
-            self._POSTAL_REGEX, flags=re.IGNORECASE | re.VERBOSE
         )
 
     def apply(
@@ -67,7 +66,7 @@ class PostalCodeRule(BaseRule):
                 pseudo = anonymizer_fn(val, self.tag_type)
                 mappings.append({"original": val, "replacement": pseudo})
                 return "{" + pseudo + "}"
-            mappings.append({"original": val, "replacement": self._PLACEHOLDER})
-            return self._PLACEHOLDER
+            mappings.append({"original": val, "replacement": self.placeholder})
+            return self.placeholder
 
-        return self._compiled_regex.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings

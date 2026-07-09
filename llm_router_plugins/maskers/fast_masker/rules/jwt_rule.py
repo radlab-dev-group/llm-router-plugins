@@ -30,9 +30,6 @@ class JwtRule(BaseRule):
 
     _PLACEHOLDER = "{{JWT}}"
 
-    # Pre-compile for performance.
-    _COMPILED = re.compile(_REGEX, flags=re.VERBOSE)
-
     def __init__(self) -> None:
         super().__init__(
             regex=self._REGEX,
@@ -71,4 +68,4 @@ class JwtRule(BaseRule):
             # Not a valid JWT – keep original text.
             return token
 
-        return self._COMPILED.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings

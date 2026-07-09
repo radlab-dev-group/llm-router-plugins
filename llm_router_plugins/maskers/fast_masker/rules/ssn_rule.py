@@ -39,8 +39,6 @@ class SsnRule(BaseRule):
             placeholder=self._PLACEHOLDER,
             flags=re.VERBOSE,
         )
-        # Pre‑compile for performance.
-        self._compiled_regex = re.compile(self._REGEX, flags=re.VERBOSE)
 
     def apply(
         self,

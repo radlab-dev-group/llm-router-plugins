@@ -40,10 +40,6 @@ class VinRule(BaseRule):
             placeholder=self._PLACEHOLDER,
             flags=re.IGNORECASE | re.VERBOSE,
         )
-        # Compile once for fast reuse in ``apply``.
-        self._compiled_regex = re.compile(
-            self._REGEX, flags=re.IGNORECASE | re.VERBOSE
-        )
 
     def apply(
         self,

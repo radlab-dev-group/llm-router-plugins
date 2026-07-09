@@ -114,6 +114,7 @@ class FastMasker(MaskerPayloadTraveler):
         """
         if cls._rules_cache is None:
             cls._rules_cache = [
+                # Structural identifiers first (validate before generic patterns)
                 EmailRule(),
                 UrlRule(),
                 IpRule(),
@@ -128,15 +129,16 @@ class FastMasker(MaskerPayloadTraveler):
                 PostalCodeRule(),
                 NrbRule(),
                 BankAccountRule(),
-                PhoneInternationalRule(),
-                PhoneRule(),
-                KrsRule(),
-                MacAddressRule(),
-                CreditCardRule(),
+                KrsRule(),  # structural — before Phone to avoid false positives
                 PassportRule(),
                 IdCardRule(),
                 SsnRule(),
                 HealthIdRule(),
+                # Generic patterns (lower specificity, run last)
+                PhoneInternationalRule(),
+                PhoneRule(),
+                MacAddressRule(),
+                CreditCardRule(),
                 SslCertRule(),
                 JwtRule(),
                 InvoiceNumberRule(),

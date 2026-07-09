@@ -32,9 +32,6 @@ class EuVatRule(BaseRule):
 
     _PLACEHOLDER = "{{EU_VAT}}"
 
-    # Pre‑compile for performance.
-    _COMPILED = re.compile(_REGEX, flags=re.IGNORECASE | re.VERBOSE)
-
     def __init__(self) -> None:
         super().__init__(
             regex=self._REGEX,
@@ -73,4 +70,4 @@ class EuVatRule(BaseRule):
             # Invalid VAT – keep original text.
             return vat
 
-        return self._COMPILED.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings

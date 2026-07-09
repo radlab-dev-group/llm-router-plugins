@@ -34,9 +34,6 @@ class TransactionRefRule(BaseRule):
 
     _PLACEHOLDER = "{{TRANSACTION_REF}}"
 
-    # Pre-compile for performance.
-    _COMPILED = re.compile(_REGEX, flags=re.IGNORECASE | re.VERBOSE)
-
     def __init__(self) -> None:
         super().__init__(
             regex=self._REGEX,
@@ -75,4 +72,4 @@ class TransactionRefRule(BaseRule):
             # Invalid reference – keep original text.
             return ref
 
-        return self._COMPILED.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings

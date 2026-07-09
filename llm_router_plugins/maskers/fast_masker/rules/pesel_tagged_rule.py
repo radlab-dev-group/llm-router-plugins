@@ -48,4 +48,4 @@ class PeselTaggedRule(BaseRule):
                 return m.group(0).replace(pesel, replacement)
             return m.group(0)
 
-        return re.sub(self.pattern, _replace, text), mappings
+        return self.pattern.sub(_replace, text), mappings

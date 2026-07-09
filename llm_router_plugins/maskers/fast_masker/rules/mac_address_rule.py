@@ -33,9 +33,6 @@ class MacAddressRule(BaseRule):
 
     _PLACEHOLDER = "{{MAC_ADDRESS}}"
 
-    # Pre‑compile for speed.
-    _COMPILED = re.compile(_REGEX, flags=re.VERBOSE)
-
     def __init__(self) -> None:
         super().__init__(
             regex=self._REGEX,
@@ -74,4 +71,4 @@ class MacAddressRule(BaseRule):
             # Invalid MAC – leave original text unchanged.
             return mac
 
-        return self._COMPILED.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings

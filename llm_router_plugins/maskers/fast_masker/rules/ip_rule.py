@@ -8,6 +8,20 @@ from typing import Optional, Callable, Tuple, List
 from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
 
 
+def _is_valid_ipv4_octet(octet: str) -> bool:
+    """Return ``True`` if *octet* is a valid IPv4 octet (0-255)."""
+    return 0 <= int(octet) <= 255
+
+
+def _is_valid_port(port: str) -> bool:
+    """Return ``True`` if *port* is a valid TCP/UDP port (1-65535)."""
+    try:
+        p = int(port)
+        return 0 < p <= 65535
+    except ValueError:
+        return False
+
+
 class IpRule(BaseRule):
     """
     Detects IPv4, IPv6 addresses **and** the special hostname ``localhost``.
@@ -64,8 +78,6 @@ class IpRule(BaseRule):
             placeholder=self._IP_PLACEHOLDER,
             flags=re.VERBOSE,
         )
-        # Compile the pattern for direct use in ``apply``.
-        self._compiled_regex = re.compile(self._IP_REGEX, flags=re.VERBOSE)
 
     def apply(
         self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
@@ -79,6 +91,18 @@ class IpRule(BaseRule):
         def replacer(match: re.Match) -> str:
             # Always replace the address part
             addr = match.group("addr")
+
+            # Validate IPv4 octets (0-255)
+            if "." in addr:  # IPv4
+                octets = addr.split(".")
+                if not all(_is_valid_ipv4_octet(o) for o in octets):
+                    return addr  # reject invalid octet range
+
+            # Validate port if present
+            port = match.group("port")
+            if port and not _is_valid_port(port):
+                return addr + f":{port}"  # keep original text
+
             if anonymizer_fn:
                 pseudo_addr = anonymizer_fn(addr, "IP")
                 mappings.append({"original": addr, "replacement": pseudo_addr})
@@ -90,8 +114,7 @@ class IpRule(BaseRule):
                 result = self._IP_PLACEHOLDER
 
             # If a port was captured, append ``:{{PORT}}``
-            port = match.group("port")
-            if port:
+            if port and _is_valid_port(port):
                 if anonymizer_fn:
                     pseudo_port = anonymizer_fn(port, "PORT")
                     mappings.append({"original": port, "replacement": pseudo_port})
@@ -104,4 +127,4 @@ class IpRule(BaseRule):
                 result = f"{result}:{port_replacement}"
             return result
 
-        return self._compiled_regex.sub(replacer, text), mappings
+        return self.pattern.sub(replacer, text), mappings

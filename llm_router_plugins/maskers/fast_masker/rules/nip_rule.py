@@ -44,10 +44,6 @@ class NipRule(BaseRule):
             placeholder=self._PLACEHOLDER,
             flags=re.IGNORECASE | re.VERBOSE,
         )
-        # Pre‑compile for performance
-        self._compiled_regex = re.compile(
-            self._NIP_REGEX, flags=re.IGNORECASE | re.VERBOSE
-        )
 
     def apply(
         self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
@@ -67,10 +63,10 @@ class NipRule(BaseRule):
                     replacement = "{" + pseudo + "}"
                 else:
                     mappings.append(
-                        {"original": raw_nip, "replacement": self._PLACEHOLDER}
+                        {"original": raw_nip, "replacement": self.placeholder}
                     )
-                    replacement = self._PLACEHOLDER
+                    replacement = self.placeholder
                 return match.group(0).replace(raw_nip, replacement)
             return match.group(0)
 
-        return self._compiled_regex.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings

@@ -27,11 +27,8 @@ class CarPlateRule(BaseRule):
     ``{{CAR_PLATE}}`` after a permissive validation.
     """
 
-    # Regex that matches typical Polish plates:
-    #   - 2‑3 letters
-    #   - optional space
-    #   - 2‑5 digits
-    #   - optional trailing 0‑2 letters
+    # Regex that matches typical Polish plates (loose pattern; strict validation
+    # is delegated to :func:`is_valid_car_plate` in validators.py).
     _REGEX = r"""
         \b
         [A-Z]{2,3}\s?\d{2,5}[A-Z]{0,2}\b
@@ -44,10 +41,6 @@ class CarPlateRule(BaseRule):
             regex=self._REGEX,
             placeholder=self._PLACEHOLDER,
             flags=re.IGNORECASE | re.VERBOSE,
-        )
-        # Pre‑compile for performance.
-        self._compiled_regex = re.compile(
-            self._REGEX, flags=re.IGNORECASE | re.VERBOSE
         )
 
     def apply(

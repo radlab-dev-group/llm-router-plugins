@@ -25,19 +25,25 @@ from llm_router_plugins.maskers.fast_masker.utils.validators import (
 class CreditCardRule(BaseRule):
     """
     Detects credit‑card numbers and masks them.
+
+    Supported groupings:
+
+    * Standard (most cards): ``1234-5678-9012-3456`` (4‑4‑4‑X)
+    * AMEX:                  ``3782 822463 10005``   (4‑6‑5)
     """
 
-    # Regex captures 13‑19 digits, allowing optional spaces or dashes between groups.
+    # Regex captures standard 4‑4‑4‑X and AMEX 4‑6‑5 groupings.
     _REGEX = r"""
         \b
-        \d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{1,7}   # 4‑4‑4‑(1‑7) grouping
+        (?:
+            \d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{1,7}   # standard 4‑4‑4‑(1‑7) grouping
+            |
+            \d{4}[ -]?\d{6}[ -]?\d{5}               # AMEX 4‑6‑5 grouping
+        )
         \b
     """
 
     _PLACEHOLDER = "{{CREDIT_CARD}}"
-
-    # Pre‑compile for performance.
-    _COMPILED = re.compile(_REGEX, flags=re.IGNORECASE | re.VERBOSE)
 
     def __init__(self) -> None:
         super().__init__(
@@ -79,4 +85,4 @@ class CreditCardRule(BaseRule):
             # Invalid number – leave it unchanged.
             return candidate
 
-        return self._COMPILED.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings

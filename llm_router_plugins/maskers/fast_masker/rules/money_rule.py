@@ -101,10 +101,6 @@ class MoneyRule(BaseRule):
             placeholder=self._PLACEHOLDER,
             flags=re.IGNORECASE | re.VERBOSE,
         )
-        # Compile once for performance.
-        self._compiled_regex = re.compile(
-            self._MONEY_REGEX, flags=re.IGNORECASE | re.VERBOSE
-        )
 
     def apply(
         self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
@@ -122,7 +118,7 @@ class MoneyRule(BaseRule):
                 pseudo = anonymizer_fn(val, self.tag_type)
                 mappings.append({"original": val, "replacement": pseudo})
                 return "{" + pseudo + "}"
-            mappings.append({"original": val, "replacement": self._PLACEHOLDER})
-            return self._PLACEHOLDER
+            mappings.append({"original": val, "replacement": self.placeholder})
+            return self.placeholder
 
-        return self._compiled_regex.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings
