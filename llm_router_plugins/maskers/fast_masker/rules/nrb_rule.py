@@ -24,17 +24,19 @@ class NrbRule(BaseRule):
     """
 
     # IBAN-like strings start with a two-letter country code (e.g. "PL") followed
-    # by 26 more characters.  Two negative lookbehinds block both spaced and
-    # compact IBAN formats so NRB doesn't steal digit groups from
-    # :class:`BankAccountRule`:
-    # * ``(?<![A-Z]{2})``   – blocks "PL12345…" (compact, letters immediately before digits)
-    # * ``(?<![A-Z]{2}\s)`` – blocks "PL 12345…" (spaced, letters+space before digits)
+    # by 26 more characters.  Negative lookbehinds block compact, spaced,
+    # and dashed IBAN formats so NRB does not steal digit groups from
+    # :class:`BankAccountRule`.
+    # * ``(?<![A-Z]{2})``      -- blocks "PL12345…" (compact)
+    # * ``(?<![A-Z]{2}\s)``     -- blocks "PL 12345…" (spaced)
+    # * ``(?<![A-Z]{2}-)``      -- blocks "PL-12345…" (dashed)
     _REGEX = (
         r"(?<![A-Z]{2})"  # not after two letters (blocks compact IBAN like "PL12...")
         r"(?<![A-Z]{2}\s)"  # not after "LL " (blocks spaced IBAN like "PL 12...")
+        r"(?<![A-Z]{2}-)"  # not after "LL-" (blocks dashed IBAN like "PL-12...")
         r"(?<!\d)"  # not preceded by a digit (prevents matching inside longer numbers)
-        r"(?:(?:\d{2}\s?\d{4}\s?\d{4}\s?"  # spaced groups: 2+6x4 digits
-        r"\d{4}\s?\d{4}\s?\d{4}\s?"
+        r"(?:(?:\d{2}[-\s]?\d{4}[-\s]?\d{4}[-\s]?"  # spaced/dashed groups: 2+6x4 digits
+        r"\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?"
         r"\d{4})"
         r"|\d{26})"  # or 26 consecutive digits
         r"(?!\d)"  # not followed by a digit
