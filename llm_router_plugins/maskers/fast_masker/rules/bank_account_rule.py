@@ -140,6 +140,19 @@ _IbanAnchorPattern = re.compile(
     re.IGNORECASE,
 )
 
+# Combined anchor: real country codes only.  Two branches handle all formats:
+# 1. Compact/separated: CC + optional sep + exactly 2 digits. E.g. "PL58" or "GB 29".
+#    The optional separator allows spaces/hyphens between country code and check digits.
+# 2. Partial (X-masked): CC + optional sep + 2 alnum where 2nd char is followed by
+#    a non-alpha boundary or end-of-string.  Catches "PLXX", "PL-58", "PL 73" but
+#    rejects "tran" (no alpha-boundary after 'an' → mid-word).
+_IbanAnchorCombined = re.compile(
+    rf"\b(?:{_IbanCountryAlt})"
+    rf"(?:[ \t\n\r\v\f-]?\d\d|[ \t\n\r\v\f-]?[A-Za-z0-9]"
+    rf"[ \t\n\r\v\f-]?[A-Za-z0-9](?=[^a-zA-Z]|$))",
+    re.IGNORECASE,
+)
+
 
 class BankAccountRule(BaseRule):
     """
@@ -319,9 +332,6 @@ class BankAccountRule(BaseRule):
     )
 
     def __init__(self) -> None:
-        # Minimal regex: \bCC optionally followed by a separator then 2 alnum.
-        # This matches IBAN anchors in all formats: compact (DE44), spaced (DE 44),
-        # dashed (DE-44), and partially masked (PLXX) where check digits are X.
         super().__init__(
             regex=r"\b[A-Z]{2}[ \t\n\r\v\f-]?[A-Za-z0-9]{2}",
             placeholder="{{BANK_ACCOUNT}}",
@@ -362,7 +372,7 @@ class BankAccountRule(BaseRule):
         result: List[str] = []
         last_end = 0
 
-        for match in self.pattern.finditer(text):
+        for match in _IbanAnchorCombined.finditer(text):
             start = match.start()
 
             # Skip if already covered by a previous replacement.
@@ -370,11 +380,11 @@ class BankAccountRule(BaseRule):
                 continue
 
             anchor_start = start
-            pos = match.end()  # right after CC + sep + check digits
+            pos = match.end()  # right after CC + check digits (all formats)
 
-            cc_cleaned = text[anchor_start:pos]  # e.g. "PL73", "PL 73", "PL-73"
-            cc_stripped = re.sub(r"[\s\-]+", "", cc_cleaned).upper()
-            cc = cc_stripped[:2]
+            anchor_text = text[anchor_start:pos]
+            # Strip spaces/hyphens to get pure CC (always 2 chars for valid country codes)
+            cc = re.sub(r"[\s\-]+", "", anchor_text).upper()[:2]
 
             if cc not in self._IBAN_COUNTRIES:
                 continue  # unknown country code — skip
@@ -382,8 +392,8 @@ class BankAccountRule(BaseRule):
             expected_len = self._IBAN_LENGTHS.get(cc)
 
             if expected_len is not None:
-                # Count alnum/X chars from anchor (already includes CC + check digits).
-                anchor_alnum = len(cc_stripped)
+                # Count alnum/X chars consumed by the anchor.
+                anchor_alnum = sum(1 for c in anchor_text if c.isalnum())
                 need_after_anchor = expected_len - anchor_alnum
 
                 end_pos = pos  # start scanning BBAN content right after the anchor
@@ -391,7 +401,7 @@ class BankAccountRule(BaseRule):
                 for c in text[pos:]:
                     if alnum_count >= need_after_anchor:
                         break  # done consuming BBAN chars
-                    if c == " " or c in "\t\n\r\v\f-":
+                    if c == " " or c in "\t\r\v\f-":
                         end_pos += 1  # skip separators, don't count them
                     elif c.isalnum():
                         end_pos += 1  # consume one alnum/X char
