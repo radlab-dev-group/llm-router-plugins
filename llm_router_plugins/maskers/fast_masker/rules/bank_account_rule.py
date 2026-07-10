@@ -28,24 +28,7 @@ import re
 from typing import Optional, Callable, Match, Tuple, List
 
 from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
-
-
-def _iban_mod97(iban: str) -> int:
-    """Calculate IBAN modulo 97 checksum per ISO 13616.
-
-    Strips all whitespace and hyphens before computing, supporting spaced,
-    dashed, and compact IBAN formats.
-
-    Rearranges the IBAN (first 4 characters to end), converts letters to
-    digits (A=10, B=11, …, Z=35), and returns ``result % 97``.
-    A valid IBAN always yields 1.
-    """
-    cleaned = re.sub(r"[\s\-]+", "", iban)
-    rearranged = cleaned[4:] + cleaned[:4]
-    converted = "".join(
-        str(ord(c.upper()) - 55) if c.isalpha() else c for c in rearranged
-    )
-    return int(converted) % 97
+from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_iban
 
 
 # ── Country-code alternation (sorted to ensure longest match first) ───────
@@ -351,7 +334,7 @@ class BankAccountRule(BaseRule):
             return False  # wrong length for this country
 
         has_x = "X" in iban or "x" in iban
-        if not has_x and _iban_mod97(cleaned) != 1:
+        if not has_x and is_valid_iban(cleaned) != 1:
             return False  # invalid checksum
 
         return True
@@ -427,7 +410,7 @@ class BankAccountRule(BaseRule):
                 continue  # wrong length — skip (IBAN checksum won't matter)
 
             has_x = "X" in candidate or "x" in candidate
-            if not has_x and _iban_mod97(cleaned) != 1:
+            if not has_x and is_valid_iban(cleaned) != 1:
                 continue  # invalid checksum — let other rules handle it
 
             # Valid IBAN — replace.

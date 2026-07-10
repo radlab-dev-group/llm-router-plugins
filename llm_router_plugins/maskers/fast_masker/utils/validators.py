@@ -168,6 +168,37 @@ def is_valid_nrb(nrb: str) -> bool:
     return cleaned.isdigit() and len(cleaned) == 26
 
 
+def _iban_mod97(iban: str) -> int:
+    """Calculate IBAN modulo 97 checksum per ISO 13616.
+
+    Strips all whitespace and hyphens before computing, supporting spaced,
+    dashed, and compact IBAN formats.
+
+    Rearranges the IBAN (first 4 characters to end), converts letters to
+    digits (A=10, B=11, …, Z=35), and returns ``result % 97``.
+    A valid IBAN always yields 1.
+    """
+    cleaned = re.sub(r"[\s\-]+", "", iban)
+    rearranged = cleaned[4:] + cleaned[:4]
+    converted = "".join(
+        str(ord(c.upper()) - 55) if c.isalpha() else c for c in rearranged
+    )
+    return int(converted) % 97
+
+
+def is_valid_iban(iban: str) -> bool:
+    """Validate an IBAN using the ISO 13616 modulo‑97 checksum.
+
+    Accepts spaced, dashed, or compact IBAN strings; invalid input (non-string,
+    wrong length, unknown country code) may return ``False`` — callers should
+    pass only IBAN-format candidates already validated for structure.
+    """
+    if not isinstance(iban, str):
+        return False
+    cleaned = re.sub(r"[\s\-]+", "", iban).upper()
+    return _iban_mod97(cleaned) == 1
+
+
 # ============================================================================
 # Vehicle and transport
 # ============================================================================
