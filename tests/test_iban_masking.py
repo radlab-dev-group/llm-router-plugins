@@ -1,4 +1,5 @@
 """Quick smoke test for IBAN masking fixes."""
+
 import re
 
 # ── Test BankAccountRule regex fix ──────────────────────────────────────
@@ -16,8 +17,14 @@ test_separators = [" ", "\t", "-", "\n"]
 for sep in test_separators:
     broken_matches = re.fullmatch(broken_pattern + "x", sep + "x") is not None
     fixed_matches = re.fullmatch(fixed_pattern + "x", sep + "x") is not None
-    status = "OK" if fixed_matches and not broken_matches else ("SAME" if broken_matches == fixed_matches else "FAIL")
-    print(f"  separator '{repr(sep)}': broken={broken_matches}, fixed={fixed_matches} [{status}]")
+    status = (
+        "OK"
+        if fixed_matches and not broken_matches
+        else ("SAME" if broken_matches == fixed_matches else "FAIL")
+    )
+    print(
+        f"  separator '{repr(sep)}': broken={broken_matches}, fixed={fixed_matches} [{status}]"
+    )
 
 # ── Test spaced/dashed IBAN matching with BankAccountRule ───────────────
 print("\n=== Testing BankAccountRule spaced/dashed matching ===")
@@ -60,7 +67,9 @@ for iban, cc, expected_len in test_cases:
         matched_text = m.group(0)
         cleaned = re.sub(r"[\s\-]+", "", matched_text).upper()
         actual_len = len(cleaned)
-        print(f"  {iban[:35]:35s} -> match='{matched_text}', len={actual_len}, expected={expected_len} {'OK' if actual_len == expected_len else 'MISMATCH'}")
+        print(
+            f"  {iban[:35]:35s} -> match='{matched_text}', len={actual_len}, expected={expected_len} {'OK' if actual_len == expected_len else 'MISMATCH'}"
+        )
     else:
         # Try compact alternative
         compact = rf"\b{_CC}\d\d[A-Za-z0-9]+"
@@ -71,6 +80,7 @@ for iban, cc, expected_len in test_cases:
 print("\n=== Testing with FastMasker ===")
 
 import sys
+
 sys.path.insert(0, "/mnt/data2/dev/develop/llm-router-plugins")
 
 from llm_router_plugins.maskers.fast_masker.core.masker import FastMasker
@@ -108,7 +118,7 @@ for iban in test_ibans:
         key = list(mappings.keys())[0]
         rule_name = ""
         for r in masker.rules:
-            if hasattr(r, 'placeholder') and "{{" in r.placeholder:
+            if hasattr(r, "placeholder") and "{{" in r.placeholder:
                 tag = r.placeholder.strip("{}")
                 if tag in key:
                     rule_name = tag

@@ -130,7 +130,7 @@ class FastMasker(MaskerPayloadTraveler):
                 MoneyRule(),
                 VinRule(),
                 BankAccountRule(),  # structural IBAN -- before CarPlate to prevent false positives
-                CarPlateRule(),     # Polish car registration plates
+                CarPlateRule(),  # Polish car registration plates
                 PostalCodeRule(),
                 NrbRule(),
                 KrsRule(),  # structural — before Phone to avoid false positives

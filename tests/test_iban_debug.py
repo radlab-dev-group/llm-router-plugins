@@ -1,16 +1,89 @@
 """Quick IBAN matching debug."""
+
 import re
 
 # Replicate BankAccountRule patterns exactly as they are in the file
-_IbanCountryAlt = "|".join(sorted({
-    "AL", "AD", "AE", "AT", "BA", "BH", "BY", "BE", "BG", "BR", "CH",
-    "CR", "CY", "CZ", "DE", "DK", "DO", "EE", "EG", "ES", "FI", "FO",
-    "FR", "GB", "GE", "GI", "GL", "GR", "GT", "HR", "HU", "IE", "IQ",
-    "IR", "IS", "IT", "JO", "KW", "KZ", "LB", "LC", "LI", "LT", "LU",
-    "LV", "MC", "MD", "ME", "MK", "MR", "MT", "MU", "NL", "NO", "PK",
-    "PL", "PS", "PT", "QA", "RO", "RS", "SA", "SC", "SE", "SI", "SK",
-    "SM", "ST", "TL", "TN", "TR", "UA", "UK", "VA", "VG",
-}))
+_IbanCountryAlt = "|".join(
+    sorted(
+        {
+            "AL",
+            "AD",
+            "AE",
+            "AT",
+            "BA",
+            "BH",
+            "BY",
+            "BE",
+            "BG",
+            "BR",
+            "CH",
+            "CR",
+            "CY",
+            "CZ",
+            "DE",
+            "DK",
+            "DO",
+            "EE",
+            "EG",
+            "ES",
+            "FI",
+            "FO",
+            "FR",
+            "GB",
+            "GE",
+            "GI",
+            "GL",
+            "GR",
+            "GT",
+            "HR",
+            "HU",
+            "IE",
+            "IQ",
+            "IR",
+            "IS",
+            "IT",
+            "JO",
+            "KW",
+            "KZ",
+            "LB",
+            "LC",
+            "LI",
+            "LT",
+            "LU",
+            "LV",
+            "MC",
+            "MD",
+            "ME",
+            "MK",
+            "MR",
+            "MT",
+            "MU",
+            "NL",
+            "NO",
+            "PK",
+            "PL",
+            "PS",
+            "PT",
+            "QA",
+            "RO",
+            "RS",
+            "SA",
+            "SC",
+            "SE",
+            "SI",
+            "SK",
+            "SM",
+            "ST",
+            "TL",
+            "TN",
+            "TR",
+            "UA",
+            "UK",
+            "VA",
+            "VG",
+        }
+    )
+)
 _CC = rf"(?:{_IbanCountryAlt})"
 
 compact = rf"\b{_CC}\d\d[A-Za-z0-9]+"
@@ -57,10 +130,12 @@ for iban in test_ibans:
         print(f"  COMPACT match: pos={m.start()} '{matched}' len={len(cleaned)}")
 
     # Check spaced/dashed matches
-    if 'sd_pat' in dir():
+    if "sd_pat" in dir():
         for m in sd_pat.finditer(iban):
             matched = m.group(0)
             cleaned = re.sub(r"[\s\-]+", "", matched).upper()
-            print(f"  SPACED/DASHED match: pos={m.start()} '{matched}' len={len(cleaned)}")
+            print(
+                f"  SPACED/DASHED match: pos={m.start()} '{matched}' len={len(cleaned)}"
+            )
 
     print()
