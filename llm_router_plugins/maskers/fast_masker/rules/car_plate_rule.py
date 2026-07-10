@@ -31,13 +31,12 @@ class CarPlateRule(BaseRule):
     # is delegated to :func:`is_valid_car_plate` in validators.py).
     _REGEX = r"""
         (?<![A-Z]{2})       # not preceded by two uppercase letters (blocks IBAN CC like "PL" in compact)
-        (?<![A-Z]{2}\s)     # not after "LL " (spaced IBAN like "PL 17...")
         (?<![A-Z]{2}-)      # not after "LL-" (dashed IBAN like "PL-17...")
         \b
         [A-Z]{2,3}          # leading letters
         (?:                 # followed by plate content: digits and optional trailing letters
-            (?![\s\d]*[A-Za-z0-9])  # not followed by whitespace+digit then alnum — blocks spaced IBAN country codes
-            \d{2,5}[A-Z]{0,2}\b    # standard car plate: digits + optional trailing letters
+            \s?             # optional space between letters and digits ("PKN 5670K")
+            \d{2,5}[A-Z]{0,2}\b   # standard car plate: digits + optional trailing letters
         )
     """
 
