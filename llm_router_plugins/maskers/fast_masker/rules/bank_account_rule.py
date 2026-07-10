@@ -113,11 +113,11 @@ class BankAccountRule(BaseRule):
     })
 
     def __init__(self) -> None:
-        # Minimal regex: \bCC optionally followed by a separator then 2 digits.
+        # Minimal regex: \bCC optionally followed by a separator then 2 alnum.
         # This matches IBAN anchors in all formats: compact (DE44), spaced (DE 44),
-        # and dashed (DE-44). Actual consumption of the BBAN portion happens in apply().
+        # dashed (DE-44), and partially masked (PLXX) where check digits are X.
         super().__init__(
-            regex=r"\b[A-Z]{2}[ \t\n\r\v\f-]?\d{2}",
+            regex=r"\b[A-Z]{2}[ \t\n\r\v\f-]?[A-Za-z0-9]{2}",
             placeholder="{{BANK_ACCOUNT}}",
             flags=re.IGNORECASE,
         )
@@ -166,23 +166,48 @@ class BankAccountRule(BaseRule):
             anchor_start = start
             pos = match.end()  # right after CC + sep + check digits
 
-            # From this point, consume the rest of the IBAN: alnum with optional
-            # separators (hyphens or spaces) between them.
-            bban_match = re.match(r"[A-Za-z0-9]+(?:[ \t\-][A-Za-z0-9]+)*", text[pos:])
-            if bban_match:
-                end_pos = pos + bban_match.end()
-            else:
-                end_pos = pos  # nothing after check digits
+            cc_cleaned = text[anchor_start:pos]  # e.g. "PL73", "PL 73", "PL-73"
+            cc_stripped = re.sub(r"[\s\-]+", "", cc_cleaned).upper()
+            cc = cc_stripped[:2]
 
-            candidate = text[anchor_start:end_pos]
-            cleaned = re.sub(r"[\s\-]+", "", candidate).upper()
-
-            cc = cleaned[:2]
             if cc not in self._IBAN_COUNTRIES:
                 continue  # unknown country code — skip
 
             expected_len = self._IBAN_LENGTHS.get(cc)
-            if expected_len is not None and len(cleaned) != expected_len:
+
+            if expected_len is not None:
+                # Count alnum/X chars from anchor (already includes CC + check digits).
+                anchor_alnum = len(cc_stripped)
+                need_after_anchor = expected_len - anchor_alnum
+
+                end_pos = pos  # start scanning BBAN content right after the anchor
+                alnum_count = 0
+                for c in text[pos:]:
+                    if alnum_count >= need_after_anchor:
+                        break  # done consuming BBAN chars
+                    if c == " " or c in "\t\n\r\v\f-":
+                        end_pos += 1  # skip separators, don't count them
+                    elif c.isalnum():
+                        end_pos += 1  # consume one alnum/X char
+                        alnum_count += 1
+                    else:
+                        break  # stop at non-separator, non-alnum chars
+
+            else:
+                # Unknown country — fall back to greedy BBAN consumption.
+                bban_match = re.match(
+                    r"[ \t\n\r\v\f-]*[A-Za-z0-9Xx]+(?:[ \t\-][A-Za-z0-9Xx]+)*",
+                    text[pos:],
+                )
+                if bban_match:
+                    end_pos = pos + bban_match.end()
+                else:
+                    end_pos = pos  # nothing after check digits
+
+            candidate = text[anchor_start:end_pos]
+            cleaned = re.sub(r"[\s\-]+", "", candidate).upper()
+
+            if len(cleaned) != expected_len:
                 continue  # wrong length — skip (IBAN checksum won't matter)
 
             has_x = "X" in candidate or "x" in candidate
