@@ -26,7 +26,9 @@ class SslCertRule(BaseRule):
     """
 
     # Match 16-40 hex characters (typical SSL cert serial range).
+    # Added lookbehind to block IBAN country codes followed by digits.
     _REGEX = r"""
+        (?<![A-Z]{2}\d)     # not after "LL\d" (compact IBAN like "DE44...")
         \b
         [0-9A-Fa-f]{16,40}\b
     """

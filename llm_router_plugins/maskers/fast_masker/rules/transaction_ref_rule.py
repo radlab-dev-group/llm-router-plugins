@@ -27,9 +27,18 @@ class TransactionRefRule(BaseRule):
     """
 
     # Matches IDs like TRX-20231125-001 or ABCD_20240101_1234.
+    # Negative lookahead blocks country-code + 2-digit check + separator patterns (IBAN signature).
     _REGEX = r"""
+        (?<![A-Z]{2}-)            # not after "LL-" (IBAN CC + dash — end of IBAN)
+        (?<![A-Z]{2}\d)           # not after "LL\d" (compact IBAN like "PL17...")
         \b
-        [A-Z]{2,5}[-_]\d{4,8}[-_]\d{3,6}\b
+        [A-Z]{2,5}                # prefix (e.g. "TRX", "ORD", etc.)
+        [-_]
+        (?!\d{2}[-_])             # negative lookahead: not 2 check digits + sep (IBAN signature)
+        \d{4,8}                   # date-like number
+        [-_]
+        \d{3,6}                   # reference number
+        \b
     """
 
     _PLACEHOLDER = "{{TRANSACTION_REF}}"
