@@ -15,8 +15,8 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from .base_rule import BaseRule
-from ..utils.validators import is_valid_ssn
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_ssn
 
 
 class SsnRule(BaseRule):
@@ -39,8 +39,6 @@ class SsnRule(BaseRule):
             placeholder=self._PLACEHOLDER,
             flags=re.VERBOSE,
         )
-        # Pre‑compile for performance.
-        self._compiled_regex = re.compile(self._REGEX, flags=re.VERBOSE)
 
     def apply(
         self,

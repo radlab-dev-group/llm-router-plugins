@@ -144,10 +144,11 @@ class TestKrsRule:
         assert result == "KRS: {{KRS}}"
         assert len(mappings) == 1
 
-    # ---- invalid checksums are skipped ----
+    # ---- invalid inputs are skipped ----
 
-    def test_wrong_checksum_not_masked(self):
-        text = "KRS: 0000000010"  # 1*8+0*3=8, 8%11≠0 → invalid
+    def test_non_digit_chars_not_masked(self):
+        # KRS requires 10 digits after stripping separators
+        text = "KRS: 0000000a10"  # contains letter 'a'
         result, mappings = self.rule.apply(text)
         assert result == text
         assert mappings == []
@@ -164,8 +165,9 @@ class TestKrsRule:
         assert result == text
         assert mappings == []
 
-    def test_invalid_formatted_not_masked(self):
-        text = "KRS: 123-456-78-91"  # invalid checksum
+    def test_invalid_format_with_letters_not_masked(self):
+        # KRS accepts hyphens/spaces between digits but no other characters
+        text = "KRS: 12a-456-78-9b"  # contains letters, not 10 digits
         result, mappings = self.rule.apply(text)
         assert result == text
         assert mappings == []

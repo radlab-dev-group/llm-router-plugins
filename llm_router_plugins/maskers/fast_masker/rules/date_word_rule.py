@@ -18,7 +18,7 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from .base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
 
 
 class DateWordRule(BaseRule):
@@ -80,9 +80,6 @@ class DateWordRule(BaseRule):
 
     _PLACEHOLDER = "{{DATE}}"
 
-    # Compile once for speed.
-    _COMPILED = re.compile(REGEX, flags=re.IGNORECASE | re.VERBOSE)
-
     def __init__(self) -> None:
         super().__init__(
             regex=self.REGEX,
@@ -120,4 +117,4 @@ class DateWordRule(BaseRule):
             mappings.append({"original": original, "replacement": self.placeholder})
             return self.placeholder
 
-        return self._COMPILED.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings

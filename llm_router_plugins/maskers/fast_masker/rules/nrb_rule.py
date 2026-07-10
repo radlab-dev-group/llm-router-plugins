@@ -14,8 +14,8 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from .base_rule import BaseRule
-from ..utils.validators import is_valid_nrb
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_nrb
 
 
 class NrbRule(BaseRule):
@@ -23,11 +23,23 @@ class NrbRule(BaseRule):
     Detects Polish NRB numbers, validates the checksum and masks them.
     """
 
+    # IBAN-like strings start with a two-letter country code (e.g. "PL") followed
+    # by 26 more characters.  Negative lookbehinds block compact, spaced,
+    # and dashed IBAN formats so NRB does not steal digit groups from
+    # :class:`BankAccountRule`.
+    # * ``(?<![A-Z]{2})``      -- blocks "PL12345…" (compact)
+    # * ``(?<![A-Z]{2}\s)``     -- blocks "PL 12345…" (spaced)
+    # * ``(?<![A-Z]{2}-)``      -- blocks "PL-12345…" (dashed)
     _REGEX = (
-        r"(?<!\w)"
-        r"(?:(?:\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4})"
-        r"|\d{26})"
-        r"(?!\w)"
+        r"(?<![A-Z]{2})"  # not after two letters (blocks compact IBAN like "PL12...")
+        r"(?<![A-Z]{2}\s)"  # not after "LL " (blocks spaced IBAN like "PL 12...")
+        r"(?<![A-Z]{2}-)"  # not after "LL-" (blocks dashed IBAN like "PL-12...")
+        r"(?<!\d)"  # not preceded by a digit (prevents matching inside longer numbers)
+        r"(?:(?:\d{2}[-\s]?\d{4}[-\s]?\d{4}[-\s]?"  # spaced/dashed groups: 2+6x4 digits
+        r"\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?"
+        r"\d{4})"
+        r"|\d{26})"  # or 26 consecutive digits
+        r"(?!\d)"  # not followed by a digit
     )
 
     _PLACEHOLDER = "{{NRB}}"
@@ -58,7 +70,7 @@ class NrbRule(BaseRule):
         mappings = []
 
         def _replacer(match: re.Match) -> str:
-            raw_nrb = match.group(0).replace(" ", "")
+            raw_nrb = re.sub(r"[\s\-]", "", match.group(0))
             if is_valid_nrb(raw_nrb):
                 if anonymizer_fn:
                     pseudo = anonymizer_fn(raw_nrb, self.tag_type)

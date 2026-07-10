@@ -1,42 +1,49 @@
+"""URL masking rule for the fast masker."""
+
 import re
 
-from .base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
 
 
 class UrlRule(BaseRule):
     """
-    Detects HTTP/HTTPS URLs **and** plain domain names (e.g. www.wp.pl,
-    radlab.dev) and replaces them with ``{{URL}}``.
+    Detects HTTP/HTTPS URLs and www-prefixed domain names.
+
+    Examples of matched patterns:
+        https://example.com, http://foo.bar.pl/page, www.wp.pl
+        http://192.168.1.1:8080/path (IP-based), http://localhost:3000
+
+    Full URLs (with http/https scheme) accept any TLD.  Standalone domains
+    must be prefixed with ``www.`` to reduce false positives in regular text.
     """
 
-    # The pattern matches:
-    #   • Full URLs with http:// or https:// scheme
-    #   • OR standalone domains (www.example.com) that are NOT part of code
-    # Avoids matching code patterns like: requests.post, response.json, object.method
-    _URL_REGEX = r"""
-        (?:
-            # Option 1: Full URL with scheme (always match)
-            \b(?:https?://)
-            (?:[A-Za-z0-9-]+\.)*         # optional subdomains
-            [A-Za-z0-9-]+                # domain name
-            \.                           # dot
-            [A-Za-z]{2,}                 # TLD
-            (?:[/:][^\s\)]*)?            # optional path (stop at closing paren)
-        |
-            # Option 2: Domain without scheme (only if not preceded by identifier)
-            (?<![A-Za-z0-9_])            # NOT preceded by identifier char
-            (?:www\.|[A-Za-z0-9-]+\.)    # must start with www. or subdomain.
-            [A-Za-z0-9-]+                # domain name
-            \.                           # dot
-            (?:com|org|net|edu|gov|pl|dev|io|co|uk|de|fr|it|es|ru|cn|jp|br|au|in|nl|se|no|fi|dk|cz|sk|eu|info|biz)  # common TLDs
-            \b
-            (?![A-Za-z0-9_\(])           # NOT followed by identifier or (
-        )
-    """
+    # URL pattern using clean non-VERBOSE regex for reliable matching.
+    # Three alternatives:
+    #   A: https?:// + domain.tld (any TLD, optional subdomains)
+    #   B: https?:// + IP_address_or_localhost + optional_port_path
+    #   C: www.domain.tld (only www-prefixed domains)
+    _URL_REGEX = (
+        r"(?:https?://"  # A: scheme
+        r"(?:(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,})"  # domain
+        r"(?:[/:][^\s\)]*)?"  # optional path
+        "|"
+        r"https?://"  # B: scheme
+        r"(?:"
+        r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}"  # IPv4 address
+        r"|localhost"  # OR localhost
+        r")"
+        r"(?::\d+)?(?:/[^\s\)]*)?"  # optional port + path
+        "|"
+        r"(?<![A-Za-z0-9_])www\."  # C: www prefix
+        r"[A-Za-z0-9-]+\.[A-Za-z]{2,}"  # domain.TLD
+        r"(?:[/:][^\s\)]*)?"  # optional path
+        r"(?![A-Za-z0-9_\(\)])"  # not followed by word char or (
+        r")"
+    )
 
     def __init__(self):
         super().__init__(
             regex=self._URL_REGEX,
             placeholder="{{URL}}",
-            flags=re.IGNORECASE | re.VERBOSE,
+            flags=re.IGNORECASE,
         )

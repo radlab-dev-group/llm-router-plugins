@@ -199,7 +199,9 @@ class LangChainRAG:
             If ``None`` the ``collection_name`` is used as folder name.
         """
         if not USE_LANGCHAIN_RAG:
-            raise Exception("Cannot use LangChainRAG when USE_LANGCHAIN_RAG=False!")
+            raise RuntimeError(
+                "LangChainRAG is not available (USE_LANGCHAIN_RAG=False)"
+            )
 
         self.persist_dir = persist_dir
         if self.persist_dir:

@@ -4,7 +4,7 @@ Rule that mask e‑mail addresses.
 
 import re
 
-from .base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
 
 
 class EmailRule(BaseRule):

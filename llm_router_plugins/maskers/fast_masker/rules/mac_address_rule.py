@@ -15,8 +15,8 @@ The rule:
 import re
 from typing import Optional, Callable, Match, Tuple, List
 
-from .base_rule import BaseRule
-from ..utils.validators import is_valid_mac
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_mac
 
 
 class MacAddressRule(BaseRule):
@@ -32,9 +32,6 @@ class MacAddressRule(BaseRule):
     """
 
     _PLACEHOLDER = "{{MAC_ADDRESS}}"
-
-    # Pre‑compile for speed.
-    _COMPILED = re.compile(_REGEX, flags=re.VERBOSE)
 
     def __init__(self) -> None:
         super().__init__(
@@ -74,4 +71,4 @@ class MacAddressRule(BaseRule):
             # Invalid MAC – leave original text unchanged.
             return mac
 
-        return self._COMPILED.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings

@@ -15,7 +15,7 @@ placeholder, matching the behaviour of the other masking rules.
 import re
 from typing import Optional, Callable
 
-from .base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
 
 
 class DateNumberRule(BaseRule):

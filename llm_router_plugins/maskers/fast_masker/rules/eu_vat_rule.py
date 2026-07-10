@@ -15,8 +15,8 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from .base_rule import BaseRule
-from ..utils.validators import is_valid_eu_vat
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_eu_vat
 
 
 class EuVatRule(BaseRule):
@@ -31,9 +31,6 @@ class EuVatRule(BaseRule):
     """
 
     _PLACEHOLDER = "{{EU_VAT}}"
-
-    # Pre‑compile for performance.
-    _COMPILED = re.compile(_REGEX, flags=re.IGNORECASE | re.VERBOSE)
 
     def __init__(self) -> None:
         super().__init__(
@@ -73,4 +70,4 @@ class EuVatRule(BaseRule):
             # Invalid VAT – keep original text.
             return vat
 
-        return self._COMPILED.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings

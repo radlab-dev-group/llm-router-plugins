@@ -56,7 +56,9 @@ class LangchainRAGPlugin(PluginInterface):
         super().__init__(logger=logger)
 
         if not USE_LANGCHAIN_RAG:
-            raise Exception("Cannot use LangChainRAG when USE_LANGCHAIN_RAG=False!")
+            raise RuntimeError(
+                "LangChainRAG is not available (USE_LANGCHAIN_RAG=False)"
+            )
 
         self.rag = LangChainRAG(
             collection_name=LANGCHAIN_RAG_COLLECTION,
@@ -108,14 +110,15 @@ class LangchainRAGPlugin(PluginInterface):
             self._logger.error(f"Cannot find field with user text using {self.name}")
             return payload
 
-        extended_content = ""
+        parts: list[str] = []
         docs = self.rag.search(text_as_query, top_n=10)
-        for [d, s] in docs:
-            extended_content += "\n\n" + d.page_content.strip() + "\n"
+        for d, s in docs:
+            parts.append("\n\n" + d.page_content.strip() + "\n")
 
-        if len(extended_content):
+        if parts:
+            extended_content = "\n".join(parts).strip()
             extended_content = (
-                f"{self.USER_MSG_EXTEND_CONTENT}\n{extended_content.strip()}".strip()
+                f"{self.USER_MSG_EXTEND_CONTENT}\n{extended_content}"
             ).strip()
 
         if not extended_content:

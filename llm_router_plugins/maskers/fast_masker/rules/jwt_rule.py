@@ -13,8 +13,8 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from .base_rule import BaseRule
-from ..utils.validators import is_possible_jwt
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.utils.validators import is_possible_jwt
 
 
 class JwtRule(BaseRule):
@@ -29,9 +29,6 @@ class JwtRule(BaseRule):
     """
 
     _PLACEHOLDER = "{{JWT}}"
-
-    # Pre-compile for performance.
-    _COMPILED = re.compile(_REGEX, flags=re.VERBOSE)
 
     def __init__(self) -> None:
         super().__init__(
@@ -71,4 +68,4 @@ class JwtRule(BaseRule):
             # Not a valid JWT – keep original text.
             return token
 
-        return self._COMPILED.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings
