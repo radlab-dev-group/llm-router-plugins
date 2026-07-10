@@ -30,13 +30,18 @@ class CarPlateRule(BaseRule):
     # Regex that matches typical Polish plates (loose pattern; strict validation
     # is delegated to :func:`is_valid_car_plate` in validators.py).
     _REGEX = r"""
-        (?<![A-Z]{2})       # not preceded by two uppercase letters (blocks IBAN CC like "PL" in compact)
+        (?<![A-Z]{2})       # not preceded by two uppercase letters
+                             # (blocks IBAN CC like "PL" in compact)
         (?<![A-Z]{2}-)      # not after "LL-" (dashed IBAN like "PL-17...")
         \b
         [A-Z]{2,3}          # leading letters
-        (?:                 # followed by plate content: digits and optional trailing letters
-            \s?             # optional space between letters and digits ("PKN 5670K")
-            \d{2,5}[A-Z]{0,2}\b   # standard car plate: digits + optional trailing letters
+        (?:                 # followed by plate content:
+                             # digits and optional trailing letters
+            \s?             # optional space between letters and
+                            # digits ("PKN 5670K")
+            # standard car plate: digits + optional trailing letters
+            \d{2,5}[A-Z]{0,2}
+            \b
         )
     """
 

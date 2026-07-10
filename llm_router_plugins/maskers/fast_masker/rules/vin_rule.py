@@ -68,7 +68,8 @@ class VinRule(BaseRule):
         def _replacer(match: re.Match) -> str:
             vin = match.group(0)
             if is_valid_vin(vin):
-                # Use the custom anonymiser if supplied; otherwise, the default placeholder.
+                # Use the custom anonymiser if supplied; otherwise,
+                # use the default placeholder.
                 if anonymizer_fn:
                     pseudo = anonymizer_fn(vin, self.tag_type)
                     mappings.append({"original": vin, "replacement": pseudo})

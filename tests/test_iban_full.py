@@ -2,10 +2,12 @@
 
 import sys
 
-sys.path.insert(0, "/mnt/data2/dev/develop/llm-router-plugins")
+sys.path.insert(0, "/mnt/data2/dev/develop/llm-router-plugins")  # noqa: E402
 
 # Clear cache
-from llm_router_plugins.maskers.fast_masker.core.masker import FastMasker
+from llm_router_plugins.maskers.fast_masker.core.masker import (
+    FastMasker,
+)  # noqa: E402
 
 FastMasker._rules_cache = None
 

@@ -139,7 +139,7 @@ class HttpPluginInterface(PluginInterface, abc.ABC):
         Returns
         -------
         str
-            The full endpoint URL (e.g. ``"https://api.example.com/api/guardrails/nask"``).
+            The full endpoint URL (e.g. the host plus API path).
         """
         return self.host_url.rstrip("/") + "/" + self.endpoint_path
 

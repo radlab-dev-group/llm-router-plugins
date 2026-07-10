@@ -25,7 +25,7 @@ length table in ``_IBAN_LENGTHS``.
 """
 
 import re
-from typing import Optional, Callable, Match, Tuple, List
+from typing import Optional, Callable, Tuple, List
 
 from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
 from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_iban
@@ -366,7 +366,8 @@ class BankAccountRule(BaseRule):
             pos = match.end()  # right after CC + check digits (all formats)
 
             anchor_text = text[anchor_start:pos]
-            # Strip spaces/hyphens to get pure CC (always 2 chars for valid country codes)
+            # Strip spaces/hyphens to get pure CC (always 2 chars for
+            # valid country codes).
             cc = re.sub(r"[\s\-]+", "", anchor_text).upper()[:2]
 
             if cc not in self._IBAN_COUNTRIES:

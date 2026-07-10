@@ -5,15 +5,22 @@ Run with:
     pytest tests/test_nrb_krs_rules.py -v
 """
 
-import os
-import sys
+import os  # noqa: E402
+import sys  # noqa: E402
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+sys.path.insert(
+    0, os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+)  # noqa: E402
 
-import pytest
+import pytest  # noqa: F401,E402
 
-from llm_router_plugins.maskers.fast_masker.rules.nrb_rule import NrbRule
-from llm_router_plugins.maskers.fast_masker.rules.krs_rule import KrsRule
+
+from llm_router_plugins.maskers.fast_masker.rules.nrb_rule import (
+    NrbRule,
+)  # noqa: E402
+from llm_router_plugins.maskers.fast_masker.rules.krs_rule import (
+    KrsRule,
+)  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

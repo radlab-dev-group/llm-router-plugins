@@ -23,13 +23,20 @@ for sep in test_separators:
         else ("SAME" if broken_matches == fixed_matches else "FAIL")
     )
     print(
-        f"  separator '{repr(sep)}': broken={broken_matches}, fixed={fixed_matches} [{status}]"
+        f"  separator '{sep!r}': "
+        f"broken={broken_matches}, fixed={fixed_matches} [{status}]"
     )
 
 # ── Test spaced/dashed IBAN matching with BankAccountRule ───────────────
 print("\n=== Testing BankAccountRule spaced/dashed matching ===")
 
-_CC = "(?:(?:AL|AD|AE|AT|BA|BH|BY|BE|BG|BR|CH|CR|CY|CZ|DE|DK|DO|EE|EG|ES|FI|FO|FR|GB|GE|GI|GL|GR|GT|HR|HU|IE|IQ|IR|IS|JO|KW|KZ|LB|LC|LI|LT|LU|LV|MC|MD|ME|MK|MR|MT|MU|NL|NO|PK|PL|PS|PT|QA|RO|RS|SA|SC|SE|SI|SK|SM|ST|TL|TN|TR|UA|UK|VA|VG))"
+_CC = (
+    "(?:(?:AL|AD|AE|AT|BA|BH|BY|BE|BG|BR|CH|CR|CY|CZ|DE|DK|"
+    "DO|EE|EG|ES|FI|FO|FR|GB|GE|GI|GL|GR|GT|HR|HU|IE|IQ|IR|IS|"
+    "JO|KW|KZ|LB|LC|LI|LT|LU|LV|MC|MD|ME|MK|MR|MT|MU|NL|NO|"
+    "PK|PL|PS|PT|QA|RO|RS|SA|SC|SE|SI|SK|SM|ST|TL|TN|TR|UA|"
+    "UK|VA|VG))"
+)
 
 # Fixed spaced_dashed pattern
 spaced_dashed_fixed = (
@@ -68,7 +75,10 @@ for iban, cc, expected_len in test_cases:
         cleaned = re.sub(r"[\s\-]+", "", matched_text).upper()
         actual_len = len(cleaned)
         print(
-            f"  {iban[:35]:35s} -> match='{matched_text}', len={actual_len}, expected={expected_len} {'OK' if actual_len == expected_len else 'MISMATCH'}"
+            f"  {iban[:35]:35s} -> "
+            f"match='{matched_text}', len={actual_len}, "
+            f"expected={expected_len} "
+            f"{'OK' if actual_len == expected_len else 'MISMATCH'}"
         )
     else:
         # Try compact alternative
@@ -79,11 +89,13 @@ for iban, cc, expected_len in test_cases:
 # ── Test with actual FastMasker ─────────────────────────────────────────
 print("\n=== Testing with FastMasker ===")
 
-import sys
+import sys  # noqa: E402
 
-sys.path.insert(0, "/mnt/data2/dev/develop/llm-router-plugins")
+sys.path.insert(0, "/mnt/data2/dev/develop/llm-router-plugins")  # noqa: E402
 
-from llm_router_plugins.maskers.fast_masker.core.masker import FastMasker
+from llm_router_plugins.maskers.fast_masker.core.masker import (
+    FastMasker,
+)  # noqa: E402
 
 # Clear the rule cache to pick up changes
 FastMasker._rules_cache = None

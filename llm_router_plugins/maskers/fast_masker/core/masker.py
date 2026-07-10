@@ -129,7 +129,8 @@ class FastMasker(MaskerPayloadTraveler):
                 TimeRule(),  # time-of-day (HH:MM / HH.MM)
                 MoneyRule(),
                 VinRule(),
-                BankAccountRule(),  # structural IBAN -- before CarPlate to prevent false positives
+                BankAccountRule(),  # structural IBAN -- before CarPlate to
+                # prevent false positives
                 CarPlateRule(),  # Polish car registration plates
                 PostalCodeRule(),
                 NrbRule(),
@@ -202,7 +203,8 @@ class FastMasker(MaskerPayloadTraveler):
         """
         # We should NOT strip punctuation from the value we are replacing in text
         # unless the rule itself excludes it from the match.
-        # But if we want to store it in mapping, we should store exactly what we want to replace.
+        # But if we want to store it in mapping, we should store exactly what
+        # we want to replace.
         val_norm = value
         if val_norm in self.mapping:
             return self.mapping[val_norm]
@@ -257,7 +259,8 @@ class FastMasker(MaskerPayloadTraveler):
             # We want to avoid masking already masked parts in a larger text.
             # This is tricky with simple regex replacement.
             # For now, let's at least avoid the common case where a rule
-            # matches parts of our own pseudonyms (like NIP matching digits in the timestamp).
+            # matches parts of our own pseudonyms (like NIP matching
+            # digits in the timestamp).
             [result, mappings] = rule.apply(result, anonymizer_fn=self._get_pseudo)
             all_mappings.extend(mappings)
 

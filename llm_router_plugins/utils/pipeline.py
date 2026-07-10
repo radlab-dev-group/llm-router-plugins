@@ -7,7 +7,7 @@ their ``apply`` methods are called sequentially on the payload.
 """
 
 import logging
-from typing import Tuple, Dict, List
+from typing import Dict, List
 
 from llm_router_plugins.utils.plugin_registrator import UtilsRegistry
 

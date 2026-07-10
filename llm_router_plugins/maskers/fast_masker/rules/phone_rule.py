@@ -30,7 +30,9 @@ class PhoneRule(BaseRule):
     _PHONE_REGEX = r"""
         \b\d{9}\b                            # plain 9 consecutive digits
         |                                    # OR
-        (?<!\S)\d{2,5}(?:[\s\-]\d{1,4}){2,4}(?!\S)   # digit groups (min. 3 total, max ~15 chars)
+        # digit groups (min. 3 total, max ~15 chars)
+        (?<!\S)\d{2,5}(?:[\s\-]\d{1,4}){2,4}
+        (?!\S)
     """
 
     _PHONE_PLACEHOLDER = "{{PHONE}}"
