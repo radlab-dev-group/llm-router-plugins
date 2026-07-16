@@ -14,7 +14,7 @@ instance state.
 """
 
 import logging
-from typing import Optional, Dict
+from typing import Optional
 
 from llm_router_plugins.utils.registry import (
     MAIN_UTILS_REGISTRY,

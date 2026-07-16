@@ -65,9 +65,9 @@ class NASKGuardPlugin(GuardrailsBase):
     def __init__(self, logger: Optional[logging.Logger] = None):
         if not len(GUARDRAIL_NASK_GUARD_HOST):
             raise RuntimeError(
-                f"When you are using `nask_guard` plugin, you must provide a "
-                f"host with model, GUARDRAIL_NASK_GUARD_HOST must be set "
-                f"to valid host."
+                "When you are using `nask_guard` plugin, you must provide a "
+                "host with model. GUARDRAIL_NASK_GUARD_HOST must be set to "
+                "a valid host."
             )
 
         super().__init__(logger=logger)

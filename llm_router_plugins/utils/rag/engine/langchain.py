@@ -4,10 +4,14 @@ CLI wrapper around the LangChainRAG helper.
 Usage examples
 --------------
 # Index all *.txt and *.md files under ./data
-python -m llm_router_plugins.utils.rag.engine.langchain_cli --index --path ./data --ext .txt .md
+python -m \
+    llm_router_plugins.utils.rag.engine.langchain_cli \
+    --index --path ./data --ext .txt .md
 
 # Search the previously built index
-python -m llm_router_plugins.utils.rag.engine.langchain_cli --search --query "What is LangChain?" --top_n 5
+python -m \
+    llm_router_plugins.utils.rag.engine.langchain_cli \
+    --search --query "What is LangChain?" --top_n 5
 """
 
 import os
@@ -119,7 +123,20 @@ if USE_LANGCHAIN_RAG:
         def embed_documents(
             self, texts: List[str], batch_size: int = 32
         ) -> List[List[float]]:
-            """Batch‑embed a list of documents using the specified batch size."""
+            """Batch-embed a list of documents using the specified batch size.
+
+            Parameters
+            ----------
+            texts : List[str]
+                Documents to embed.
+            batch_size : int
+                Number of documents per batch.
+
+            Returns
+            -------
+            List[List[float]]
+                Embeddings for each document.
+            """
             all_embeddings: List[List[float]] = []
 
             # Process the input list in batches, showing a progress bar.
@@ -150,7 +167,8 @@ if USE_LANGCHAIN_RAG:
                 norms[norms == 0] = 1
                 batch_vecs = batch_vecs / norms
 
-                # Convert each normalised vector to a plain Python list and extend the result.
+                # Convert each normalised vector to a plain Python list and
+                # extend the result.
                 all_embeddings.extend([vec.tolist() for vec in batch_vecs])
 
             return all_embeddings

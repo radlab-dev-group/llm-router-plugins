@@ -8,14 +8,16 @@ Run with:
 import json
 import os
 import pathlib
+
+import pytest  # noqa: F401
 import sys
 
 # Ensure the package root is on sys.path so imports work without install.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+sys.path.insert(
+    0, os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+)  # noqa: E402
 
-import pytest
-
-from llm_router_plugins.utils.routing.semantic.simple import (
+from llm_router_plugins.utils.routing.semantic.simple import (  # noqa: E402
     DefaultSemanticRoutingPlugin,
 )
 

@@ -2,7 +2,7 @@
 
 import os
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Optional
 
 from llm_router_plugins.constants import _DontChangeMe
 from llm_router_plugins.maskers.maskers_http_base import HttpMaskersBase

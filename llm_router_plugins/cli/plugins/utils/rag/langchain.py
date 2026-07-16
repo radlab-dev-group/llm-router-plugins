@@ -5,10 +5,15 @@ CLI wrapper around the LangChainRAG helper.
 Usage examples
 --------------
 # Index all *.txt and *.md files under ./data
-python -m llm_router_plugins.utils.rag.engine.langchain_cli --index --path ./data --ext .txt .md
+python -m \
+    llm_router_plugins.utils.rag.engine.langchain_cli \
+    --index --path ./data --ext .txt .md
 
 # Search the previously built index
-python -m llm_router_plugins.utils.rag.engine.langchain_cli --search --query "What is LangChain?" --top_n 5
+python -m \
+    llm_router_plugins.utils.rag.engine.langchain_cli \
+    --search \
+    --query "What is LangChain?" --top_n 5
 """
 
 import sys
@@ -24,12 +29,15 @@ GREEN = "\033[32m"
 YELLOW = "\033[33m"
 MAGENTA = "\033[35m"
 
-from llm_router_plugins.core.utils import read_files_from_dir
-from llm_router_plugins.utils.rag.engine.langchain import USE_LANGCHAIN_RAG
+# Lazy imports – only needed when the feature is enabled.
+from llm_router_plugins.core.utils import read_files_from_dir  # noqa: E402
+from llm_router_plugins.utils.rag.engine.langchain import (  # noqa: F401,E402
+    USE_LANGCHAIN_RAG,
+)
 
 if USE_LANGCHAIN_RAG:
     try:
-        from llm_router_plugins.utils.rag.engine.langchain import (
+        from llm_router_plugins.utils.rag.engine.langchain import (  # noqa: F401,E402
             LangChainRAG,
             LANGCHAIN_RAG_COLLECTION,
             LANGCHAIN_RAG_EMBEDDER,
@@ -38,12 +46,14 @@ if USE_LANGCHAIN_RAG:
             LANGCHAIN_RAG_CHUNK_OVERLAP,
             USE_LANGCHAIN_RAG,
         )
-        from langchain_community.vectorstores import FAISS
+        from langchain_community.vectorstores import FAISS  # noqa: F401,E402
     except Exception as exc:  # pragma: no cover
         sys.stderr.write(f"Failed to import LangChainRAG utilities: {exc}\n")
         sys.exit(1)
 
-    from llm_router_plugins.utils.rag.langchain_plugin import LangchainRAGPlugin
+    from llm_router_plugins.utils.rag.langchain_plugin import (  # noqa: E402
+        LangchainRAGPlugin,
+    )
 
 
 def _ensure_rag_enabled() -> None:

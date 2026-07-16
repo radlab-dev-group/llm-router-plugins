@@ -5,14 +5,19 @@ Run with:
     pytest tests/test_phone_rules.py -v
 """
 
-import os
-import sys
+import os  # noqa: E402
+import sys  # noqa: E402
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+sys.path.insert(
+    0, os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+)  # noqa: E402
 
-import pytest
+import pytest  # noqa: F401,E402
 
-from llm_router_plugins.maskers.fast_masker.rules.phone_rule import PhoneRule
+
+from llm_router_plugins.maskers.fast_masker.rules.phone_rule import (  # noqa: E402
+    PhoneRule,  # noqa: E402,E501
+)
 from llm_router_plugins.maskers.fast_masker.rules.phone_international_rule import (
     PhoneInternationalRule,
 )

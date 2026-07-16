@@ -21,41 +21,63 @@ from typing import List, Tuple, Dict, Optional
 from llm_router_plugins.maskers.payload_interface import MaskerPayloadTraveler
 
 from llm_router_plugins.maskers.fast_masker.core.rule_interface import MaskerRuleI
-from llm_router_plugins.maskers.fast_masker.rules import (
+from llm_router_plugins.maskers.fast_masker.rules.car_plate_rule import (
     CarPlateRule,
-    EmailRule,
-    UrlRule,
-    IpRule,
-    PeselTaggedRule,
-    PeselRule,
-    NipRule,
-    KrsRule,
-    RegonRule,
-    DateWordRule,
-    DateNumberRule,
-    TimeRule,
-    MoneyRule,
-    VinRule,
-    PostalCodeRule,
-    NrbRule,
-    BankAccountRule,
-    PhoneInternationalRule,
-    PhoneRule,
-    MacAddressRule,
-    CreditCardRule,
-    PassportRule,
-    IdCardRule,
-    SsnRule,
-    HealthIdRule,
-    SslCertRule,
-    JwtRule,
-    InvoiceNumberRule,
-    OrderNumberRule,
-    TransactionRefRule,
-    SimCardRule,
-    SocialIdRule,
-    EuVatRule,
 )
+from llm_router_plugins.maskers.fast_masker.rules.email_rule import EmailRule
+from llm_router_plugins.maskers.fast_masker.rules.url_rule import UrlRule
+from llm_router_plugins.maskers.fast_masker.rules.ip_rule import IpRule
+from llm_router_plugins.maskers.fast_masker.rules.pesel_tagged_rule import (
+    PeselTaggedRule,
+)
+from llm_router_plugins.maskers.fast_masker.rules.pesel_rule import PeselRule
+from llm_router_plugins.maskers.fast_masker.rules.nip_rule import NipRule
+from llm_router_plugins.maskers.fast_masker.rules.krs_rule import KrsRule
+from llm_router_plugins.maskers.fast_masker.rules.regon_rule import RegonRule
+from llm_router_plugins.maskers.fast_masker.rules.date_word_rule import (
+    DateWordRule,
+)
+from llm_router_plugins.maskers.fast_masker.rules.date_number_rule import (
+    DateNumberRule,
+)
+from llm_router_plugins.maskers.fast_masker.rules.time_rule import TimeRule
+from llm_router_plugins.maskers.fast_masker.rules.money_rule import MoneyRule
+from llm_router_plugins.maskers.fast_masker.rules.vin_rule import VinRule
+from llm_router_plugins.maskers.fast_masker.rules.postal_code_rule import (
+    PostalCodeRule,
+)
+from llm_router_plugins.maskers.fast_masker.rules.nrb_rule import NrbRule
+from llm_router_plugins.maskers.fast_masker.rules.bank_account_rule import (
+    BankAccountRule,
+)
+from llm_router_plugins.maskers.fast_masker.rules.phone_international_rule import (
+    PhoneInternationalRule,
+)
+from llm_router_plugins.maskers.fast_masker.rules.phone_rule import PhoneRule
+from llm_router_plugins.maskers.fast_masker.rules.mac_address_rule import (
+    MacAddressRule,
+)
+from llm_router_plugins.maskers.fast_masker.rules.credit_card_rule import (
+    CreditCardRule,
+)
+from llm_router_plugins.maskers.fast_masker.rules.passport_rule import PassportRule
+from llm_router_plugins.maskers.fast_masker.rules.id_card_rule import IdCardRule
+from llm_router_plugins.maskers.fast_masker.rules.ssn_rule import SsnRule
+from llm_router_plugins.maskers.fast_masker.rules.health_id_rule import HealthIdRule
+from llm_router_plugins.maskers.fast_masker.rules.ssl_cert_rule import SslCertRule
+from llm_router_plugins.maskers.fast_masker.rules.jwt_rule import JwtRule
+from llm_router_plugins.maskers.fast_masker.rules.invoice_number_rule import (
+    InvoiceNumberRule,
+)
+from llm_router_plugins.maskers.fast_masker.rules.order_number_rule import (
+    OrderNumberRule,
+)
+from llm_router_plugins.maskers.fast_masker.rules.transaction_ref_rule import (
+    TransactionRefRule,
+)
+from llm_router_plugins.maskers.fast_masker.rules.sim_card_rule import SimCardRule
+from llm_router_plugins.maskers.fast_masker.rules.social_id_rule import SocialIdRule
+from llm_router_plugins.maskers.fast_masker.rules.eu_vat_rule import EuVatRule
 
 
 class FastMasker(MaskerPayloadTraveler):
@@ -129,7 +151,8 @@ class FastMasker(MaskerPayloadTraveler):
                 TimeRule(),  # time-of-day (HH:MM / HH.MM)
                 MoneyRule(),
                 VinRule(),
-                BankAccountRule(),  # structural IBAN -- before CarPlate to prevent false positives
+                BankAccountRule(),  # structural IBAN -- before CarPlate to
+                # prevent false positives
                 CarPlateRule(),  # Polish car registration plates
                 PostalCodeRule(),
                 NrbRule(),
@@ -202,7 +225,8 @@ class FastMasker(MaskerPayloadTraveler):
         """
         # We should NOT strip punctuation from the value we are replacing in text
         # unless the rule itself excludes it from the match.
-        # But if we want to store it in mapping, we should store exactly what we want to replace.
+        # But if we want to store it in mapping, we should store exactly what
+        # we want to replace.
         val_norm = value
         if val_norm in self.mapping:
             return self.mapping[val_norm]
@@ -257,7 +281,8 @@ class FastMasker(MaskerPayloadTraveler):
             # We want to avoid masking already masked parts in a larger text.
             # This is tricky with simple regex replacement.
             # For now, let's at least avoid the common case where a rule
-            # matches parts of our own pseudonyms (like NIP matching digits in the timestamp).
+            # matches parts of our own pseudonyms (like NIP matching
+            # digits in the timestamp).
             [result, mappings] = rule.apply(result, anonymizer_fn=self._get_pseudo)
             all_mappings.extend(mappings)
 

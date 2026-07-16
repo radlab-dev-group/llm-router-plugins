@@ -18,7 +18,8 @@ from llm_router_plugins.guardrails.speakleash.sojka_guard_plugin import (
 )
 
 MAIN_GUARDRAILS_REGISTRY = {
-    NASKGuardPlugin.name: NASKGuardPlugin,  # **Model is licensed under **CC BY‑NC‑SA 4.0**,
+    # Model is licensed under CC BY-NC-SA 4.0.
+    NASKGuardPlugin.name: NASKGuardPlugin,
     SojkaGuardPlugin.name: SojkaGuardPlugin,
 }
 

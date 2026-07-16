@@ -44,12 +44,12 @@ ordering minimizes false positives and ensures the most reliable identifiers are
 
 ### 4. Medium Certainty — Well-Structured Formats
 
-| Rule                | Placeholder        | What it Detects                                                                     | Notes                                                                            |
-|---------------------|--------------------|-------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
-| **EmailRule**       | `{{EMAIL}}`        | E-mail addresses (e.g., `user@example.com`).                                        | Permissive regex; matches local-part, `@`, domain with TLD. Applied before URLs. |
-| **UrlRule**         | `{{URL}}`          | HTTP/HTTPS URLs and standalone domains (e.g., `https://example.com`, `www.wp.pl`).  | Avoids code patterns like `requests.post`, `response.json`.                      |
-| **IpRule**          | `{{IP}}`           | IPv4, IPv6 addresses and hostname `localhost`. Masks ports as `{{IP}}:{{PORT}}`.    | Light octet validation; port captured separately.                                |
-| **BankAccountRule** | `{{BANK_ACCOUNT}}` | Polish IBAN (28 characters) and partially masked accounts (groups may contain `X`). | Exact length match; supports masked formats.                                     |
+| Rule                | Placeholder          | What it Detects                                                                     | Notes                                                                            |
+|---------------------|----------------------|-------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
+| **EmailRule**       | `{{EMAIL}}`          | E-mail addresses (e.g., `user@example.com`).                                        | Permissive regex; matches local-part, `@`, domain with TLD. Applied before URLs. |
+| **UrlRule**         | `{{URL}}`            | HTTP/HTTPS URLs and standalone domains (e.g., `https://example.com`, `www.wp.pl`).  | Avoids code patterns like `requests.post`, `response.json`.                      |
+| **IpRule**          | `{{IP}}`, `{{PORT}}` | IPv4, IPv6 addresses and hostname `localhost`. Masks ports as `{{IP}}:{{PORT}}`.    | Light octet validation; port captured separately.                                |
+| **BankAccountRule** | `{{BANK_ACCOUNT}}`   | Polish IBAN (28 characters) and partially masked accounts (groups may contain `X`). | Exact length match; supports masked formats.                                     |
 
 ### 5. Medium-Low Certainty — Business Identifiers
 
@@ -67,6 +67,7 @@ ordering minimizes false positives and ensures the most reliable identifiers are
 | **DateWordRule**   | `{{DATE_STR}}` | Textual dates in Polish and English (e.g., `12 stycznia 2023`, `January 12, 2023`). | Supports month names, abbreviations, ordinal suffixes, commas. |
 | **DateNumberRule** | `{{DATE_NUM}}` | Numeric dates (e.g., `YYYY.MM.DD`, `DD.MM.YYYY`).                                   | Supports `-`, `/`, `.` separators with optional whitespace.    |
 | **MoneyRule**      | `{{MONEY}}`    | Monetary amounts with currency (symbols, ISO codes, or Polish words).               | Requires currency identifier; discards markdown emphasis.      |
+| **TimeRule**       | `{{TIME}}`     | 24-hour time in format HH:MM or HH.MM (e.g., `14:30`, `09.45`).                     | Validates hour (00-23) and minute (00-59) ranges.              |
 
 ### 7. Format-Based — Specific Patterns
 
@@ -148,8 +149,8 @@ identified identifiers. All validators reside in `llm_router_plugins/maskers/fas
 - **`is_valid_mac(mac: str) -> bool`** — Validates MAC addresses (6 octets, separators `:`, `-`, or none).
 - **`is_possible_token(token: str, min_len: int = 32) -> bool`** — Heuristic validation for API keys. Requires minimum
   length (default 32) and at least 2 character types (upper, lower, digit, special).
-- **`is_possible_jwt(jwt: str) -> bool`** — Validates JWT structure (3 Base64URL parts separated by dots). Header and
-  payload must be ≥20 chars each.
+- **`is_possible_jwt(jwt: str) -> bool`** — Validates JWT structure (3 Base64URL parts separated by dots). Each part
+  must be at least 10 characters long.
 - **`is_valid_sim_iccid(iccid: str) -> bool`** — Validates SIM card ICCID numbers (19 or 20 digits, optional spaces).
 - **`is_valid_ssl_serial(serial: str) -> bool`** — Validates SSL certificate serial numbers (16-40 hex characters).
 
