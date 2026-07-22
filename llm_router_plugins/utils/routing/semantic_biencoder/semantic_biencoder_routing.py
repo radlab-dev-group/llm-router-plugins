@@ -55,7 +55,7 @@ from llm_router_plugins.utils.routing.semantic_biencoder.embedder import (
     EmbeddingRouter,
 )
 from llm_router_plugins.utils.routing.constants import (
-    SEMANTIC_ROUTING_PREFIX,
+    SEMANTIC_BIENCODER_ROUTING_PREFIX,
 )
 
 
@@ -101,7 +101,7 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
 
         self._config = SemanticBiEncoderConfig.from_file()
         persist_dir = self._config.vector_store_path
-        env_persist = os.getenv(f"{SEMANTIC_ROUTING_PREFIX}PERSIST_DIR")
+        env_persist = os.getenv(f"{SEMANTIC_BIENCODER_ROUTING_PREFIX}PERSIST_DIR")
         if env_persist:
             persist_dir = env_persist
             if self._logger:
@@ -135,14 +135,14 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
             raise ValueError(
                 "SemanticBiEncoderRouting: no embedding_model configured — "
                 "check 'embedding_model' in the JSON config or the "
-                f"{SEMANTIC_ROUTING_PREFIX}MODEL environment variable"
+                f"{SEMANTIC_BIENCODER_ROUTING_PREFIX}MODEL environment variable"
             )
 
         if not self._config.routing_targets:
             raise ValueError(
                 "SemanticBiEncoderRouting: no routing targets defined — "
                 "check 'routing_targets' in the JSON config or the "
-                f"{SEMANTIC_ROUTING_PREFIX}TARGETS environment variable"
+                f"{SEMANTIC_BIENCODER_ROUTING_PREFIX}TARGETS environment variable"
             )
 
         if self._config.chunk_size <= 0:
@@ -294,13 +294,13 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
         ------
         None
         """
-        model_env = os.getenv(f"{SEMANTIC_ROUTING_PREFIX}MODEL")
+        model_env = os.getenv(f"{SEMANTIC_BIENCODER_ROUTING_PREFIX}MODEL")
         if model_env:
             self._config.embedding_model = model_env
             if self._logger:
                 self._logger.info("Overriding embedding model: %s", model_env)
 
-        targets_env = os.getenv(f"{SEMANTIC_ROUTING_PREFIX}TARGETS")
+        targets_env = os.getenv(f"{SEMANTIC_BIENCODER_ROUTING_PREFIX}TARGETS")
         if targets_env:
             allowed = set(self._config.target_names)
             selected = [
@@ -319,14 +319,16 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
                         "|".join(selected),
                     )
 
-        chunk_size_env = os.getenv(f"{SEMANTIC_ROUTING_PREFIX}CHUNK_SIZE")
+        chunk_size_env = os.getenv(f"{SEMANTIC_BIENCODER_ROUTING_PREFIX}CHUNK_SIZE")
         if chunk_size_env:
             try:
                 self._config.chunk_size = int(chunk_size_env)
             except ValueError:
                 pass
 
-        chunk_overlap_env = os.getenv(f"{SEMANTIC_ROUTING_PREFIX}CHUNK_OVERLAP")
+        chunk_overlap_env = os.getenv(
+            f"{SEMANTIC_BIENCODER_ROUTING_PREFIX}CHUNK_OVERLAP"
+        )
         if chunk_overlap_env:
             try:
                 self._config.chunk_overlap = int(chunk_overlap_env)

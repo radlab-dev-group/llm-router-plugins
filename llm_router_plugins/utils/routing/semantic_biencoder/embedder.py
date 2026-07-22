@@ -121,6 +121,14 @@ class EmbeddingRouter:
         self._id_counter: int = 0
         self._initialized = False
 
+    @property
+    def has_vectors(self) -> bool:
+        """True when the FAISS index contains at least one vector."""
+        return (
+            self._faiss_index is not None
+            and getattr(self._faiss_index, "ntotal", 0) > 0
+        )
+
     def initialize(self) -> None:
         """
         Load the model and pre-compute / load the FAISS index.
