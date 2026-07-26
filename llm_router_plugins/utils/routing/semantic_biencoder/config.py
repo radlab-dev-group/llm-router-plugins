@@ -151,6 +151,7 @@ class SemanticBiEncoderConfig:
             # --- Case A: raw JSON string (starts with { or [) ------------------
             if stripped and stripped[0] in ("{", "["):
                 return cls.from_json(stripped)
+
             # --- Case B: file path supplied via env var -------------------------
             if stripped:
                 # No fall-through — raise immediately if the file can't be read
@@ -159,13 +160,11 @@ class SemanticBiEncoderConfig:
                 return cls._from_raw(raw)
             # env var is set but empty — fall through to path / default
 
-        # ---- file from argument or default location -----------------------------
         if path is None:
-            path = (
-                pathlib.Path(__file__).resolve().parent.parent.parent.parent
-                / "resources"
-                / "routing"
-                / "semantic_biencoder.json"
+            raise ValueError(
+                f"SemanticBiEncoderConfig.from_file: empty config path — "
+                f"check that {SEMANTIC_BIENCODER_ROUTING_PREFIX}CONFIG env var "
+                "is set to a valid file path (not an empty string)"
             )
 
         with open(path, "r", encoding="utf-8") as fh:

@@ -118,8 +118,8 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
 
         # Environment overrides
         self._override_from_env()
-        self._router.initialize()
         self._validate_args()
+        self._router.initialize()
 
     def _validate_args(self) -> None:
         """
@@ -131,7 +131,7 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
         ValueError
             If required config is missing, empty, or router failed to load vectors.
         """
-        if not self._config.embedding_model:
+        if self._config.embedding_model is None or not self._config.embedding_model:
             raise ValueError(
                 "SemanticBiEncoderRouting: no embedding_model configured — "
                 "check 'embedding_model' in the JSON config or the "
