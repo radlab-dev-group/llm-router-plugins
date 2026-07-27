@@ -76,10 +76,10 @@ Patterns add a flat **+3.0** per match, useful for detecting code structures, ma
 
 ```json
 "patterns": [
-  "def\\s+\\w+\\s*\\(",
-  "class\\s+\\w+\\s*[(:]",
-  "\\b\\d+\\s*[+\\-*/^]\\s*\\d+\\b",
-  "\\bwhat\\s+(is|are|does)\\b"
+"def\\s+\\w+\\s*\\(",
+"class\\s+\\w+\\s*[(:]",
+"\\b\\d+\\s*[+\\-*/^]\\s*\\d+\\b",
+"\\bwhat\\s+(is|are|does)\\b"
 ]
 ```
 
@@ -89,10 +89,10 @@ The `weights` object maps individual keywords to boost factors, allowing fine-gr
 
 ```json
 "weights": {
-  "debug": 5,   // Very strong signal for code intent
-  "błąd": 5,    // Very strong signal for code intent
-  "kod": 2,     // Moderate signal
-  "python": 2   // Moderate signal
+"debug": 5, // Very strong signal for code intent
+"błąd": 5, // Very strong signal for code intent
+"kod": 2, // Moderate signal
+"python": 2   // Moderate signal
 }
 ```
 
@@ -135,7 +135,8 @@ The `weights` object maps individual keywords to boost factors, allowing fine-gr
 
 #### JSON Config (`simple_semantic.json`)
 
-All configuration lives in [`llm_router_plugins/resources/routing/simple_semantic.json`](../resources/routing/simple_semantic.json).
+All configuration lives in [
+`llm_router_plugins/resources/routing/simple_semantic.json`](../resources/routing/simple_semantic.json).
 
 ```json
 {
@@ -158,34 +159,91 @@ All configuration lives in [`llm_router_plugins/resources/routing/simple_semanti
   },
   "intents": {
     "code": {
-      "keywords": ["code", "debug", "funkcja"],
-      "phrases": ["write code:5", "fix bug:4"],
-      "patterns": ["def\\s+\\w+\\s*\\(", "class\\s+\\w+"],
-      "weights": {"debug": 5, "błąd": 4}
+      "keywords": [
+        "code",
+        "debug",
+        "funkcja"
+      ],
+      "phrases": [
+        "write code:5",
+        "fix bug:4"
+      ],
+      "patterns": [
+        "def\\s+\\w+\\s*\\(",
+        "class\\s+\\w+"
+      ],
+      "weights": {
+        "debug": 5,
+        "błąd": 4
+      }
     },
     "math": {
-      "keywords": ["calculate", "equation"],
-      "phrases": ["calculate:4", "solve equation:4"],
-      "patterns": ["\\b\\d+\\s*[+\\-*/^]\\s*\\d+\\b"],
-      "weights": {"calculate": 4, "solve": 4}
+      "keywords": [
+        "calculate",
+        "equation"
+      ],
+      "phrases": [
+        "calculate:4",
+        "solve equation:4"
+      ],
+      "patterns": [
+        "\\b\\d+\\s*[+\\-*/^]\\s*\\d+\\b"
+      ],
+      "weights": {
+        "calculate": 4,
+        "solve": 4
+      }
     },
     "creative": {
-      "keywords": ["write", "story", "napisz"],
-      "phrases": ["write a story:4", "napisz wiersz:4"],
-      "patterns": ["napisz\\s+(mi|ci|go|ją)"],
-      "weights": {"napisz": 4, "write": 3}
+      "keywords": [
+        "write",
+        "story",
+        "napisz"
+      ],
+      "phrases": [
+        "write a story:4",
+        "napisz wiersz:4"
+      ],
+      "patterns": [
+        "napisz\\s+(mi|ci|go|ją)"
+      ],
+      "weights": {
+        "napisz": 4,
+        "write": 3
+      }
     },
     "general": {
-      "keywords": ["explain", "difference", "wyjaśnij"],
-      "phrases": ["what is:4", "how to:4"],
-      "patterns": ["\\bwhat\\s+(is|are|does)\\b"],
-      "weights": {"wyjaśnij": 3, "help": 2}
+      "keywords": [
+        "explain",
+        "difference",
+        "wyjaśnij"
+      ],
+      "phrases": [
+        "what is:4",
+        "how to:4"
+      ],
+      "patterns": [
+        "\\bwhat\\s+(is|are|does)\\b"
+      ],
+      "weights": {
+        "wyjaśnij": 3,
+        "help": 2
+      }
     }
   },
   "none": {
-    "keywords": ["hello", "cześć", "thanks"],
-    "phrases": ["hello:1", "thanks:1"],
-    "patterns": ["^\\b(hello|hi|cześć)\\b"],
+    "keywords": [
+      "hello",
+      "cześć",
+      "thanks"
+    ],
+    "phrases": [
+      "hello:1",
+      "thanks:1"
+    ],
+    "patterns": [
+      "^\\b(hello|hi|cześć)\\b"
+    ],
     "weights": {}
   }
 }
@@ -336,10 +394,21 @@ To add a new intent category:
 {
   "intents": {
     "my_intent": {
-      "keywords": ["keyword1", "keyword2"],
-      "phrases": ["phrase one:4", "phrase two:3"],
-      "patterns": ["pattern\\s+here"],
-      "weights": {"keyword1": 5, "keyword2": 2}
+      "keywords": [
+        "keyword1",
+        "keyword2"
+      ],
+      "phrases": [
+        "phrase one:4",
+        "phrase two:3"
+      ],
+      "patterns": [
+        "pattern\\s+here"
+      ],
+      "weights": {
+        "keyword1": 5,
+        "keyword2": 2
+      }
     }
   },
   "settings": {
@@ -367,7 +436,7 @@ pytest tests/test_simple_semantic_routing.py -v
 ## 2. Bi-Encoder Semantic Routing (Embedding-based)
 
 The **Bi-Encoder routing plugin** (`semantic_biencoder_routing`) uses a neural embedding model
-(**radlab/semantic-euro-bert-encoder-v1**) to compute semantic embeddings for a set of pre-configured routing targets.
+(**google/embeddinggemma-300m**) to compute semantic embeddings for a set of pre-configured routing targets.
 Each target has a `name`, a `model_name` (the model to route to), a `description`, and a list of `examples`.
 At query time the user message is embedded and matched against all stored target embeddings using FAISS
 (`IndexFlatIP` on L2-normalised vectors = cosine similarity). The best-matching target determines the selected model.
@@ -377,7 +446,7 @@ At query time the user message is embedded and matched against all stored target
 - For each target, its `description` and `examples` are combined into text.
 - The text is split into overlapping **token chunks** using a sliding window (`chunk_size` tokens, `chunk_overlap`
   tokens overlap).
-- Each chunk is embedded via the BiEncoder model (e.g. `radlab/semantic-euro-bert-encoder-v1`).
+- Each chunk is embedded via the BiEncoder model (e.g. `google/embeddinggemma-300m`).
 - All embedding vectors are **L2-normalised** to unit length.
 - Vectors are inserted into a `faiss.IndexFlatIP` index (inner product).
 - A docstore maps each FAISS doc ID to its target name (for reverse lookup).
@@ -398,31 +467,39 @@ If the embedding model changes (different output dimension) the index is automat
 
 ### 2.4 Configuration
 
-Configuration is loaded from [`llm_router_plugins/resources/routing/semantic_biencoder.json`](../resources/routing/semantic_biencoder.json).
+Configuration is loaded from [
+`llm_router_plugins/resources/routing/semantic_biencoder.json`](../resources/routing/semantic_biencoder.json).
 
 Example JSON configuration:
 
 ```json
 {
-  "embedding_model": "radlab/semantic-euro-bert-encoder-v1",
+  "embedding_model": "google/embeddinggemma-300m",
   "settings": {
     "chunk_size": 256,
     "chunk_overlap": 64,
     "similarity_threshold": 0.0,
-    "top_k": 1
+    "top_k": 1,
+    "vector_store_path": ""
   },
   "routing_targets": [
     {
       "name": "code-generation",
       "model_name": "qwen3.6:35b",
       "description": "Model specialized for code-related tasks.",
-      "examples": ["Write a Python function...", "..."]
+      "examples": [
+        "Write a Python function...",
+        "..."
+      ]
     },
     {
       "name": "math-reasoning",
       "model_name": "gpt-oss:120b",
       "description": "Model for mathematical reasoning and calculations.",
-      "examples": ["Calculate the derivative of...", "..."]
+      "examples": [
+        "Calculate the derivative of...",
+        "..."
+      ]
     }
   ]
 }
@@ -430,20 +507,21 @@ Example JSON configuration:
 
 #### Environment Variables
 
-| Variable                                          | Purpose                               |
-|---------------------------------------------------|---------------------------------------|
-| `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_MODEL`     | Override the embedding model name     |
-| `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_TARGETS`   | Pipe-separated list of target names   |
-| `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_SIZE`| Override chunk size                   |
-| `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_OVERLAP`| Override chunk overlap             |
-| `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_PERSIST_DIR`| Directory for FAISS index persistence|
+| Variable                                              | Purpose                               |
+|-------------------------------------------------------|---------------------------------------|
+| `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_MODEL`         | Override the embedding model name     |
+| `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_TARGETS`       | Pipe-separated list of target names   |
+| `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_SIZE`    | Override chunk size                   |
+| `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_OVERLAP` | Override chunk overlap                |
+| `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_PERSIST_DIR`   | Directory for FAISS index persistence |
 
 ### 2.5 Usage Examples
 
 #### Basic Usage
 
 ```python
-from llm_router_plugins.utils.routing.semantic_biencoder.semantic_biencoder_routing import SemanticBiEncoderRoutingPlugin
+from llm_router_plugins.utils.routing.semantic_biencoder.semantic_biencoder_routing import
+    SemanticBiEncoderRoutingPlugin
 
 plugin = SemanticBiEncoderRoutingPlugin()
 
@@ -467,24 +545,24 @@ target's embedding. When a user query arrives:
 
 **Example targets:**
 
-| Target Name        | Model           | Description                          | Examples                                          |
-|--------------------|-----------------|--------------------------------------|---------------------------------------------------|
-| code-generation    | qwen3.6:35b     | Write and debug code                 | "Write a Python function to sort a list", "Fix my CSS layout" |
-| math-reasoning     | gpt-oss:120b    | Mathematical problems and calculations | "Calculate the integral of x²", "Solve for x in 2x+3=7" |
-| creative-writing   | gpt-oss:120b    | Creative writing and storytelling    | "Write a short story about...", "Create a poem about..." |
-| general-knowledge  | gpt-oss:120b    | General questions and explanations   | "What is the capital of France?", "How does DNA work?" |
+| Target Name       | Model        | Description                            | Examples                                                      |
+|-------------------|--------------|----------------------------------------|---------------------------------------------------------------|
+| code-generation   | qwen3.6:35b  | Write and debug code                   | "Write a Python function to sort a list", "Fix my CSS layout" |
+| math-reasoning    | gpt-oss:120b | Mathematical problems and calculations | "Calculate the integral of x²", "Solve for x in 2x+3=7"       |
+| creative-writing  | gpt-oss:120b | Creative writing and storytelling      | "Write a short story about...", "Create a poem about..."      |
+| general-knowledge | gpt-oss:120b | General questions and explanations     | "What is the capital of France?", "How does DNA work?"        |
 
 ### 2.6 Scoring Details
 
 For each user query, FAISS returns `top_k` closest chunks with similarity scores. These scores are **aggregated per
 target** (mean of all matching chunk scores). The final score table looks like:
 
-| Target             | Mean Cosine Similarity | Selected? |
-|--------------------|------------------------|-----------|
-| code-generation    | 0.85                   | ✅ Yes    |
-| math-reasoning     | 0.42                   |           |
-| creative-writing   | 0.31                   |           |
-| general-knowledge  | 0.28                   |           |
+| Target            | Mean Cosine Similarity | Selected? |
+|-------------------|------------------------|-----------|
+| code-generation   | 0.85                   | ✅ Yes     |
+| math-reasoning    | 0.42                   |           |
+| creative-writing  | 0.31                   |           |
+| general-knowledge | 0.28                   |           |
 
 The target with the **highest mean similarity** wins. If all scores fall below `similarity_threshold` (default 0.0),
 the default model is used.
@@ -499,38 +577,38 @@ pytest tests/test_semantic_biencoder_routing.py -v
 
 ## 3. Comparison: Which Plugin to Use?
 
-| Feature                | Simple Semantic Routing        | Bi-Encoder Semantic Routing       |
-|------------------------|--------------------------------|------------------------------------|
-| **Approach**           | Heuristic (keyword/phrase)     | Neural embeddings (FAISS)          |
-| **Model Required**     | ❌ None                        | ✅ `radlab/semantic-euro-bert-v1` |
-| **Speed**              | Very fast (~0.1ms)             | Slower (~50-200ms, model dependent)|
-| **Accuracy**           | Rule-based, limited context    | Semantic understanding of meaning  |
-| **Config Complexity**  | JSON keywords/phrases/patterns | JSON targets + examples            |
-| **Scalability**        | Linear keyword search          | FAISS index (efficient at scale)   |
-| **Persistence**        | N/A                            | ✅ FAISS index saved to disk       |
-| **Use Case**           | Fast, lightweight routing      | High-quality semantic matching     |
+| Feature               | Simple Semantic Routing        | Bi-Encoder Semantic Routing         |
+|-----------------------|--------------------------------|-------------------------------------|
+| **Approach**          | Heuristic (keyword/phrase)     | Neural embeddings (FAISS)           |
+| **Model Required**    | ❌ None                         | ✅ `google/embeddinggemma-300m`      |
+| **Speed**             | Very fast (~0.1ms)             | Slower (~50-200ms, model dependent) |
+| **Accuracy**          | Rule-based, limited context    | Semantic understanding of meaning   |
+| **Config Complexity** | JSON keywords/phrases/patterns | JSON targets + examples             |
+| **Scalability**       | Linear keyword search          | FAISS index (efficient at scale)    |
+| **Persistence**       | N/A                            | ✅ FAISS index saved to disk         |
+| **Use Case**          | Fast, lightweight routing      | High-quality semantic matching      |
 
 ### Recommendation
 
 - Use **Simple Semantic Routing** when:
-  - You need fast, deterministic routing with no external model dependency.
-  - Your routing categories are well-defined by keywords and phrases.
-  - You want minimal infrastructure.
+    - You need fast, deterministic routing with no external model dependency.
+    - Your routing categories are well-defined by keywords and phrases.
+    - You want minimal infrastructure.
 
 - Use **Bi-Encoder Semantic Routing** when:
-  - You need semantic understanding beyond keywords (e.g., synonyms, paraphrasing).
-  - You have diverse, nuanced use cases that keyword matching can't capture.
-  - You can afford the embedding model latency and dependencies.
+    - You need semantic understanding beyond keywords (e.g., synonyms, paraphrasing).
+    - You have diverse, nuanced use cases that keyword matching can't capture.
+    - You can afford the embedding model latency and dependencies.
 
 ---
 
 ## 4. File Locations
 
-| File                                                        | Purpose                           |
-|-------------------------------------------------------------|-----------------------------------|
-| `llm_router_plugins/utils/routing/simple_semantic/`         | SimpleSemanticRoutingPlugin code  |
-| `llm_router_plugins/utils/routing/semantic_biencoder/`      | SemanticBiEncoderRoutingPlugin code |
-| `llm_router_plugins/resources/routing/simple_semantic.json` | Intent definitions & config       |
-| `llm_router_plugins/resources/routing/semantic_biencoder.json` | Embedding routing config        |
-| `tests/test_simple_semantic_routing.py`                     | Unit tests (Simple)               |
-| `tests/test_semantic_biencoder_routing.py`                  | Unit tests (Bi-Encoder)           |
+| File                                                           | Purpose                             |
+|----------------------------------------------------------------|-------------------------------------|
+| `llm_router_plugins/utils/routing/simple_semantic/`            | SimpleSemanticRoutingPlugin code    |
+| `llm_router_plugins/utils/routing/semantic_biencoder/`         | SemanticBiEncoderRoutingPlugin code |
+| `llm_router_plugins/resources/routing/simple_semantic.json`    | Intent definitions & config         |
+| `llm_router_plugins/resources/routing/semantic_biencoder.json` | Embedding routing config            |
+| `tests/test_simple_semantic_routing.py`                        | Unit tests (Simple)                 |
+| `tests/test_semantic_biencoder_routing.py`                     | Unit tests (Bi-Encoder)             |
