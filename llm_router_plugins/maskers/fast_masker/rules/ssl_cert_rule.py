@@ -14,8 +14,10 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from .base_rule import BaseRule
-from ..utils.validators import is_valid_ssl_serial
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.utils.validators import (
+    is_valid_ssl_serial,
+)
 
 
 class SslCertRule(BaseRule):
@@ -24,15 +26,14 @@ class SslCertRule(BaseRule):
     """
 
     # Match 16-40 hex characters (typical SSL cert serial range).
+    # Added lookbehind to block IBAN country codes followed by digits.
     _REGEX = r"""
+        (?<![A-Z]{2}\d)     # not after "LL\d" (compact IBAN like "DE44...")
         \b
         [0-9A-Fa-f]{16,40}\b
     """
 
     _PLACEHOLDER = "{{SSL_CERT}}"
-
-    # Pre-compile for performance.
-    _COMPILED = re.compile(_REGEX, flags=re.VERBOSE)
 
     def __init__(self) -> None:
         super().__init__(
@@ -74,4 +75,4 @@ class SslCertRule(BaseRule):
             # Invalid serial – keep original text.
             return serial
 
-        return self._COMPILED.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings

@@ -28,10 +28,12 @@ class MaskerPipeline:
 
         Args:
             payload: Initial data passed to the first plugin.
-            *args, **kwargs: Additional arguments forwarded to each plugin's ``apply`` method.
+            *args, **kwargs: Additional arguments forwarded to each
+                plugin's ``apply`` method.
 
         Returns:
-            The result is produced by the last plugin in the sequence and aggregated mappings.
+            The result is produced by the last plugin in the sequence and
+            aggregated mappings.
         """
         result = payload
         all_mappings = {}

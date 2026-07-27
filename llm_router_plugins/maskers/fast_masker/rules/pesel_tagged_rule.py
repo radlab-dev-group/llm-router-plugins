@@ -5,8 +5,8 @@ Rule that masks PESEL identifiers that appear after the literal ``PESEL:``.
 import re
 from typing import Optional, Callable, Tuple, List
 
-from .base_rule import BaseRule
-from ..utils.validators import is_valid_pesel
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_pesel
 
 
 class PeselTaggedRule(BaseRule):
@@ -48,4 +48,4 @@ class PeselTaggedRule(BaseRule):
                 return m.group(0).replace(pesel, replacement)
             return m.group(0)
 
-        return re.sub(self.pattern, _replace, text), mappings
+        return self.pattern.sub(_replace, text), mappings

@@ -15,8 +15,10 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from .base_rule import BaseRule
-from ..utils.validators import is_valid_car_plate
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.utils.validators import (
+    is_valid_car_plate,
+)
 
 
 class CarPlateRule(BaseRule):
@@ -25,14 +27,22 @@ class CarPlateRule(BaseRule):
     ``{{CAR_PLATE}}`` after a permissive validation.
     """
 
-    # Regex that matches typical Polish plates:
-    #   - 2‑3 letters
-    #   - optional space
-    #   - 2‑5 digits
-    #   - optional trailing 0‑2 letters
+    # Regex that matches typical Polish plates (loose pattern; strict validation
+    # is delegated to :func:`is_valid_car_plate` in validators.py).
     _REGEX = r"""
+        (?<![A-Z]{2})       # not preceded by two uppercase letters
+                             # (blocks IBAN CC like "PL" in compact)
+        (?<![A-Z]{2}-)      # not after "LL-" (dashed IBAN like "PL-17...")
         \b
-        [A-Z]{2,3}\s?\d{2,5}[A-Z]{0,2}\b
+        [A-Z]{2,3}          # leading letters
+        (?:                 # followed by plate content:
+                             # digits and optional trailing letters
+            \s?             # optional space between letters and
+                            # digits ("PKN 5670K")
+            # standard car plate: digits + optional trailing letters
+            \d{2,5}[A-Z]{0,2}
+            \b
+        )
     """
 
     _PLACEHOLDER = "{{CAR_PLATE}}"
@@ -42,10 +52,6 @@ class CarPlateRule(BaseRule):
             regex=self._REGEX,
             placeholder=self._PLACEHOLDER,
             flags=re.IGNORECASE | re.VERBOSE,
-        )
-        # Pre‑compile for performance.
-        self._compiled_regex = re.compile(
-            self._REGEX, flags=re.IGNORECASE | re.VERBOSE
         )
 
     def apply(

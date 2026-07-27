@@ -13,8 +13,10 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from .base_rule import BaseRule
-from ..utils.validators import is_valid_sim_iccid
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.utils.validators import (
+    is_valid_sim_iccid,
+)
 
 
 class SimCardRule(BaseRule):
@@ -22,17 +24,16 @@ class SimCardRule(BaseRule):
     Detects 19-digit ICCID numbers and masks them.
     """
 
-    # Matches 19 digits, optionally spaced every 4 chars:
-    # e.g. 1234 5678 9012 3456 789
+    # Matches 19 or 20 digit ICCID numbers, optionally spaced every 4 chars.
+    # Per ITU-T E.118 ICCID can be 19–20 digits.  Common groupings:
+    #   1234 5678 9012 3456 789  (4+4+4+4+3 = 19)
+    #   1234 5678 9012 3456 7890 (4+4+4+4+4 = 20)
     _REGEX = r"""
         \b
-        (?:\d{4}\s?){4}\d{3}\b
+        (?:\d{4}\s?){4}\d{1,4}\b
     """
 
     _PLACEHOLDER = "{{SIM_CARD}}"
-
-    # Pre-compile for performance.
-    _COMPILED = re.compile(_REGEX, flags=re.VERBOSE)
 
     def __init__(self) -> None:
         super().__init__(
@@ -62,4 +63,4 @@ class SimCardRule(BaseRule):
                 return self.placeholder
             return iccid
 
-        return self._COMPILED.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings

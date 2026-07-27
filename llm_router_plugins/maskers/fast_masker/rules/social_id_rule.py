@@ -4,18 +4,22 @@ Rule that masks generic social‑media identifiers.
 
 import re
 
-from .base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
 
 
 class SocialIdRule(BaseRule):
     """
-    Detects IDs that look like typical social‑media handles:
-      • ``@username`` (Twitter, Instagram)
-      • ``fbid1234567890`` (Facebook numeric ID)
-    Masks them with ``{{SOCIAL_ID}}``.
+    Detects Facebook numeric IDs (e.g. ``fbid1234567890``) and masks them with
+    ``{{SOCIAL_ID}}``.
+
+    .. note::
+       ``@username`` handles are not matched because the ``@`` symbol would
+       collide with :class:`EmailRule`.  If @username support is needed in the
+       future, introduce it in a separate rule placed *before* EmailRule in the
+       pipeline so emails do not intercept the pattern first.
     """
 
-    # Match only fbid to avoid collision with email @ symbol
+    # Match Facebook numeric IDs only – avoids collision with email @ symbol.
     _SOCIAL_REGEX = r"""
         \b
         fbid\d{8,}\b

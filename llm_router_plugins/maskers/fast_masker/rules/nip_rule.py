@@ -5,29 +5,8 @@ Rule that masks valid Polish NIP numbers.
 import re
 from typing import Optional, Callable, Match, Tuple, List
 
-from .base_rule import BaseRule
-
-
-def _is_valid_nip(raw_nip: str) -> bool:
-    """
-    Validate a Polish NIP (Tax Identification Number).
-
-    The NIP consists of 10 digits.  The checksum is calculated with the
-    weights ``[6, 5, 7, 2, 3, 4, 5, 6, 7]``; the sum of the weighted digits
-    modulo 11 must equal the last digit.
-
-    ``raw_nip`` may contain hyphens (e.g. ``123-456-78-90``) – they are stripped
-    before validation.
-    """
-    # Remove hyphens and spaces
-    digits = re.sub(r"[-\s]", "", raw_nip)
-
-    if not re.fullmatch(r"\d{10}", digits):
-        return False
-
-    weights = (6, 5, 7, 2, 3, 4, 5, 6, 7)
-    checksum = sum(w * int(d) for w, d in zip(weights, digits[:9])) % 11
-    return checksum == int(digits[9])
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_nip
 
 
 class NipRule(BaseRule):
@@ -65,10 +44,6 @@ class NipRule(BaseRule):
             placeholder=self._PLACEHOLDER,
             flags=re.IGNORECASE | re.VERBOSE,
         )
-        # Pre‑compile for performance
-        self._compiled_regex = re.compile(
-            self._NIP_REGEX, flags=re.IGNORECASE | re.VERBOSE
-        )
 
     def apply(
         self, text: str, anonymizer_fn: Optional[Callable[[str, str], str]] = None
@@ -81,17 +56,17 @@ class NipRule(BaseRule):
 
         def _replacer(match: Match) -> str:
             raw_nip = match.group("digits")
-            if _is_valid_nip(raw_nip):
+            if is_valid_nip(raw_nip):
                 if anonymizer_fn:
                     pseudo = anonymizer_fn(raw_nip, self.tag_type)
                     mappings.append({"original": raw_nip, "replacement": pseudo})
                     replacement = "{" + pseudo + "}"
                 else:
                     mappings.append(
-                        {"original": raw_nip, "replacement": self._PLACEHOLDER}
+                        {"original": raw_nip, "replacement": self.placeholder}
                     )
-                    replacement = self._PLACEHOLDER
+                    replacement = self.placeholder
                 return match.group(0).replace(raw_nip, replacement)
             return match.group(0)
 
-        return self._compiled_regex.sub(_replacer, text), mappings
+        return self.pattern.sub(_replacer, text), mappings
