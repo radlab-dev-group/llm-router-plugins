@@ -1,3 +1,7 @@
 langchain
 faiss-gpu
 faiss-cpu
+sentence-transformers
+numpy
+scipy
+Pillow
