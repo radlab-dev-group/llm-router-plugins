@@ -6,7 +6,7 @@
     "chunk_overlap": 64,
     "similarity_threshold": 0.0,
     "top_k": 1,
-    "vector_store_path": null
+    "vector_store_path": ""
   },
   "routing_targets": [
     {
