@@ -117,10 +117,10 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
             persist_dir=persist_dir,
         )
 
-        # Environment overrides
         self._override_from_env()
         self._validate_args()
         self._router.initialize()
+        self._validate_args_faiss()
 
     def _validate_args(self) -> None:
         """
@@ -156,6 +156,7 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
                 f"SemanticBiEncoderRouting: chunk_overlap must be >= 0, got {self._config.chunk_overlap}"
             )
 
+    def _validate_args_faiss(self):
         has_vectors = getattr(self._router, "has_vectors", False)
         if not has_vectors:
             raise ValueError(

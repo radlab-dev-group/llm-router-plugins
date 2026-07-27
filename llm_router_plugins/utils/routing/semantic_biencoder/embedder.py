@@ -27,6 +27,7 @@ from llm_router_plugins.utils.routing.semantic_biencoder.config import (
     SemanticBiEncoderConfig,
 )
 
+
 @functools.lru_cache(maxsize=1)
 def _import_faiss() -> Any:
     """
@@ -364,7 +365,9 @@ class EmbeddingRouter:
                     return False
             except AttributeError:
                 if self._logger:
-                    self._logger.warning("Corrupted FAISS index (no .d) — rebuilding")
+                    self._logger.warning(
+                        "Corrupted FAISS index (no .d) — rebuilding"
+                    )
                 return False
 
         self._faiss_index = faiss_index
@@ -506,4 +509,3 @@ class EmbeddingRouter:
                 break
             start += stride
         return chunks
-

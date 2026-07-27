@@ -226,7 +226,12 @@ class SemanticBiEncoderConfig:
                 )
 
         settings = raw["settings"]
-        for setting_key in ("chunk_size", "chunk_overlap", "similarity_threshold", "top_k"):
+        for setting_key in (
+            "chunk_size",
+            "chunk_overlap",
+            "similarity_threshold",
+            "top_k",
+        ):
             if setting_key not in settings:
                 raise KeyError(
                     f"Missing required field '{setting_key}' in settings. "
