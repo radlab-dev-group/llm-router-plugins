@@ -93,7 +93,6 @@ def test_config_default_path():
 # --------------- embedder tests
 
 
-
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Compute cosine similarity between vector *a* (dim,) and matrix *b* (n, dim)."""
     a_norm = np.linalg.norm(a)
