@@ -12,6 +12,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+import numpy as np
 import pytest
 
 from llm_router_plugins.utils.routing.semantic_biencoder.config import (
@@ -92,6 +93,17 @@ def test_config_default_path():
 # --------------- embedder tests
 
 
+
+def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Compute cosine similarity between vector *a* (dim,) and matrix *b* (n, dim)."""
+    a_norm = np.linalg.norm(a)
+    if a_norm == 0:
+        return np.zeros(b.shape[0])
+    b_norm = np.linalg.norm(b, axis=1)
+    b_norm[b_norm == 0] = 1e-10
+    return np.dot(b, a) / (b_norm * a_norm)
+
+
 class TestEmbedder:
     """Tests for the EmbeddingRouter (without actually loading the model)."""
 
@@ -130,7 +142,7 @@ class TestEmbedder:
         b = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
         import numpy as np
 
-        sims = EmbeddingRouter._cosine_similarity(np.array(a), np.array(b))
+        sims = _cosine_similarity(np.array(a), np.array(b))
         assert sims[0] == pytest.approx(1.0, abs=1e-6)
         assert sims[1] == pytest.approx(0.0, abs=1e-6)
 
@@ -140,7 +152,7 @@ class TestEmbedder:
         b = [[1.0, 0.0, 0.0]]
         import numpy as np
 
-        sims = EmbeddingRouter._cosine_similarity(np.array(a), np.array(b))
+        sims = _cosine_similarity(np.array(a), np.array(b))
         assert all(s == 0 for s in sims)
 
     @staticmethod
@@ -149,7 +161,7 @@ class TestEmbedder:
         b = [[-1.0, 0.0]]
         import numpy as np
 
-        sims = EmbeddingRouter._cosine_similarity(np.array(a), np.array(b))
+        sims = _cosine_similarity(np.array(a), np.array(b))
         assert sims[0] == pytest.approx(-1.0, abs=1e-6)
 
 
