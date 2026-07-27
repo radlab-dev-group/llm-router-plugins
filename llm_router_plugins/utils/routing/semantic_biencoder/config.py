@@ -28,14 +28,16 @@ import os
 import pathlib
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from llm_router_plugins.utils.routing.constants import (
     SEMANTIC_BIENCODER_ROUTING_PREFIX,
 )
 
 
-# The env var that can hold the entire config as a raw JSON string.
+"""
+The env var that can hold the entire config as a raw JSON string.
+"""
 _CONFIG_JSON_ENV = f"{SEMANTIC_BIENCODER_ROUTING_PREFIX}CONFIG"
 
 
@@ -60,8 +62,8 @@ class SemanticBiEncoderConfig:
         Minimum cosine similarity score for a target to be considered valid.
     top_k : int
         Number of nearest neighbors to retrieve during routing queries.
-    routing_targets : list
-        List of :class:`RoutingTarget` dataclasses describing each target.
+    routing_targets : tuple
+        Immutable sequence of :class:`RoutingTarget` dataclasses describing each target.
     vector_store_path : str or None
         Directory path for persisting the FAISS index and doc_store.
         If ``None``, the index is kept in memory only.
@@ -72,7 +74,7 @@ class SemanticBiEncoderConfig:
     chunk_overlap: int
     similarity_threshold: float
     top_k: int
-    routing_targets: List["RoutingTarget"]
+    routing_targets: tuple["RoutingTarget", ...]
     vector_store_path: Optional[str]
 
     @property
@@ -158,7 +160,6 @@ class SemanticBiEncoderConfig:
                 with open(stripped, "r", encoding="utf-8") as fh:
                     raw = json.load(fh)
                 return cls._from_raw(raw)
-            # env var is set but empty — fall through to path / default
 
         if path is None:
             raise ValueError(
@@ -217,24 +218,56 @@ class SemanticBiEncoderConfig:
     @staticmethod
     def _from_raw(raw: Dict[str, Any]) -> "SemanticBiEncoderConfig":
         """Internal helper shared by ``from_file`` and ``from_json``."""
-        settings = raw["settings"]
-        targets: List["RoutingTarget"] = []
-        for t in raw["routing_targets"]:
-            targets.append(
-                RoutingTarget(
-                    name=t["name"],
-                    model_name=t["model_name"],
-                    description=t["description"],
-                    examples=t.get("examples", []),
+        for required_key in ("embedding_model", "settings", "routing_targets"):
+            if required_key not in raw:
+                raise KeyError(
+                    f"Missing required top-level key '{required_key}' in config. "
+                    f"Available keys: {list(raw.keys())}"
                 )
+
+        settings = raw["settings"]
+        for setting_key in ("chunk_size", "chunk_overlap", "similarity_threshold", "top_k"):
+            if setting_key not in settings:
+                raise KeyError(
+                    f"Missing required field '{setting_key}' in settings. "
+                    f"Available fields: {list(settings.keys())}"
+                )
+
+        for idx, target in enumerate(raw["routing_targets"]):
+            for key in ("name", "model_name", "description"):
+                if key not in target:
+                    raise KeyError(
+                        f"Missing required field '{key}' in routing_targets[{idx}]. "
+                        f"Available fields: {list(target.keys())}"
+                    )
+
+        targets = tuple(
+            RoutingTarget(
+                name=t["name"],
+                model_name=t["model_name"],
+                description=t["description"],
+                examples=tuple(t.get("examples", [])),
             )
+            for t in raw["routing_targets"]
+        )
+
+        chunk_size = settings["chunk_size"]
+        chunk_overlap = settings["chunk_overlap"]
+        top_k = settings["top_k"]
+
+        if chunk_size <= 0:
+            raise ValueError(f"Expected 'chunk_size' > 0, got {chunk_size}.")
+        if chunk_overlap < 0:
+            raise ValueError(f"Expected 'chunk_overlap' >= 0, got {chunk_overlap}.")
+        if top_k < 1:
+            raise ValueError(f"Expected 'top_k' >= 1, got {top_k}.")
 
         return SemanticBiEncoderConfig(
             embedding_model=raw["embedding_model"],
-            chunk_size=settings["chunk_size"],
-            chunk_overlap=settings["chunk_overlap"],
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
             similarity_threshold=settings["similarity_threshold"],
-            top_k=settings["top_k"],
+            top_k=top_k,
             routing_targets=targets,
             vector_store_path=raw.get("vector_store_path")
             or settings.get("vector_store_path"),
@@ -258,7 +291,7 @@ class RoutingTarget:
         The model name to select when this target is the best match.
     description : str
         Human-readable description used for embedding.
-    examples : List[str]
+    examples : Tuple[str, ...]
         Example user queries used for embedding.  These should be representative
         of the queries that should route to this target.
     """
@@ -266,4 +299,4 @@ class RoutingTarget:
     name: str
     model_name: str
     description: str
-    examples: List[str]
+    examples: Tuple[str, ...]

@@ -12,6 +12,7 @@ When *persist_dir* is provided the FAISS index and docstore are saved to disk
 re-loaded on the next initialization.
 """
 
+import functools
 import os
 import pickle
 import logging
@@ -26,28 +27,19 @@ from llm_router_plugins.utils.routing.semantic_biencoder.config import (
     SemanticBiEncoderConfig,
 )
 
-_faiss: Any = None
-
-
+@functools.lru_cache(maxsize=1)
 def _import_faiss() -> Any:
     """
-    Lazy import of faiss to allow module loading without it installed.
+    Lazy-import FAISS on first call, then cache the result.
 
     Returns
     -------
     Any
         The faiss module object.
-
-    Raises
-    ------
-    None
     """
-    global _faiss
-    if _faiss is None:
-        import faiss as _faiss_module
+    import faiss  # type: ignore[import-untyped]
 
-        _faiss = _faiss_module
-    return _faiss
+    return faiss
 
 
 @dataclass
@@ -67,6 +59,9 @@ class _TargetEmbeddings:
     model_name: str
     embeddings: np.ndarray  # shape: (n_chunks, embed_dim)
     labels: List[str]  # name of each chunk (for debugging)
+
+
+FAISS = _import_faiss()
 
 
 class EmbeddingRouter:
@@ -102,7 +97,6 @@ class EmbeddingRouter:
             Logger instance.
         persist_dir : str, optional
             Directory where the FAISS index and docstore are saved.
-\
 
         Raises
         ------
@@ -193,8 +187,7 @@ class EmbeddingRouter:
         user_embedding = self._model.encode(
             [user_message], show_progress_bar=False, convert_to_numpy=True
         )
-        if isinstance(user_embedding, list):
-            user_embedding = np.array(user_embedding)
+        user_embedding = self._to_numpy(user_embedding)
         user_embedding = user_embedding.squeeze()  # (embed_dim,)
 
         # L2-normalise the query
@@ -274,6 +267,7 @@ class EmbeddingRouter:
         RuntimeError
             If FAISS fails to create the index.
         """
+        tokenizer = getattr(self._model, "tokenizer", None)  # type: ignore[union-attr]
         chunk_size = self._config.chunk_size
         overlap = self._config.chunk_overlap
         total_chunks = 0
@@ -284,7 +278,9 @@ class EmbeddingRouter:
 
             chunks: List[str] = []
             for text in texts:
-                chunks.extend(self._split_into_chunks(text, chunk_size, overlap))
+                chunks.extend(
+                    self._split_into_chunks(text, chunk_size, overlap, tokenizer)
+                )
 
             if not chunks:
                 continue
@@ -294,8 +290,7 @@ class EmbeddingRouter:
                 show_progress_bar=False,
                 convert_to_numpy=True,
             )
-            if isinstance(embeddings, list):
-                embeddings = np.array(embeddings)
+            embeddings = self._to_numpy(embeddings)
 
             # L2-normalise so inner-product = cosine similarity
             norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
@@ -305,12 +300,13 @@ class EmbeddingRouter:
             # Create the FAISS index on first batch (needs the dimension)
             if self._faiss_index is None:
                 dim = normalized.shape[1]
-                self._faiss_index = _import_faiss().IndexFlatIP(dim)
+                self._faiss_index = FAISS.IndexFlatIP(dim)
 
-            # Add each chunk individually with a monotonically increasing doc ID
+            # Batch-add all chunks for this target in one call
+            n_before = len(self._doc_store)
+            self._faiss_index.add(normalized)
             for i in range(len(normalized)):
-                self._faiss_index.add(normalized[i : i + 1])
-                self._doc_store[self._id_counter] = target.name
+                self._doc_store[n_before + i] = target.name
                 self._id_counter += 1
                 total_chunks += 1
 
@@ -346,8 +342,8 @@ class EmbeddingRouter:
         ):
             return False
 
-        _faiss = _import_faiss()
-        faiss_index = _faiss.read_index(index_path)
+        faiss = _import_faiss()
+        faiss_index = faiss.read_index(index_path)
         with open(docstore_path, "rb") as fh:
             docstore = pickle.load(fh)
 
@@ -356,16 +352,19 @@ class EmbeddingRouter:
             dummy = self._model.encode(
                 ["."], show_progress_bar=False, convert_to_numpy=True
             )
-            if isinstance(dummy, list):
-                dummy = np.array(dummy)
-            dim = len(dummy)
-            if faiss_index.d != dim:
+            dim = len(self._to_numpy(dummy))
+            try:
+                if faiss_index.d != dim:
+                    if self._logger:
+                        self._logger.warning(
+                            "Dimension mismatch (%d vs %d) — rebuilding index",
+                            faiss_index.d,
+                            dim,
+                        )
+                    return False
+            except AttributeError:
                 if self._logger:
-                    self._logger.warning(
-                        "Dimension mismatch (%d vs %d) — rebuilding index",
-                        faiss_index.d,
-                        dim,
-                    )
+                    self._logger.warning("Corrupted FAISS index (no .d) — rebuilding")
                 return False
 
         self._faiss_index = faiss_index
@@ -389,8 +388,7 @@ class EmbeddingRouter:
         if not self._persist_dir or self._faiss_index is None:
             return
         os.makedirs(self._persist_dir, exist_ok=True)
-        faiss_module = _import_faiss()
-        faiss_module.write_index(
+        FAISS.write_index(
             self._faiss_index, os.path.join(self._persist_dir, "index.faiss")
         )
         with open(os.path.join(self._persist_dir, "docstore.pkl"), "wb") as fh:
@@ -430,7 +428,14 @@ class EmbeddingRouter:
             self.initialize()
 
     @staticmethod
-    def _split_into_chunks(text: str, chunk_size: int, overlap: int) -> List[str]:
+    def _to_numpy(embedding: Any) -> np.ndarray:
+        """Convert an embedding (possibly a Python ``list``) to a NumPy array."""
+        return np.asarray(embedding) if isinstance(embedding, list) else embedding
+
+    @staticmethod
+    def _split_into_chunks(
+        text: str, chunk_size: int, overlap: int, tokenizer: Optional[Any] = None
+    ) -> List[str]:
         """
         Split *text* into overlapping chunks of *chunk_size* tokens.
 
@@ -439,9 +444,15 @@ class EmbeddingRouter:
         text : str
             The input text to split.
         chunk_size : int
-            Maximum number of tokens per chunk.
+            Maximum number of **tokens** per chunk (not words).
         overlap : int
             Number of overlapping tokens between consecutive chunks.
+        tokenizer : SentenceTransformerTokenizer, optional
+            When provided, *chunk_size* is measured in real model tokens
+            (via ``tokenizer.encode`` / ``decode``).  Without a tokenizer the
+            method falls back to simple word splitting (``text.split()``), so
+            *chunk_size* becomes an approximation based on whitespace-delimited
+            words.
 
         Returns
         -------
@@ -453,13 +464,41 @@ class EmbeddingRouter:
         ValueError
             If *chunk_size* <= 0 or *overlap* >= *chunk_size*.
         """
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be > 0, got {chunk_size}")
+        if overlap >= chunk_size:
+            raise ValueError(
+                f"chunk_overlap ({overlap}) must be < chunk_size ({chunk_size})"
+            )
+
+        # Tokenizer-based path (produces correct token counts)
+        if tokenizer is not None:
+            ids = tokenizer.encode(text, return_tensors="pt")[0].tolist()
+            n_tokens = len(ids)
+            if n_tokens <= chunk_size:
+                return [text]
+
+            stride = max(chunk_size - overlap, 1)
+            chunks: List[str] = []
+            start = 0
+            while start < n_tokens:
+                end = min(start + chunk_size, n_tokens)
+                chunks.append(
+                    tokenizer.decode(ids[start:end], skip_special_tokens=True)
+                )
+                if end >= n_tokens:
+                    break
+                start += stride
+            return chunks
+
+        # Word-splitting fallback (chunk_size ≈ word count)
         tokens = text.split()
         if len(tokens) <= chunk_size:
             return [text]
 
+        stride = max(chunk_size - overlap, 1)
         chunks: List[str] = []
         start = 0
-        stride = chunk_size - overlap
         while start < len(tokens):
             end = min(start + chunk_size, len(tokens))
             chunks.append(" ".join(tokens[start:end]))
@@ -468,32 +507,3 @@ class EmbeddingRouter:
             start += stride
         return chunks
 
-    @staticmethod
-    def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        """
-        Compute cosine similarity between vector *a* (dim,) and matrix *b*
-        (n, dim). Returns array of shape (n,).
-
-        Parameters
-        ----------
-        a : np.ndarray
-            Query vector of shape (embed_dim,).
-        b : np.ndarray
-            Reference matrix of shape (n, embed_dim).
-
-        Returns
-        -------
-        np.ndarray
-            Array of cosine similarities of shape (n,).
-
-        Raises
-        ------
-        ValueError
-            If the dimensions of *a* and *b* do not match.
-        """
-        a_norm = np.linalg.norm(a)
-        if a_norm == 0:
-            return np.zeros(b.shape[0])
-        b_norm = np.linalg.norm(b, axis=1)
-        b_norm[b_norm == 0] = 1e-10
-        return np.dot(b, a) / (b_norm * a_norm)

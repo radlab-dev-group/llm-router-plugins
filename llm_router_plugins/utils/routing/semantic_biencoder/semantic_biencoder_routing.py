@@ -7,7 +7,7 @@ For each incoming user message the plugin finds the best-matching target via
 cosine similarity and selects the associated model.
 
 Configuration is loaded from
-``llm_router_plugins/resources/routing/semantic/semantic_biencoder.json``
+``llm_router_plugins/resources/routing/semantic_biencoder.json``
 and can be overridden by environment variables:
 
     LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_MODEL
@@ -45,6 +45,7 @@ Example JSON configuration::
 import os
 import logging
 
+from dataclasses import replace
 from typing import Any, Dict, Optional
 
 from llm_router_plugins.plugin_interface import PluginInterface
@@ -270,7 +271,9 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
 
     def _override_from_env(self) -> None:
         """
-        Apply environment variable overrides to config.
+        Apply environment variable overrides to config, creating a **new**
+        ``SemanticBiEncoderConfig`` so the immutable-snapshot contract is
+        preserved.
 
         Supported environment variables (prefix
         ``LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_``):
@@ -294,25 +297,27 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
         ------
         None
         """
+        original = self._config
+        overrides: Dict[str, Any] = {}
+
         model_env = os.getenv(f"{SEMANTIC_BIENCODER_ROUTING_PREFIX}MODEL")
         if model_env:
-            self._config.embedding_model = model_env
+            overrides["embedding_model"] = model_env
             if self._logger:
                 self._logger.info("Overriding embedding model: %s", model_env)
 
         targets_env = os.getenv(f"{SEMANTIC_BIENCODER_ROUTING_PREFIX}TARGETS")
         if targets_env:
-            allowed = set(self._config.target_names)
+            allowed = set(original.target_names)
             selected = [
                 t.strip()
                 for t in targets_env.split("|")
                 if t.strip() and t.strip() in allowed
             ]
-            if selected and selected != list(self._config.target_names):
-                filtered = [
-                    t for t in self._config.routing_targets if t.name in selected
-                ]
-                self._config.routing_targets = filtered
+            if selected and selected != list(original.target_names):
+                overrides["routing_targets"] = tuple(
+                    t for t in original.routing_targets if t.name in selected
+                )
                 if self._logger:
                     self._logger.info(
                         "Overriding routing targets: %s",
@@ -322,7 +327,7 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
         chunk_size_env = os.getenv(f"{SEMANTIC_BIENCODER_ROUTING_PREFIX}CHUNK_SIZE")
         if chunk_size_env:
             try:
-                self._config.chunk_size = int(chunk_size_env)
+                overrides["chunk_size"] = int(chunk_size_env)
             except ValueError:
                 pass
 
@@ -331,6 +336,9 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
         )
         if chunk_overlap_env:
             try:
-                self._config.chunk_overlap = int(chunk_overlap_env)
+                overrides["chunk_overlap"] = int(chunk_overlap_env)
             except ValueError:
                 pass
+
+        if overrides:
+            self._config = replace(original, **overrides)
