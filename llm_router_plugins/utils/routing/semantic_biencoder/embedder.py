@@ -20,8 +20,10 @@ import logging
 import numpy as np
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-from sentence_transformers import SentenceTransformer
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 from llm_router_plugins.utils.routing.semantic_biencoder.config import (
     SemanticBiEncoderConfig,
@@ -60,9 +62,6 @@ class _TargetEmbeddings:
     model_name: str
     embeddings: np.ndarray  # shape: (n_chunks, embed_dim)
     labels: List[str]  # name of each chunk (for debugging)
-
-
-FAISS = _import_faiss()
 
 
 class EmbeddingRouter:
@@ -107,7 +106,7 @@ class EmbeddingRouter:
         self._config = config
         self._logger = logger
         self._persist_dir: Optional[str] = persist_dir
-        self._model: Optional[SentenceTransformer] = None
+        self._model: Optional["SentenceTransformer"] = None
         self._faiss_index: Any = None
 
         # doc_id -> target_name
@@ -244,6 +243,8 @@ class EmbeddingRouter:
         RuntimeError
             If the model cannot be loaded.
         """
+        from sentence_transformers import SentenceTransformer
+
         model_name = self._config.embedding_model
         if self._logger:
             self._logger.info("Loading embedding model: %s", model_name)
@@ -301,7 +302,7 @@ class EmbeddingRouter:
             # Create the FAISS index on first batch (needs the dimension)
             if self._faiss_index is None:
                 dim = normalized.shape[1]
-                self._faiss_index = FAISS.IndexFlatIP(dim)
+                self._faiss_index = _import_faiss().IndexFlatIP(dim)
 
             # Batch-add all chunks for this target in one call
             n_before = len(self._doc_store)
@@ -391,7 +392,7 @@ class EmbeddingRouter:
         if not self._persist_dir or self._faiss_index is None:
             return
         os.makedirs(self._persist_dir, exist_ok=True)
-        FAISS.write_index(
+        _import_faiss().write_index(
             self._faiss_index, os.path.join(self._persist_dir, "index.faiss")
         )
         with open(os.path.join(self._persist_dir, "docstore.pkl"), "wb") as fh:
