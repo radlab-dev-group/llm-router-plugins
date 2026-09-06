@@ -13,6 +13,7 @@ setup(
     long_description=LONG_DESCRIPTION,
     long_description_content_type="text/markdown",
     author="RadLab.dev Team",
+    author_email="hello@radlab.dev",
     url="https://github.com/radlab-dev-group/llm-router-plugins",
     license="Apache-2.0",
     packages=find_packages(exclude=("tests", "docs")),
