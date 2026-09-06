@@ -1,1 +1,4 @@
 recursive-include llm_router_plugins/resources *.json
+
+include .version
+include requirements.txt

@@ -20,8 +20,7 @@ setup(
     include_package_data=True,
     python_requires=">=3.8",
     install_requires=[
-        "pii-classification @ "
-        "git+https://github.com/radlab-dev-group/anonymizer-model"
+        "radlab-pii-classification>=0.1.0"
     ],
     entry_points={
         "console_scripts": [
