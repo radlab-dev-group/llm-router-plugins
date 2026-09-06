@@ -7,7 +7,7 @@ LONG_DESCRIPTION = (HERE / "README.md").read_text(encoding="utf-8")
 VERSION = (HERE / ".version").read_text(encoding="utf-8")
 
 setup(
-    name="llm-router-plugins",
+    name="radlab-llm-router-plugins",
     version=VERSION,
     description="Plugins for the LLM Router (guardrails, maskers, etc.)",
     long_description=LONG_DESCRIPTION,
