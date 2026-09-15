@@ -1,15 +1,17 @@
 """
 SemanticBiEncoderRoutingPlugin — embedding-based model routing.
 
-Uses the **radlab/semantic-euro-bert-encoder-v1** BiEncoder from HuggingFace
-to compute semantic embeddings for a set of pre-configured routing targets.
-For each incoming user message the plugin finds the best-matching target via
-cosine similarity and selects the associated model.
+Uses a BiEncoder embedding model (e.g. ``google/embeddinggemma-300m``) from
+HuggingFace to compute semantic embeddings for a set of pre-configured routing
+targets.  For each incoming user message the plugin finds the best-matching
+target via cosine similarity and selects the associated model.
 
 Configuration is loaded from
 ``llm_router_plugins/resources/routing/semantic_biencoder.json``
 and can be overridden by environment variables:
 
+    LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CONFIG
+        - full configuration as a raw JSON string or a path to a config file
     LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_MODEL
         - override the embedding model name
     LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_TARGETS
@@ -24,7 +26,7 @@ and can be overridden by environment variables:
 Example JSON configuration::
 
     {
-      "embedding_model": "radlab/semantic-euro-bert-encoder-v1",
+      "embedding_model": "google/embeddinggemma-300m",
       "settings": {
         "chunk_size": 256,
         "chunk_overlap": 64,
@@ -49,14 +51,24 @@ from dataclasses import replace
 from typing import Any, Dict, Optional
 
 from llm_router_plugins.plugin_interface import PluginInterface
+from llm_router_plugins.utils.text_extractor import extract_user_text
+from llm_router_plugins.utils.routing.common import (
+    annotate_routing,
+    build_embedding_router,
+    env_int,
+    resolve_persist_dir,
+    should_route,
+)
 from llm_router_plugins.utils.routing.semantic_biencoder.config import (
     SemanticBiEncoderConfig,
 )
-from llm_router_plugins.utils.routing.semantic_biencoder.embedder import (
-    EmbeddingRouter,
-)
 from llm_router_plugins.utils.routing.constants import (
     SEMANTIC_BIENCODER_ROUTING_PREFIX,
+)
+
+_MISSING_DEPENDENCIES_MESSAGE = (
+    "SemanticBiEncoderRouting: the sentence-transformers / FAISS dependencies "
+    "are not installed — install them to enable semantic routing"
 )
 
 
@@ -78,7 +90,8 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
 
     def __init__(self, logger: Optional[logging.Logger] = None) -> None:
         """
-        Initialize the plugin: load config, resolve persist dir, build FAISS index.
+        Initialize the plugin: load config, apply env overrides, build the
+        FAISS index.
 
         Parameters
         ----------
@@ -96,31 +109,31 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
         KeyError
             If the configuration file is missing required fields.
         ValueError
-            If no routing targets are defined in the configuration.
+            If no routing targets are defined in the configuration, the
+            parameters are invalid, the ML dependencies are missing, or the
+            router produced an empty index.
         """
         super().__init__(logger=logger)
 
         self._config = SemanticBiEncoderConfig.from_file()
-        persist_dir = self._config.vector_store_path
-        env_persist = os.getenv(f"{SEMANTIC_BIENCODER_ROUTING_PREFIX}PERSIST_DIR")
-        if env_persist:
-            persist_dir = env_persist
-            if self._logger:
-                self._logger.info(
-                    "Overriding vector store path: %s",
-                    persist_dir,
-                )
-
-        self._router = EmbeddingRouter(
-            config=self._config,
-            logger=self._logger,
-            persist_dir=persist_dir,
-        )
-
         self._override_from_env()
         self._validate_args()
-        self._router.initialize()
-        self._validate_args_faiss()
+
+        persist_dir = resolve_persist_dir(
+            SEMANTIC_BIENCODER_ROUTING_PREFIX,
+            self._config.vector_store_path,
+            logger=self._logger,
+        )
+        self._router = build_embedding_router(
+            embedding_model=self._config.embedding_model,
+            chunk_size=self._config.chunk_size,
+            chunk_overlap=self._config.chunk_overlap,
+            top_k=self._config.top_k,
+            routing_targets=self._config.routing_targets,
+            logger=self._logger,
+            persist_dir=persist_dir,
+            missing_deps_hint=_MISSING_DEPENDENCIES_MESSAGE,
+        )
 
     def _validate_args(self) -> None:
         """
@@ -156,15 +169,6 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
                 f"SemanticBiEncoderRouting: chunk_overlap must be >= 0, got {self._config.chunk_overlap}"
             )
 
-    def _validate_args_faiss(self):
-        has_vectors = getattr(self._router, "has_vectors", False)
-        if not has_vectors:
-            raise ValueError(
-                "SemanticBiEncoderRouting: router loaded but has no vectors — "
-                "check routing_targets have non-empty descriptions/examples and the "
-                "FAISS index was built successfully"
-            )
-
     def apply(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Process *payload*.  If ``payload["model"] == "auto"`` route to the
@@ -172,7 +176,9 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
 
         The last user message is extracted from the payload (via ``messages``,
         ``user_last_statement``, ``query``, or ``prompt``), embedded, and
-        matched against the FAISS index.  The result replaces ``payload["model"]``
+        matched against the FAISS index.  A match is only accepted when its
+        similarity is greater than or equal to the configured
+        ``similarity_threshold``.  The result replaces ``payload["model"]``
         with the selected model name and adds a ``"routing"`` metadata dict.
 
         Parameters
@@ -198,10 +204,10 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
         ------
         None
         """
-        if payload.get("model") != "auto":
+        if not should_route(payload, ("auto",)):
             return payload
 
-        text = self._get_text_from_payload(payload)
+        text = extract_user_text(payload)
         if not text:
             if self._logger:
                 self._logger.warning(
@@ -211,13 +217,28 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
             return payload
 
         result = self._router.route(text)
+        similarity = float(result["similarity"])
 
-        payload["model"] = result["model_name"]
-        payload["routing"] = {
-            "plugin": self.name,
-            "target_name": result["target_name"],
-            "similarity": result["similarity"],
-        }
+        if similarity < self._config.similarity_threshold:
+            if self._logger:
+                self._logger.info(
+                    "SemanticBiEncoderRouting: text='%s' target='%s' "
+                    "similarity=%.4f is below threshold %.4f — "
+                    "leaving model unchanged",
+                    text[:80],
+                    result["target_name"],
+                    similarity,
+                    self._config.similarity_threshold,
+                )
+            return payload
+
+        annotate_routing(
+            payload,
+            self.name,
+            result["model_name"],
+            similarity,
+            target_name=result["target_name"],
+        )
 
         if self._logger:
             self._logger.info(
@@ -225,50 +246,11 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
                 "target='%s' similarity=%.4f -> model=%s",
                 text[:80],
                 result["target_name"],
-                result["similarity"],
+                similarity,
                 result["model_name"],
             )
 
         return payload
-
-    @staticmethod
-    def _get_text_from_payload(payload: Dict[str, Any]) -> str:
-        """
-        Extract the user message text from *payload*.
-
-        The text is extracted using the following priority:
-
-        1. ``payload["messages"][-1]["content"]`` (last message in a chat history)
-        2. ``payload["user_last_statement"]``
-        3. ``payload["query"]``
-        4. ``payload["prompt"]``
-        5. ``payload["input"]``
-
-        Parameters
-        ----------
-        payload : dict
-            The message payload to extract text from.
-
-        Returns
-        -------
-        str
-            The extracted text, or an empty string if no text is found.
-
-        Raises
-        ------
-        None
-        """
-        messages = payload.get("messages")
-        if isinstance(messages, list) and messages:
-            last_msg = messages[-1]
-            content = last_msg.get("content", "")
-            if content:
-                return str(content)
-        for key in ("user_last_statement", "query", "prompt", "input"):
-            val = payload.get(key)
-            if val:
-                return str(val)
-        return ""
 
     def _override_from_env(self) -> None:
         """
@@ -325,21 +307,13 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
                         "|".join(selected),
                     )
 
-        chunk_size_env = os.getenv(f"{SEMANTIC_BIENCODER_ROUTING_PREFIX}CHUNK_SIZE")
-        if chunk_size_env:
-            try:
-                overrides["chunk_size"] = int(chunk_size_env)
-            except ValueError:
-                pass
+        chunk_size = env_int(SEMANTIC_BIENCODER_ROUTING_PREFIX, "CHUNK_SIZE")
+        if chunk_size is not None:
+            overrides["chunk_size"] = chunk_size
 
-        chunk_overlap_env = os.getenv(
-            f"{SEMANTIC_BIENCODER_ROUTING_PREFIX}CHUNK_OVERLAP"
-        )
-        if chunk_overlap_env:
-            try:
-                overrides["chunk_overlap"] = int(chunk_overlap_env)
-            except ValueError:
-                pass
+        chunk_overlap = env_int(SEMANTIC_BIENCODER_ROUTING_PREFIX, "CHUNK_OVERLAP")
+        if chunk_overlap is not None:
+            overrides["chunk_overlap"] = chunk_overlap
 
         if overrides:
             self._config = replace(original, **overrides)

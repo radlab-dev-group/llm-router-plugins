@@ -1,13 +1,14 @@
 """
 Shared helper for extracting user text from routing payloads.
 
-Both ``SemanticBiEncoderRoutingPlugin`` and ``SimpleSemanticRoutingPlugin``
-need to locate the user's message inside an incoming payload dict.  They use
-the same priority list, so this module centralises that logic in one place.
+The routing plugins (``SemanticBiEncoderRoutingPlugin``,
+``AgenticRoutingPlugin`` and ``SimpleSemanticRoutingPlugin``) all need to
+locate the user's message inside an incoming payload dict.  They use the same
+priority list, so this module centralises that logic in one place.
 
 Typical usage::
 
-    from llm_router_plugins.utils.routing.text_extractor import extract_user_text
+    from llm_router_plugins.utils.text_extractor import extract_user_text
 
     user_text = extract_user_text(payload)
 """

@@ -58,14 +58,14 @@ def _make_plugin(
 ):
     """Helper to set env vars and create a plugin instance."""
     if models is not None:
-        os.environ["LLM_ROUTER_ROUTING_MODELS"] = models
+        os.environ["LLM_ROUTER_ROUTING_SEMANTIC_MODELS"] = models
     if intent:
         for cat, kws in intent.items():
-            os.environ[f"LLM_ROUTER_ROUTING_INTENT_{cat}"] = kws
+            os.environ[f"LLM_ROUTER_ROUTING_SEMANTIC_INTENT_{cat}"] = kws
     if thresholds is not None:
-        os.environ["LLM_ROUTER_ROUTING_COMPLEXITY_THRESHOLDS"] = thresholds
+        os.environ["LLM_ROUTER_ROUTING_SEMANTIC_COMPLEXITY_THRESHOLDS"] = thresholds
     if default_model is not None:
-        os.environ["LLM_ROUTER_ROUTING_DEFAULT_MODEL"] = default_model
+        os.environ["LLM_ROUTER_ROUTING_SEMANTIC_DEFAULT_MODEL"] = default_model
     return SimpleSemanticRoutingPlugin()
 
 
@@ -284,19 +284,19 @@ def test_math_complex_boosted():
 
 # ------------ malformed config degradation
 def test_malformed_thresholds_uses_defaults():
-    os.environ["LLM_ROUTER_ROUTING_COMPLEXITY_THRESHOLDS"] = "bad|one"
+    os.environ["LLM_ROUTER_ROUTING_SEMANTIC_COMPLEXITY_THRESHOLDS"] = "bad|one"
     plugin = _make_plugin()
     assert plugin._complexity_thresholds == [25, 150]
 
 
 def test_single_threshold_value_uses_defaults():
-    os.environ["LLM_ROUTER_ROUTING_COMPLEXITY_THRESHOLDS"] = "42"
+    os.environ["LLM_ROUTER_ROUTING_SEMANTIC_COMPLEXITY_THRESHOLDS"] = "42"
     plugin = _make_plugin()
     assert plugin._complexity_thresholds == [25, 150]
 
 
 def test_empty_models_uses_fallback():
-    os.environ["LLM_ROUTER_ROUTING_MODELS"] = ""
+    os.environ["LLM_ROUTER_ROUTING_SEMANTIC_MODELS"] = ""
     plugin = _make_plugin()
     assert plugin._models == list(_DEFAULT_MODELS)
 
@@ -309,7 +309,7 @@ def test_empty_intents_uses_defaults():
 
 # ------------ edge cases
 def test_no_text_content_uses_default_model():
-    os.environ["LLM_ROUTER_ROUTING_DEFAULT_MODEL"] = "fallback-model"
+    os.environ["LLM_ROUTER_ROUTING_SEMANTIC_DEFAULT_MODEL"] = "fallback-model"
     plugin = _make_plugin()
     payload: dict = {"model": "auto", "messages": []}
     result = plugin.apply(payload)

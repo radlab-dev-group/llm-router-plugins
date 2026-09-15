@@ -101,6 +101,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from llm_router_plugins.plugin_interface import PluginInterface
+from llm_router_plugins.utils.text_extractor import extract_user_text
 from llm_router_plugins.utils.routing.simple_semantic.config import (
     RoutingConfig,
 )
@@ -295,7 +296,7 @@ class SimpleSemanticRoutingPlugin(PluginInterface):
         if payload.get("model") != "auto":
             return payload
 
-        text = self._get_text_from_payload(payload)
+        text = extract_user_text(payload)
         if not text:
             payload["model"] = self._default_model
             if self._logger:
@@ -319,42 +320,6 @@ class SimpleSemanticRoutingPlugin(PluginInterface):
                 payload["model"],
             )
         return payload
-
-    # ------ text extraction
-
-    @staticmethod
-    def _get_text_from_payload(payload: Dict[str, Any]) -> str:
-        """
-        Extract user text from the payload.
-
-        Order of preference: ``messages[-1].content`` > ``user_last_statement``
-        > ``query`` > ``prompt`` > ``input``.
-
-        Parameters
-        ----------
-        payload : dict
-            The message payload to extract text from.
-
-        Returns
-        -------
-        str
-            The extracted text, or an empty string if no text is found.
-
-        Raises
-        ------
-        None
-        """
-        messages = payload.get("messages")
-        if isinstance(messages, list) and messages:
-            last_msg = messages[-1]
-            content = last_msg.get("content", "")
-            if content:
-                return str(content)
-        for key in ("user_last_statement", "query", "prompt", "input"):
-            val = payload.get(key)
-            if val:
-                return str(val)
-        return ""
 
     # ------ token estimation
 

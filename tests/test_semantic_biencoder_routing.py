@@ -66,7 +66,7 @@ def clean_semantic_biencoder_env():
 
 def test_config_loads_from_file():
     cfg = SemanticBiEncoderConfig.from_file(_CONFIG_PATH)
-    assert cfg.embedding_model == "radlab/semantic-euro-bert-encoder-v1"
+    assert cfg.embedding_model == "google/embeddinggemma-300m"
     assert cfg.chunk_size == 256
     assert cfg.chunk_overlap == 64
     assert cfg.similarity_threshold == 0.0
@@ -171,30 +171,8 @@ class TestRoutingIntegration:
     """Integration tests that patch SentenceTransformer to avoid downloading."""
 
     @pytest.fixture(autouse=True)
-    def patch_sentence_transformer(self, monkeypatch):
-        """Mock SentenceTransformer to return fake embeddings."""
-        import numpy as np
-
-        class MockModel:
-            def __init__(self, *args, **kwargs):
-                self.embed_dim = 768
-
-            def encode(self, texts, show_progress_bar=False, convert_to_numpy=True):
-                if isinstance(texts, str):
-                    texts = [texts]
-                result = np.random.RandomState(42).rand(len(texts), self.embed_dim)
-                # Normalize so cosine similarity is deterministic
-                norms = np.linalg.norm(result, axis=1, keepdims=True)
-                norms[norms == 0] = 1e-10
-                result = result / norms
-                if len(texts) == 1:
-                    return result[0]
-                return result
-
-        monkeypatch.setattr(
-            "llm_router_plugins.utils.routing.semantic_biencoder.embedder.SentenceTransformer",
-            MockModel,
-        )
+    def patch_sentence_transformer(self, mock_sentence_transformer):
+        """Activate the shared deterministic SentenceTransformer mock (conftest)."""
 
     def test_route_code_query(self):
         from llm_router_plugins.utils.routing.semantic_biencoder.semantic_biencoder_routing import (
@@ -263,6 +241,29 @@ class TestRoutingIntegration:
         assert result["model"] == "gpt-4"
         assert "routing" not in result
 
+    def test_below_threshold_passthrough(self, monkeypatch):
+        """A similarity below ``similarity_threshold`` leaves the payload alone."""
+        from llm_router_plugins.utils.routing.semantic_biencoder.semantic_biencoder_routing import (
+            SemanticBiEncoderRoutingPlugin,
+        )
+
+        raw = _load_config()
+        raw["settings"]["similarity_threshold"] = 2.0  # unreachable by any cosine score
+        monkeypatch.setenv(
+            "LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CONFIG", json.dumps(raw)
+        )
+
+        plugin = SemanticBiEncoderRoutingPlugin()
+        payload = {
+            "model": "auto",
+            "messages": [
+                {"role": "user", "content": "Write a Python function to sort a list"}
+            ],
+        }
+        result = plugin.apply(payload)
+        assert result["model"] == "auto"
+        assert "routing" not in result
+
     def test_no_text_content_returns_unchanged(self):
         from llm_router_plugins.utils.routing.semantic_biencoder.semantic_biencoder_routing import (
             SemanticBiEncoderRoutingPlugin,
@@ -308,7 +309,7 @@ class TestRoutingIntegration:
 
 
 class TestEnvOverrides:
-    def test_env_override_embedding_model(self, monkeypatch):
+    def test_env_override_embedding_model(self, monkeypatch, mock_sentence_transformer):
         from llm_router_plugins.utils.routing.semantic_biencoder.semantic_biencoder_routing import (
             SemanticBiEncoderRoutingPlugin,
         )
@@ -318,24 +319,10 @@ class TestEnvOverrides:
             "custom/embedding-model",
         )
 
-        class MockModel:
-            embed_dim = 768
-
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def encode(self, texts, **kwargs):
-                return [[0.5] * 768] if isinstance(texts, list) else [0.5] * 768
-
-        monkeypatch.setattr(
-            "llm_router_plugins.utils.routing.semantic_biencoder.embedder.SentenceTransformer",
-            MockModel,
-        )
-
         plugin = SemanticBiEncoderRoutingPlugin()
         assert plugin._config.embedding_model == "custom/embedding-model"
 
-    def test_env_override_targets(self, monkeypatch):
+    def test_env_override_targets(self, monkeypatch, mock_sentence_transformer):
         from llm_router_plugins.utils.routing.semantic_biencoder.semantic_biencoder_routing import (
             SemanticBiEncoderRoutingPlugin,
         )
@@ -345,25 +332,11 @@ class TestEnvOverrides:
             "code-generation|creative-writing",
         )
 
-        class MockModel:
-            embed_dim = 768
-
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def encode(self, texts, **kwargs):
-                return [[0.5] * 768] if isinstance(texts, list) else [0.5] * 768
-
-        monkeypatch.setattr(
-            "llm_router_plugins.utils.routing.semantic_biencoder.embedder.SentenceTransformer",
-            MockModel,
-        )
-
         plugin = SemanticBiEncoderRoutingPlugin()
         target_names = [t.name for t in plugin._config.routing_targets]
         assert set(target_names) == {"code-generation", "creative-writing"}
 
-    def test_env_override_chunk_size(self, monkeypatch):
+    def test_env_override_chunk_size(self, monkeypatch, mock_sentence_transformer):
         from llm_router_plugins.utils.routing.semantic_biencoder.semantic_biencoder_routing import (
             SemanticBiEncoderRoutingPlugin,
         )
@@ -373,24 +346,10 @@ class TestEnvOverrides:
             "128",
         )
 
-        class MockModel:
-            embed_dim = 768
-
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def encode(self, texts, **kwargs):
-                return [[0.5] * 768] if isinstance(texts, list) else [0.5] * 768
-
-        monkeypatch.setattr(
-            "llm_router_plugins.utils.routing.semantic_biencoder.embedder.SentenceTransformer",
-            MockModel,
-        )
-
         plugin = SemanticBiEncoderRoutingPlugin()
         assert plugin._config.chunk_size == 128
 
-    def test_invalid_target_name_ignored(self, monkeypatch):
+    def test_invalid_target_name_ignored(self, monkeypatch, mock_sentence_transformer):
         from llm_router_plugins.utils.routing.semantic_biencoder.semantic_biencoder_routing import (
             SemanticBiEncoderRoutingPlugin,
         )
@@ -398,20 +357,6 @@ class TestEnvOverrides:
         monkeypatch.setenv(
             "LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_TARGETS",
             "code-generation|nonexistent-target",
-        )
-
-        class MockModel:
-            embed_dim = 768
-
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def encode(self, texts, **kwargs):
-                return [[0.5] * 768] if isinstance(texts, list) else [0.5] * 768
-
-        monkeypatch.setattr(
-            "llm_router_plugins.utils.routing.semantic_biencoder.embedder.SentenceTransformer",
-            MockModel,
         )
 
         plugin = SemanticBiEncoderRoutingPlugin()
@@ -433,31 +378,8 @@ class TestFAISSPersistence:
         _restore_env(kept)
 
     @pytest.fixture(autouse=True)
-    def patch_sentence_transformer(self, monkeypatch):
-        """Mock SentenceTransformer to return fake embeddings."""
-        import numpy as np
-
-        class MockModel:
-            embed_dim = 768
-
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def encode(self, texts, show_progress_bar=False, convert_to_numpy=True):
-                if isinstance(texts, str):
-                    texts = [texts]
-                result = np.random.RandomState(42).rand(len(texts), self.embed_dim)
-                norms = np.linalg.norm(result, axis=1, keepdims=True)
-                norms[norms == 0] = 1e-10
-                result = result / norms
-                if len(texts) == 1:
-                    return result[0]
-                return result
-
-        monkeypatch.setattr(
-            "llm_router_plugins.utils.routing.semantic_biencoder.embedder.SentenceTransformer",
-            MockModel,
-        )
+    def patch_sentence_transformer(self, mock_sentence_transformer):
+        """Activate the shared deterministic SentenceTransformer mock (conftest)."""
 
     def test_persist_and_reload_produces_same_results(self, tmp_path):
         """Re-loading a saved FAISS index should give identical routing results."""
