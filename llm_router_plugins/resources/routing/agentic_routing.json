@@ -1,0 +1,329 @@
+{
+  "description": "Agentic routing configuration — selects the model based on the agent's current work mode (planning, coding, review, testing, debugging, research, summarizing).",
+  "embedding_model": "google/embeddinggemma-300m",
+  "settings": {
+    "trigger": ["agentic"],
+    "fallback_mode": "fallback",
+    "vector_store_path": "",
+    "semantic": {
+      "enabled": true,
+      "threshold": 0.55,
+      "top_k": 3,
+      "chunk_size": 256,
+      "chunk_overlap": 64
+    }
+  },
+  "agent_modes": [
+    {
+      "name": "plan",
+      "model_name": "qwen3.6:35b",
+      "description": "Agent works in planning mode: breaking work down into steps, defining architecture, roadmap, scope and strategy before anything is implemented.",
+      "examples": [
+        "Plan the migration of this service to Kubernetes in three phases",
+        "Draft an implementation roadmap for the next two quarters",
+        "What is the best architecture for a multi-tenant billing system?",
+        "Break this epic down into small deliverable steps",
+        "Outline the design of the new authentication subsystem",
+        "Zaplanuj pracę nad nowym modułem rozliczeń na trzy etapy",
+        "Jaką architekturę przyjąć dla systemu multi-tenant?",
+        "Rozpisz ten epic na mniejsze kroki i milowy kamień",
+        "Przygotuj plan wdrożenia nowego API",
+        "Zdefiniuj zakres i strategię dla tego projektu"
+      ],
+      "keywords": [
+        "planning",
+        "roadmap",
+        "architecture",
+        "design",
+        "strategy",
+        "outline",
+        "steps",
+        "milestone",
+        "backlog",
+        "prioritize",
+        "scope",
+        "todo",
+        "approach"
+      ],
+      "phrases": ["design the architecture:6", "plan działania:5", "zaplanuj pracę:5", "rollout strategy:4"],
+      "patterns": ["\\bplan\\b", "\\bplan(ning)?\\s+(for|of|dla|nad)\\b"],
+      "weights": {
+        "planning": 3,
+        "roadmap": 3,
+        "architecture": 3,
+        "milestone": 2,
+        "backlog": 2,
+        "prioritize": 2,
+        "strategy": 2
+      }
+    },
+    {
+      "name": "code",
+      "model_name": "gpt-oss:120b",
+      "description": "Agent works in coding mode: writing, implementing and refactoring source code, functions and modules.",
+      "examples": [
+        "Implement a Python function that parses this CSV file",
+        "Refactor this module so the parsing logic is separated from IO",
+        "Write the library call that uploads the file to S3",
+        "Add a compile-time check for this generic type",
+        "Turn this snippet into a reusable algorithm",
+        "Zaimplementuj funkcję, która parsuje ten plik CSV",
+        "Zrefaktoryzuj ten moduł, żeby logika była oddzielona od IO",
+        "Napisz bibliotekę do obsługi tego protokołu",
+        "Dodaj zmienną konfiguracyjną i składnię typów generycznych",
+        "Ten algorytm trzeba przyspieszyć"
+      ],
+      "keywords": [
+        "implement",
+        "refactor",
+        "function",
+        "compile",
+        "programming",
+        "module",
+        "library",
+        "syntax",
+        "variable",
+        "algorithm",
+        "snippet"
+      ],
+      "phrases": ["napisz kod:6", "zaimplementuj:5", "write a function:5", "refactor this:5", "napisz skrypt:5"],
+      "patterns": ["\\bcode\\b", "\\bcoding\\b", "\\bimplement\\w*\\b"],
+      "weights": {
+        "implement": 3,
+        "refactor": 3,
+        "programming": 2,
+        "algorithm": 2,
+        "compile": 2
+      }
+    },
+    {
+      "name": "review",
+      "model_name": "granite3.3:8b",
+      "description": "Agent works in review mode: auditing merge requests, commenting on style, security and maintainability of code written by others.",
+      "examples": [
+        "Review my pull request and point out maintainability problems",
+        "Audit this module for security issues and bad practices",
+        "Give me feedback on the readability of this class",
+        "Comment on the style of this patch line by line",
+        "Oceń kod z tego merge requesta pod kątem czytelności",
+        "Zrób przegląd tego modułu i sprawdź bezpieczeństwo",
+        "Czy ten kod jest bezpieczny i łatwy do utrzymania?",
+        "Zgłoś uwagi do stylu i nazewnictwa w tym pliku"
+      ],
+      "keywords": [
+        "review",
+        "style",
+        "maintainability",
+        "readability",
+        "feedback",
+        "comment",
+        "security",
+        "audit",
+        "practices"
+      ],
+      "phrases": [
+        "review my pull request:6",
+        "code review:6",
+        "oceń kod:5",
+        "check for vulnerabilities:4",
+        "czy ten kod jest bezpieczny:5"
+      ],
+      "patterns": ["\\breview\\w*\\b", "\\blint(ing|er)?\\b"],
+      "weights": {
+        "review": 3,
+        "audit": 2,
+        "maintainability": 2,
+        "readability": 2
+      }
+    },
+    {
+      "name": "test",
+      "model_name": "granite3.3:8b",
+      "description": "Agent works in testing mode: writing and running unit tests, fixtures and assertions, and raising coverage.",
+      "examples": [
+        "Write unit tests for the payment module with pytest",
+        "Add a fixture and assertions for this edge case",
+        "Our coverage dropped, add regression tests for this path",
+        "Create an acceptance test suite driven by TDD",
+        "Napisz testy jednostkowe dla modułu płatności",
+        "Dodaj testy regresji dla tej ścieżki",
+        "Zwiększ pokrycie testami tego pakietu",
+        "Przygotuj fixture i asercje dla tego przypadku"
+      ],
+      "keywords": [
+        "unittest",
+        "pytest",
+        "junit",
+        "coverage",
+        "assertion",
+        "fixture",
+        "mock",
+        "regression",
+        "acceptance",
+        "tdd",
+        "verify",
+        "validation",
+        "testy"
+      ],
+      "phrases": ["napisz testy:6", "write unit tests:6", "test coverage:5", "przetestuj to:5", "add assertions:4"],
+      "patterns": ["\\btest\\w*\\b", "\\bcoverage\\b"],
+      "weights": {
+        "pytest": 3,
+        "unittest": 3,
+        "tdd": 3,
+        "coverage": 3,
+        "assertion": 2,
+        "fixture": 2,
+        "regression": 2
+      }
+    },
+    {
+      "name": "debug",
+      "model_name": "gpt-oss:120b",
+      "description": "Agent works in debugging mode: analysing tracebacks, exceptions and crashes, reproducing and fixing failures.",
+      "examples": [
+        "Debug this traceback and find out why the worker crashes",
+        "The build is failing with a segfault, reproduce it and fix the bug",
+        "This exception appears only in production, how do I bisect it?",
+        "My service is broken after the upgrade, something is not working as expected",
+        "Napraw błąd, przez który usługa się wywala",
+        "Ten kod jest zepsuty, wysypuje się wyjątek na starcie",
+        "Nie działa po aktualizacji, trzeba zlokalizować przyczynę",
+        "Reprodukuję crash tylko na produkcji"
+      ],
+      "keywords": [
+        "debug",
+        "traceback",
+        "exception",
+        "error",
+        "crash",
+        "segfault",
+        "broken",
+        "failing",
+        "issue",
+        "reproduce",
+        "bisect"
+      ],
+      "phrases": [
+        "napraw błąd:6",
+        "this doesn't work:5",
+        "why is it failing:5",
+        "not working as expected:4",
+        "loguje błąd:5"
+      ],
+      "patterns": ["\\bbug(s)?\\b", "\\bstack\\s+trace\\b", "\\berror(s)?\\b"],
+      "weights": {
+        "debug": 3,
+        "traceback": 3,
+        "crash": 3,
+        "segfault": 3,
+        "exception": 2,
+        "reproduce": 2,
+        "bisect": 2
+      }
+    },
+    {
+      "name": "research",
+      "model_name": "qwen3.6:35b",
+      "description": "Agent works in research mode: investigating documentation, comparing alternatives and gathering background findings.",
+      "examples": [
+        "Research which vector database fits our workload and benchmark them",
+        "Investigate the documentation of this library and summarize the findings",
+        "What is the difference between gRPC and REST for this use case?",
+        "How does the FAISS index sharding work under the hood?",
+        "Zbadać to i porównać dostępne alternatywy",
+        "Sprawdź w dokumentacji jakie są możliwości tego narzędzia",
+        "Jaka jest różnica między tymi dwoma bibliotekami?",
+        "Przejrzyj wyniki benchmarków i przedstaw tło tematu"
+      ],
+      "keywords": [
+        "research",
+        "investigate",
+        "documentation",
+        "compare",
+        "survey",
+        "benchmark",
+        "background",
+        "findings",
+        "study"
+      ],
+      "phrases": [
+        "zbadać to:5",
+        "what is the difference:5",
+        "compare the following:4",
+        "porównaj:4",
+        "find out why:4"
+      ],
+      "patterns": ["\\bwhat (is|are)\\b", "\\bhow (does|do|can)\\b", "\\bresearch\\b"],
+      "weights": {
+        "research": 3,
+        "investigate": 3,
+        "benchmark": 2,
+        "survey": 2,
+        "documentation": 2,
+        "findings": 2
+      }
+    },
+    {
+      "name": "summarize",
+      "model_name": "qwen3.6:35b",
+      "description": "Agent works in summarizing mode: condensing long documents, threads and transcripts into a concise recap.",
+      "examples": [
+        "Summarize this 40-page report in ten bullet points",
+        "Give me a short recap of the meeting notes",
+        "Condense this article into a concise digest",
+        "Paraphrase the synopsis so it fits in one paragraph",
+        "Podsumuj to w pięciu punktach",
+        "Skróć tekst do jednego akapitu",
+        "Zrób streszczenie tej dyskusji",
+        "Przeredaguj notatki na zwięzłe omówienie"
+      ],
+      "keywords": [
+        "summary",
+        "summarize",
+        "recap",
+        "condense",
+        "digest",
+        "overview",
+        "shorten",
+        "paraphrase",
+        "synopsis",
+        "concise"
+      ],
+      "phrases": ["podsumuj to:6", "brief summary:5", "skróć tekst:5", "sum up:4", "tl;dr:4"],
+      "patterns": ["\\bsummar(y|ize|ise)\\b", "\\btl;?dr\\b"],
+      "weights": {
+        "summarize": 3,
+        "summary": 3,
+        "synopsis": 3,
+        "recap": 2,
+        "condense": 2,
+        "paraphrase": 2
+      }
+    },
+    {
+      "name": "fallback",
+      "model_name": "qwen3.6:35b",
+      "description": "Default general-purpose mode used when no specific agent work mode can be detected.",
+      "examples": [
+        "Hello, can you help me with something today?",
+        "Just a general question about the project",
+        "Thanks for the help yesterday",
+        "Cześć, mogę o coś zapytać?",
+        "To takie ogólne i różne tematy, nic konkretnego"
+      ],
+      "keywords": ["general", "misc", "inne", "różne", "various", "casual", "anything"],
+      "phrases": [],
+      "patterns": [],
+      "weights": {
+        "general": 1,
+        "misc": 1,
+        "inne": 1,
+        "różne": 1,
+        "various": 1,
+        "casual": 1,
+        "anything": 1
+      }
+    }
+  ]
+}

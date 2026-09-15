@@ -1,16 +1,43 @@
 # Semantic Routing Plugins
 
-Two routing plugins are available for **heuristic-based model selection** in the **LLM‑Router** system.  
-Both activate when `payload["model"] == "auto"`.
+Three routing plugins are available for **model selection** in the **LLM‑Router** system.
+
+- `simple_semantic_routing` and `semantic_biencoder_routing` activate when `payload["model"] == "auto"`.
+- `agentic_routing` activates when `payload["model"]` equals its own trigger value (`"agentic"` by default) and routes
+  on the agent's **work mode**.
 
 ---
 
 ## Table of Contents
 
+- [0. Shared Routing Layer](#0-shared-routing-layer)
 - [1. Simple Semantic Routing (Heuristic)](#1-simple-semantic-routing-heuristic)
 - [2. Bi-Encoder Semantic Routing (Embedding-based)](#2-bi-encoder-semantic-routing-embedding-based)
+- [3. Agentic Routing (Agent Work Mode)](#3-agentic-routing-agent-work-mode)
+- [4. Comparison: Which Plugin to Use?](#4-comparison-which-plugin-to-use)
+- [5. File Locations](#5-file-locations)
 
 ---
+
+## 0. Shared Routing Layer
+
+`semantic_biencoder_routing` and `agentic_routing` share a common layer in
+`llm_router_plugins/utils/routing/`:
+
+| Module | Contents |
+|--------|----------|
+| `embedder.py` | `EmbeddingRouter` (BiEncoder + FAISS: chunking, index build/load/persist, `route()`) and `EmbeddingRouterConfig` — the formal config contract the router duck-types |
+| `target.py` | `RoutingTarget` — the shared target/mode dataclass (`name`, `model_name`, `description`, `examples`); `AgentMode` is a subclass of it |
+| `common.py` | `RoutingConfigBase` (shared `from_file`/`from_json` protocol: `..._CONFIG` env var holding raw JSON or a file path, optional default config location), `env_int`/`env_float`/`env_bool`/`resolve_persist_dir` env helpers, `build_embedding_router` + `check_router_has_vectors`, `should_route` (the `payload["model"]` trigger gate) and `annotate_routing` (writes `payload["model"]` + `payload["routing"]`) |
+
+Backward compatibility: `semantic_biencoder/embedder.py` and
+`semantic_biencoder/config.py` re-export `EmbeddingRouter` /
+`EmbeddingRouterConfig` / `RoutingTarget` from the shared modules, so existing
+imports keep working.
+
+All three plugins also share the text-extraction helper
+`llm_router_plugins/utils/text_extractor.py::extract_user_text`
+(`messages[-1].content` → `user_last_statement` → `query` → `prompt` → `input`).
 
 ## 1. Simple Semantic Routing (Heuristic)
 
@@ -564,8 +591,9 @@ target** (mean of all matching chunk scores). The final score table looks like:
 | creative-writing  | 0.31                   |           |
 | general-knowledge | 0.28                   |           |
 
-The target with the **highest mean similarity** wins. If all scores fall below `similarity_threshold` (default 0.0),
-the default model is used.
+The target with the **highest mean similarity** wins. If its score falls below
+`similarity_threshold` (default 0.0), the payload is returned unchanged —
+`payload["model"]` is left as it was.
 
 ### 2.7 Running Tests
 
@@ -575,18 +603,175 @@ pytest tests/test_semantic_biencoder_routing.py -v
 
 ---
 
-## 3. Comparison: Which Plugin to Use?
+## 3. Agentic Routing (Agent Work Mode)
 
-| Feature               | Simple Semantic Routing        | Bi-Encoder Semantic Routing         |
-|-----------------------|--------------------------------|-------------------------------------|
-| **Approach**          | Heuristic (keyword/phrase)     | Neural embeddings (FAISS)           |
-| **Model Required**    | ❌ None                         | ✅ `google/embeddinggemma-300m`      |
-| **Speed**             | Very fast (~0.1ms)             | Slower (~50-200ms, model dependent) |
-| **Accuracy**          | Rule-based, limited context    | Semantic understanding of meaning   |
-| **Config Complexity** | JSON keywords/phrases/patterns | JSON targets + examples             |
-| **Scalability**       | Linear keyword search          | FAISS index (efficient at scale)    |
-| **Persistence**       | N/A                            | ✅ FAISS index saved to disk         |
-| **Use Case**          | Fast, lightweight routing      | High-quality semantic matching      |
+The **Agentic Routing plugin** (`agentic_routing`) routes on the **work mode of the agent** — is it planning,
+coding, reviewing, testing, debugging, researching or summarizing — instead of classifying a free-form intent.
+Each mode owns its own model, so a coding agent gets a strong code model while a summarizing step stays on a
+cheaper general model.
+
+The plugin activates only when `payload["model"]` is a string whose trimmed value is in the trigger list
+(`"agentic"` by default, case-sensitive). It rewrites `payload["model"]` and adds `payload["agent_mode"]` plus
+`payload["routing"]` metadata; temperature, `max_tokens`, prompts and tools are never modified.
+
+### 3.1 Detection Cascade
+
+Mode resolution is strictly ordered — the first layer that answers wins:
+
+| # | Layer         | Behaviour                                                                                 | `source`    |
+|---|---------------|-------------------------------------------------------------------------------------------|-------------|
+| 1 | **Explicit**  | First present key wins: `agent_mode` → `mode` → `agent.mode` → `metadata.agent_mode`      | `explicit`  |
+| 2 | **Semantic**  | Bi-encoder + FAISS over mode descriptions/examples, accepted at `similarity >= threshold` | `semantic`  |
+| 3 | **Heuristic** | Keywords (weight 1), `text:weight` phrases (default 2.0), regex patterns (+3.0)           | `heuristic` |
+| 4 | **Fallback**  | The configured `fallback_mode`                                                            | `fallback`  |
+
+Details worth knowing:
+
+- An explicit mode name is normalised — trimmed, lower-cased, `-` and spaces converted to `_` — so `"Plan"` resolves
+  to `plan`, and a custom `deep_research` mode also matches `"Deep Research"` and `"deep-research"`. An unknown name
+  logs a warning and the cascade continues; it is never a hard error.
+- The heuristic layer scores every mode and the highest score above 0 wins, using exactly the same keyword /
+  phrase / pattern semantics as the Simple plugin (§1.1).
+- An explicit mode is honoured even when the payload carries no text. Empty extracted text without an explicit mode
+  resolves to the fallback mode with `source = "empty_text"`.
+- The semantic layer is optional. With `SEMANTIC_ENABLED=false` no ML library is imported at all, and resolution
+  uses only the explicit and heuristic layers.
+
+### 3.2 Configuration
+
+Default configuration lives in [
+`llm_router_plugins/resources/routing/agentic_routing.json`](../../../llm_router_plugins/resources/routing/agentic_routing.json).
+
+Example JSON configuration (abridged to a single mode):
+
+```json
+{
+  "settings": {
+    "trigger": ["agentic"],
+    "fallback_mode": "fallback",
+    "vector_store_path": "",
+    "semantic": {
+      "enabled": true,
+      "threshold": 0.55,
+      "top_k": 3,
+      "chunk_size": 256,
+      "chunk_overlap": 64
+    }
+  },
+  "agent_modes": [
+    {
+      "name": "code",
+      "model_name": "gpt-oss:120b",
+      "description": "Agent works in coding mode: writing, implementing and refactoring source code.",
+      "examples": [
+        "Implement a Python function that parses this CSV file",
+        "..."
+      ],
+      "keywords": ["implement", "refactor", "function", "..."],
+      "phrases": ["write a function:5", "refactor this:5", "..."],
+      "patterns": ["\\bcode\\b", "\\bimplement\\w*\\b"],
+      "weights": {"implement": 3, "refactor": 3}
+    }
+  ]
+}
+```
+
+The eight shipped modes are `plan`, `code`, `review`, `test`, `debug`, `research`, `summarize` and `fallback`.
+Several modes may legitimately share the same `model_name`.
+
+### 3.3 Defining Custom Modes
+
+Point the plugin at your own file (or inline JSON) and describe the modes your agents actually use:
+
+```bash
+export LLM_ROUTER_ROUTING_AGENTIC_CONFIG=/etc/llm-router/my_agent_modes.json
+# or inline, when the value starts with "{" or "["
+export LLM_ROUTER_ROUTING_AGENTIC_CONFIG='{"settings": {...}, "agent_modes": [...]}'
+```
+
+A mode only requires `name`, `model_name` and `description`; `examples`, `keywords`, `phrases`, `patterns` and
+`weights` are optional. Rules enforced at startup (a `ValueError` naming both the JSON key and the env var):
+
+- `agent_modes` must be non-empty, mode names unique, and every `model_name` non-empty.
+- `fallback_mode` must exist among the modes — if you whitelist modes with `MODES`, keep the fallback in the list
+  or override `FALLBACK_MODE` too.
+- `embedding_model` must be set when the semantic layer is enabled; `top_k >= 1`, `chunk_size > 0`,
+  `chunk_overlap >= 0`.
+
+### 3.4 Environment Variable Overrides
+
+| Env variable                                      | Purpose                                            |
+|---------------------------------------------------|----------------------------------------------------|
+| `LLM_ROUTER_ROUTING_AGENTIC_CONFIG`               | Path to a custom JSON config, or a raw JSON string |
+| `LLM_ROUTER_ROUTING_AGENTIC_TRIGGER`              | Pipe-separated trigger values (default `agentic`)  |
+| `LLM_ROUTER_ROUTING_AGENTIC_MODEL`                | Override the **embedding** model name              |
+| `LLM_ROUTER_ROUTING_AGENTIC_MODELS`               | Per-mode models, e.g. `plan=model_a\|code=model_b` |
+| `LLM_ROUTER_ROUTING_AGENTIC_MODES`                | Whitelist of mode names to keep                    |
+| `LLM_ROUTER_ROUTING_AGENTIC_SEMANTIC_ENABLED`     | `true`/`false` — toggle the embedding layer        |
+| `LLM_ROUTER_ROUTING_AGENTIC_SIMILARITY_THRESHOLD` | Minimum cosine similarity for a semantic hit       |
+| `LLM_ROUTER_ROUTING_AGENTIC_TOP_K`                | Chunks retrieved per query                         |
+| `LLM_ROUTER_ROUTING_AGENTIC_CHUNK_SIZE`           | Token chunk size used when indexing modes          |
+| `LLM_ROUTER_ROUTING_AGENTIC_CHUNK_OVERLAP`        | Token overlap between chunks                       |
+| `LLM_ROUTER_ROUTING_AGENTIC_PERSIST_DIR`          | Directory for FAISS index persistence              |
+| `LLM_ROUTER_ROUTING_AGENTIC_FALLBACK_MODE`        | Mode used when nothing matches                     |
+| `LLM_ROUTER_ROUTING_AGENTIC_MODE_<name>_KEYWORDS` | Pipe-separated keyword override for a single mode  |
+
+Unknown values never crash the router: an unrecognized `SEMANTIC_ENABLED` value or a malformed threshold is logged
+and ignored, and overrides naming an unknown mode are skipped with a warning.
+
+### 3.5 Usage Example
+
+```python
+from llm_router_plugins.utils.routing.agentic_routing import AgenticRoutingPlugin
+
+plugin = AgenticRoutingPlugin()
+
+result = plugin.apply({
+    "model": "agentic",
+    "prompt": "Please refactor this function to add caching",
+})
+# result["model"]      -> "gpt-oss:120b"
+# result["agent_mode"] -> "code"
+# result["routing"]    -> {"plugin": "agentic_routing", "agent_mode": "code",
+#                          "source": "heuristic", "similarity": 0.9}
+```
+
+An orchestrator that already knows the mode can skip detection entirely:
+
+```python
+result = plugin.apply({"model": "agentic", "agent_mode": "REVIEW", "messages": [...]})
+# result["model"] -> granite3.3:8b, routing["source"] == "explicit"
+```
+
+`similarity` is the FAISS score for a semantic hit, `score / (score + 1)` for a heuristic hit, `1.0` for an
+explicit mode and `0.0` for the fallback.
+
+### 3.6 Running Tests
+
+```bash
+pytest tests/test_agentic_routing.py -v
+```
+
+FAISS-backed cases are skipped automatically when `faiss` is not installed; the default JSON config keeps
+`semantic.enabled = true`, so tests that build a real plugin set `LLM_ROUTER_ROUTING_AGENTIC_SEMANTIC_ENABLED=false`.
+
+---
+
+## 4. Comparison: Which Plugin to Use?
+
+| Feature               | Simple Semantic Routing        | Bi-Encoder Semantic Routing         | Agentic Routing                           |
+|-----------------------|--------------------------------|-------------------------------------|-------------------------------------------|
+| **Trigger**           | `model == "auto"`              | `model == "auto"`                   | `model == "agentic"`                      |
+| **Decides from**      | Intent + token complexity      | Nearest embedding target            | Agent work mode                           |
+| **Approach**          | Heuristic (keyword/phrase)     | Neural embeddings (FAISS)           | Explicit field → embeddings → keywords    |
+| **Accuracy**          | Rule-based, limited context    | Semantic understanding of meaning   | Keyword precision, mode-level granularity |
+| **Model Required**    | ❌ None                         | ✅ Bi-encoder embeddings             | Optional — degrades to heuristics         |
+| **Speed**             | Very fast (~0.1ms)             | Slower (~50-200ms, model dependent) | Fast; embedding lookup only if needed     |
+| **Config Complexity** | JSON keywords/phrases/patterns | JSON targets + examples             | JSON modes + keywords/phrases/patterns    |
+| **Scalability**       | Linear keyword search          | FAISS index (efficient at scale)    | Linear keyword search; FAISS at scale     |
+| **Caller Control**    | None                           | None                                | ✅ Pass `agent_mode` to force a mode       |
+| **Persistence**       | N/A                            | ✅ FAISS index saved to disk         | ✅ FAISS index saved to disk               |
+| **Use Case**          | Fast, lightweight routing      | High-quality semantic matching      | Coding agents that switch activities      |
 
 ### Recommendation
 
@@ -600,15 +785,28 @@ pytest tests/test_semantic_biencoder_routing.py -v
     - You have diverse, nuanced use cases that keyword matching can't capture.
     - You can afford the embedding model latency and dependencies.
 
+- Use **Agentic Routing** when:
+    - An agent (or your orchestrator) moves between distinct activities such as planning, coding and reviewing.
+    - You want the caller to be able to pin the mode explicitly while still degrading gracefully to detection.
+    - You need per-mode model assignment without touching temperature, tokens or tools.
+
 ---
 
-## 4. File Locations
+## 5. File Locations
 
 | File                                                           | Purpose                             |
 |----------------------------------------------------------------|-------------------------------------|
+| `llm_router_plugins/utils/routing/embedder.py`                 | Shared `EmbeddingRouter` (BiEncoder + FAISS) |
+| `llm_router_plugins/utils/routing/target.py`                   | Shared `RoutingTarget` dataclass    |
+| `llm_router_plugins/utils/routing/common.py`                   | Shared config base, env helpers, router factory |
 | `llm_router_plugins/utils/routing/simple_semantic/`            | SimpleSemanticRoutingPlugin code    |
 | `llm_router_plugins/utils/routing/semantic_biencoder/`         | SemanticBiEncoderRoutingPlugin code |
+| `llm_router_plugins/utils/routing/agentic_routing/`            | AgenticRoutingPlugin code           |
+| `llm_router_plugins/utils/text_extractor.py`                   | Shared payload text extraction      |
 | `llm_router_plugins/resources/routing/simple_semantic.json`    | Intent definitions & config         |
 | `llm_router_plugins/resources/routing/semantic_biencoder.json` | Embedding routing config            |
+| `llm_router_plugins/resources/routing/agentic_routing.json`    | Agent mode definitions & config     |
+| `tests/test_routing_common.py`                                 | Unit tests (shared layer)           |
 | `tests/test_simple_semantic_routing.py`                        | Unit tests (Simple)                 |
 | `tests/test_semantic_biencoder_routing.py`                     | Unit tests (Bi-Encoder)             |
+| `tests/test_agentic_routing.py`                                | Unit tests (Agentic)                |

@@ -309,6 +309,29 @@ class TestRouterContract:
 
 
 class TestTargetContractAndShims:
+    def test_agent_mode_is_routing_target(self):
+        from llm_router_plugins.utils.routing.agentic_routing.config import (
+            AgentMode,
+            AgenticRoutingConfig,
+        )
+
+        assert issubclass(AgentMode, RoutingTarget)
+        assert issubclass(AgenticRoutingConfig, RoutingConfigBase)
+
+        mode = AgentMode(
+            name="plan",
+            model_name="model_a",
+            description="Planning mode",
+            examples=("e1",),
+            keywords=["plan"],
+            phrases=[],
+            patterns=[],
+            weights={},
+        )
+        # Base fields are accessible through the subclass contract
+        assert mode.name == "plan"
+        assert mode.examples == ("e1",)
+
     def test_semantic_biencoder_config_is_routing_config_base(self):
         from llm_router_plugins.utils.routing.semantic_biencoder.config import (
             SemanticBiEncoderConfig,

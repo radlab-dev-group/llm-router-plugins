@@ -144,8 +144,9 @@ the [fast_masker README](llm_router_plugins/maskers/fast_masker/README.md).
 
 ## 2.7 Semantic Routing (Model Selection)
 
-Two routing plugins are available for model selection. Both activate when
-`payload["model"] == "auto"`.
+Three routing plugins are available for model selection. The two semantic plugins
+(`simple_semantic_routing`, `semantic_biencoder_routing`) activate when `payload["model"] == "auto"`; the agentic
+plugin (`agentic_routing`) activates when `payload["model"]` matches its own trigger value (`"agentic"` by default).
 
 ### 2.7.1 Simple Semantic Routing (Heuristic)
 
@@ -254,6 +255,97 @@ size, overlap, and persist directory can all be overridden via environment varia
 | `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_SIZE`    | Override chunk size                   |
 | `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_OVERLAP` | Override chunk overlap                |
 | `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_PERSIST_DIR`   | Directory for FAISS index persistence |
+
+### 2.7.3 Agentic Routing (Agent Work Mode)
+
+The **Agentic Routing plugin** (`agentic_routing`) picks the model from the agent's **work mode** (planning, coding,
+reviewing, debugging, …) rather than from a generic intent classification. It activates only when `payload["model"]`
+is a string whose trimmed value is in the configured trigger list — `"agentic"` by default. Matching is
+case-sensitive, so `"Agentic"` is left untouched; `" agentic "` is accepted.
+
+The plugin rewrites `payload["model"]` and adds `payload["agent_mode"]` plus a `payload["routing"]` metadata block.
+Nothing else is touched — temperature, `max_tokens`, prompts and tool definitions pass through unchanged.
+
+**1. Agent modes:**
+
+Modes are entirely configuration-driven via
+[agentic_routing.json](llm_router_plugins/resources/routing/agentic_routing.json). Each mode declares a `name`, a
+`model_name`, a `description`, `examples`, and heuristic signals (`keywords`, `phrases`, `patterns`). The shipped
+default defines eight modes:
+
+| Mode        | Model           | Typical work                                          |
+|-------------|-----------------|-------------------------------------------------------|
+| `plan`      | `qwen3.6:35b`   | Roadmaps, breaking work into steps, scope, milestones |
+| `code`      | `gpt-oss:120b`  | Writing, implementing and refactoring source code     |
+| `review`    | `granite3.3:8b` | Merge-request audits, style and security feedback     |
+| `test`      | `granite3.3:8b` | Unit tests, fixtures, coverage, assertions            |
+| `debug`     | `gpt-oss:120b`  | Tracebacks, exceptions, crashes, reproducing faults   |
+| `research`  | `qwen3.6:35b`   | Investigating docs, comparing and analysing sources   |
+| `summarize` | `qwen3.6:35b`   | Condensing long documents, threads and logs           |
+| `fallback`  | `qwen3.6:35b`   | General-purpose catch-all when nothing matches        |
+
+**2. Mode detection cascade:**
+
+The mode is resolved strictly in order — the first layer that produces an answer wins:
+
+| # | Layer         | How it decides                                                                                        | `source`    |
+|---|---------------|-------------------------------------------------------------------------------------------------------|-------------|
+| 1 | **Explicit**  | `agent_mode` → `mode` → `agent.mode` → `metadata.agent_mode`; first present key wins                  | `explicit`  |
+| 2 | **Semantic**  | Bi-encoder + FAISS match against mode descriptions/examples, accepted at `similarity >= threshold`    | `semantic`  |
+| 3 | **Heuristic** | Weighted keywords (1), `text:weight` phrases (default 2.0), regex patterns (+3.0); best score above 0 | `heuristic` |
+| 4 | **Fallback**  | The configured `fallback_mode`                                                                        | `fallback`  |
+
+An explicit mode name is normalised (strip, lower-case, `-` and space → `_`), so a custom `deep_research` mode also
+matches `"Deep Research"` and `"deep-research"`. An unknown name only logs a warning and the cascade continues instead
+of failing. An explicit mode is honoured even when the payload carries no text; empty extracted text *without* an
+explicit mode resolves to the fallback mode with `source = "empty_text"`.
+
+The semantic layer reuses the same Bi-Encoder stack as §2.7.2 (same embedding model, FAISS index and chunking), so it
+can be switched off with a single env var to run the plugin with no ML dependencies at all — only the explicit and
+heuristic layers remain.
+
+**3. Result metadata:**
+
+```python
+payload = {"model": "agentic", "prompt": "Please refactor this function to add caching"}
+
+# after apply():
+{
+    "model": "gpt-oss:120b",
+    "prompt": "Please refactor this function to add caching",
+    "agent_mode": "code",
+    "routing": {
+        "plugin": "agentic_routing",
+        "agent_mode": "code",
+        "source": "heuristic",
+        "similarity": 0.9,
+    },
+}
+```
+
+`similarity` carries the FAISS score on the semantic path, `score / (score + 1)` for a heuristic hit, `1.0` for an
+explicit mode and `0.0` for the fallback.
+
+**Environment variable overrides:**
+
+| Env variable                                      | Purpose                                            |
+|---------------------------------------------------|----------------------------------------------------|
+| `LLM_ROUTER_ROUTING_AGENTIC_CONFIG`               | Path to a custom JSON config, or a raw JSON string |
+| `LLM_ROUTER_ROUTING_AGENTIC_TRIGGER`              | Pipe-separated trigger values (default `agentic`)  |
+| `LLM_ROUTER_ROUTING_AGENTIC_MODEL`                | Override the **embedding** model name              |
+| `LLM_ROUTER_ROUTING_AGENTIC_MODELS`               | Per-mode models, e.g. `plan=model_a\|code=model_b` |
+| `LLM_ROUTER_ROUTING_AGENTIC_MODES`                | Whitelist of mode names to keep                    |
+| `LLM_ROUTER_ROUTING_AGENTIC_SEMANTIC_ENABLED`     | `true`/`false` — toggle the embedding layer        |
+| `LLM_ROUTER_ROUTING_AGENTIC_SIMILARITY_THRESHOLD` | Minimum cosine similarity for a semantic hit       |
+| `LLM_ROUTER_ROUTING_AGENTIC_TOP_K`                | Chunks retrieved per query                         |
+| `LLM_ROUTER_ROUTING_AGENTIC_CHUNK_SIZE`           | Token chunk size used when indexing modes          |
+| `LLM_ROUTER_ROUTING_AGENTIC_CHUNK_OVERLAP`        | Token overlap between chunks                       |
+| `LLM_ROUTER_ROUTING_AGENTIC_PERSIST_DIR`          | Directory for FAISS index persistence              |
+| `LLM_ROUTER_ROUTING_AGENTIC_FALLBACK_MODE`        | Mode used when nothing matches                     |
+| `LLM_ROUTER_ROUTING_AGENTIC_MODE_<name>_KEYWORDS` | Pipe-separated keyword override for a single mode  |
+
+`MODES` filters the mode list but does not move the fallback: if the whitelist excludes the configured
+`fallback_mode`, set `FALLBACK_MODE` as well — otherwise configuration validation fails at startup.
 
 ---
 
