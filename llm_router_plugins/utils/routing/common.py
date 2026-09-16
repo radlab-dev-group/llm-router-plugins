@@ -60,9 +60,7 @@ class RoutingConfigBase:
         return f"{cls._ENV_PREFIX}CONFIG"
 
     @classmethod
-    def from_file(
-        cls, path: Optional[pathlib.Path] = None
-    ) -> "RoutingConfigBase":
+    def from_file(cls, path: Optional[pathlib.Path] = None) -> "RoutingConfigBase":
         """
         Load configuration from a JSON file or from the ``..._CONFIG`` env var.
 
@@ -195,9 +193,7 @@ class RoutingConfigBase:
         if chunk_size <= 0:
             raise ValueError(f"Expected 'chunk_size' > 0, got {chunk_size}.")
         if chunk_overlap < 0:
-            raise ValueError(
-                f"Expected 'chunk_overlap' >= 0, got {chunk_overlap}."
-            )
+            raise ValueError(f"Expected 'chunk_overlap' >= 0, got {chunk_overlap}.")
         if top_k < 1:
             raise ValueError(f"Expected 'top_k' >= 1, got {top_k}.")
 
@@ -255,9 +251,7 @@ def env_float(prefix: str, suffix: str) -> Optional[float]:
         return None
 
 
-def env_bool(
-    prefix: str, suffix: str, logger: Any = None
-) -> Optional[bool]:
+def env_bool(prefix: str, suffix: str, logger: Any = None) -> Optional[bool]:
     """
     Read a boolean-typed environment variable ``{prefix}{suffix}``.
 
@@ -375,13 +369,10 @@ def build_embedding_router(
         If ``faiss`` / ``sentence_transformers`` are not importable, or if
         the resulting index contains no vectors.
     """
-    hint = (
-        missing_deps_hint
-        or (
-            "semantic routing is enabled but the sentence-transformers / FAISS "
-            "dependencies are not installed — install them or disable semantic "
-            "routing"
-        )
+    hint = missing_deps_hint or (
+        "semantic routing is enabled but the sentence-transformers / FAISS "
+        "dependencies are not installed — install them or disable semantic "
+        "routing"
     )
     try:
         import faiss  # noqa: F401
