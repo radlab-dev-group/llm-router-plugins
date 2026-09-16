@@ -152,9 +152,7 @@ class SemanticBiEncoderConfig(RoutingConfigBase):
         chunk_size = settings["chunk_size"]
         chunk_overlap = settings["chunk_overlap"]
         top_k = settings["top_k"]
-        RoutingConfigBase.validate_semantic_params(
-            chunk_size, chunk_overlap, top_k
-        )
+        RoutingConfigBase.validate_semantic_params(chunk_size, chunk_overlap, top_k)
 
         return SemanticBiEncoderConfig(
             embedding_model=raw["embedding_model"],

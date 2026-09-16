@@ -19,10 +19,29 @@ setup(
     packages=find_packages(exclude=("tests", "docs")),
     package_data={"llm_router_plugins.resources": ["*.json"]},
     include_package_data=True,
-    python_requires=">=3.8",
-    install_requires=[
-        "radlab-pii-classification>=0.1.0"
-    ],
+    python_requires=">=3.10",
+    install_requires=["radlab-pii-classification>=0.1.0"],
+    extras_require={
+        # Semantic routing (EmbeddingRouter): CPU build of FAISS.
+        "ml": [
+            "faiss-cpu",
+            "sentence-transformers",
+            "numpy",
+            "scipy",
+        ],
+        # Same as "ml" but with the CUDA build of FAISS.
+        "ml-gpu": [
+            "faiss-gpu",
+            "sentence-transformers",
+            "numpy",
+            "scipy",
+        ],
+        # LangChain-based RAG utilities.
+        "rag": [
+            "langchain",
+            "Pillow",
+        ],
+    },
     entry_points={
         "console_scripts": [
             "llm-router-rag-langchain="
@@ -31,6 +50,9 @@ setup(
     },
     classifiers=[
         "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",
     ],
