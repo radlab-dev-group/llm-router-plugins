@@ -196,9 +196,7 @@ class AgenticRoutingConfig(RoutingConfigBase):
         chunk_size = semantic["chunk_size"]
         chunk_overlap = semantic["chunk_overlap"]
         top_k = semantic["top_k"]
-        RoutingConfigBase.validate_semantic_params(
-            chunk_size, chunk_overlap, top_k
-        )
+        RoutingConfigBase.validate_semantic_params(chunk_size, chunk_overlap, top_k)
 
         return AgenticRoutingConfig(
             trigger=list(settings["trigger"]),
