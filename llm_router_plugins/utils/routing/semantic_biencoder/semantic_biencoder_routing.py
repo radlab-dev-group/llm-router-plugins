@@ -161,12 +161,14 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
 
         if self._config.chunk_size <= 0:
             raise ValueError(
-                f"SemanticBiEncoderRouting: chunk_size must be > 0, got {self._config.chunk_size}"
+                "SemanticBiEncoderRouting: chunk_size must be > 0, "
+                f"got {self._config.chunk_size}"
             )
 
         if self._config.chunk_overlap < 0:
             raise ValueError(
-                f"SemanticBiEncoderRouting: chunk_overlap must be >= 0, got {self._config.chunk_overlap}"
+                "SemanticBiEncoderRouting: chunk_overlap must be >= 0, "
+                f"got {self._config.chunk_overlap}"
             )
 
     def apply(self, payload: Dict[str, Any]) -> Dict[str, Any]:
