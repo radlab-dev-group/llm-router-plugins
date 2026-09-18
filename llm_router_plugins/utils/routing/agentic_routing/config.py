@@ -10,6 +10,12 @@ JSON structure::
         "trigger": ["agentic"],
         "fallback_mode": "fallback",
         "vector_store_path": "",
+        "rules_enabled": true,
+        "capabilities_enabled": true,
+        "escalation_enabled": true,
+        "session_affinity": {
+          "enabled": true, "ttl_seconds": 900, "max_entries": 1024
+        },
         "semantic": {
           "enabled": true,
           "threshold": 0.55,
@@ -18,6 +24,14 @@ JSON structure::
           "chunk_overlap": 64
         }
       },
+      "rules": [
+        {
+          "id": "task-coding",
+          "priority": 100,
+          "when": { "task": ["coding", "implement"] },
+          "then": { "mode": "code" }
+        }
+      ],
       "agent_modes": [
         {
           "name": "plan",
@@ -27,7 +41,10 @@ JSON structure::
           "keywords": ["planning", "roadmap", ...],
           "phrases": ["plan działania:5", ...],
           "patterns": ["\\\\bplan\\\\b", ...],
-          "weights": { "planning": 3, "roadmap": 3, ... }
+          "weights": { "planning": 3, "roadmap": 3, ... },
+          "capabilities": {
+            "tool_calling": true, "reasoning": true, "context_window": 131072
+          }
         }
       ]
     }
@@ -36,7 +53,7 @@ JSON structure::
 import os
 import pathlib
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 from llm_router_plugins.utils.routing.constants import AGENTIC_ROUTING_PREFIX
@@ -48,10 +65,60 @@ from llm_router_plugins.utils.routing.common import (
     resolve_persist_dir,
 )
 from llm_router_plugins.utils.routing.target import RoutingTarget
+from llm_router_plugins.utils.routing.agentic_routing.rules import (
+    RoutingRule,
+    parse_rules,
+)
+from llm_router_plugins.utils.routing.agentic_routing.session_affinity import (
+    SessionAffinitySettings,
+)
 
 # Re-exported for backward compatibility — ``RoutingTarget`` is now a shared
 # routing concept (see ``llm_router_plugins.utils.routing.target``).
-__all__ = ["RoutingTarget", "AgenticRoutingConfig", "AgentMode"]
+__all__ = [
+    "RoutingTarget",
+    "AgenticRoutingConfig",
+    "AgentMode",
+    "RoutingRule",
+    "SessionAffinitySettings",
+]
+
+
+def _session_affinity_from_settings(
+    settings: Dict[str, Any],
+) -> SessionAffinitySettings:
+    """
+    Build :class:`SessionAffinitySettings` from the raw ``settings`` mapping.
+
+    Parameters
+    ----------
+    settings : Dict[str, Any]
+        The raw ``settings`` object of the JSON config.
+
+    Returns
+    -------
+    SessionAffinitySettings
+        The parsed settings; defaults are used when the key is absent.
+
+    Raises
+    ------
+    ValueError
+        If ``settings.session_affinity`` is present but is not an object.
+    """
+    raw = settings.get("session_affinity")
+    if raw is None:
+        return SessionAffinitySettings()
+    if not isinstance(raw, dict):
+        raise ValueError(
+            "AgenticRouting: 'settings.session_affinity' must be an object, "
+            f"got {type(raw).__name__} — check 'settings.session_affinity' in "
+            "the JSON config"
+        )
+    return SessionAffinitySettings(
+        enabled=bool(raw.get("enabled", True)),
+        ttl_seconds=int(raw.get("ttl_seconds", SessionAffinitySettings.ttl_seconds)),
+        max_entries=int(raw.get("max_entries", SessionAffinitySettings.max_entries)),
+    )
 
 
 @dataclass
@@ -87,6 +154,17 @@ class AgenticRoutingConfig(RoutingConfigBase):
         The HuggingFace model identifier used to compute embeddings.
     agent_modes : Tuple[AgentMode, ...]
         Immutable sequence of :class:`AgentMode` dataclasses, one per work mode.
+    rules : Tuple[RoutingRule, ...]
+        Declarative deterministic rules, already sorted by descending priority.
+    rules_enabled : bool
+        Whether the declarative rule layer participates in the cascade.
+    capabilities_enabled : bool
+        Whether declared mode capabilities gate the selected mode.
+    escalation_enabled : bool
+        Whether a mode lacking a required capability may be escalated to a
+        more capable mode.
+    session_affinity : SessionAffinitySettings
+        Settings of the session-affinity (sticky session) layer.
     """
 
     # RoutingConfigBase hooks (ClassVar — not dataclass fields)
@@ -108,6 +186,13 @@ class AgenticRoutingConfig(RoutingConfigBase):
     chunk_overlap: int
     embedding_model: str
     agent_modes: Tuple["AgentMode", ...]
+    rules: Tuple[RoutingRule, ...] = ()
+    rules_enabled: bool = True
+    capabilities_enabled: bool = True
+    escalation_enabled: bool = True
+    session_affinity: SessionAffinitySettings = field(
+        default_factory=SessionAffinitySettings
+    )
 
     @property
     def mode_names(self) -> List[str]:
@@ -189,6 +274,7 @@ class AgenticRoutingConfig(RoutingConfigBase):
                 phrases=list(m.get("phrases", [])),
                 patterns=list(m.get("patterns", [])),
                 weights=m.get("weights", {}) or {},
+                capabilities=m.get("capabilities", {}) or {},
             )
             for m in raw["agent_modes"]
         )
@@ -210,6 +296,11 @@ class AgenticRoutingConfig(RoutingConfigBase):
             chunk_overlap=chunk_overlap,
             embedding_model=raw.get("embedding_model", ""),
             agent_modes=agent_modes,
+            rules=parse_rules(raw.get("rules", []), [m.name for m in agent_modes]),
+            rules_enabled=bool(settings.get("rules_enabled", True)),
+            capabilities_enabled=bool(settings.get("capabilities_enabled", True)),
+            escalation_enabled=bool(settings.get("escalation_enabled", True)),
+            session_affinity=_session_affinity_from_settings(settings),
         )
 
     def _override_from_env(self, logger: Optional[Any] = None) -> None:
@@ -228,6 +319,10 @@ class AgenticRoutingConfig(RoutingConfigBase):
         - ``TOP_K`` / ``CHUNK_SIZE`` / ``CHUNK_OVERLAP`` — chunking/retrieval params
         - ``PERSIST_DIR`` — directory for FAISS index persistence
         - ``FALLBACK_MODE`` — override the fallback mode name
+        - ``RULES_ENABLED`` / ``CAPABILITIES_ENABLED`` / ``ESCALATION_ENABLED``
+          — enable/disable the deterministic cascade layers
+        - ``SESSION_AFFINITY_ENABLED`` — enable/disable session affinity
+        - ``SESSION_TTL_SECONDS`` / ``SESSION_MAX_ENTRIES`` — affinity cache bounds
         - ``MODE_<name>_KEYWORDS`` — pipe-separated keyword list for one mode
 
         Unknown mode names are logged as warnings and otherwise ignored.
@@ -300,6 +395,15 @@ class AgenticRoutingConfig(RoutingConfigBase):
                 self.agent_modes = tuple(
                     m for m in self.agent_modes if m.name in selected
                 )
+                kept_modes = set(selected)
+                dropped = [r.id for r in self.rules if r.mode not in kept_modes]
+                if dropped:
+                    self.rules = tuple(r for r in self.rules if r.mode in kept_modes)
+                    if self._logger:
+                        self._logger.warning(
+                            "Dropped rules referencing removed modes: %s",
+                            ", ".join(dropped),
+                        )
                 if self._logger:
                     self._logger.info(
                         "Overriding agent modes: %s",
@@ -338,6 +442,55 @@ class AgenticRoutingConfig(RoutingConfigBase):
                 self._logger.info(
                     "Overriding fallback mode: %s",
                     self.fallback_mode,
+                )
+
+        for flag_suffix, attr_name in (
+            ("RULES_ENABLED", "rules_enabled"),
+            ("CAPABILITIES_ENABLED", "capabilities_enabled"),
+            ("ESCALATION_ENABLED", "escalation_enabled"),
+        ):
+            flag = env_bool(AGENTIC_ROUTING_PREFIX, flag_suffix, logger)
+            if flag is not None:
+                setattr(self, attr_name, flag)
+                if self._logger:
+                    self._logger.info(
+                        "Overriding %s: %s",
+                        flag_suffix.lower(),
+                        flag,
+                    )
+
+        affinity_enabled = env_bool(
+            AGENTIC_ROUTING_PREFIX, "SESSION_AFFINITY_ENABLED", logger
+        )
+        if affinity_enabled is not None:
+            self.session_affinity = replace(
+                self.session_affinity, enabled=affinity_enabled
+            )
+
+        affinity_values: Dict[str, int] = {}
+        for env_suffix, field_name in (
+            ("SESSION_TTL_SECONDS", "ttl_seconds"),
+            ("SESSION_MAX_ENTRIES", "max_entries"),
+        ):
+            value = env_int(AGENTIC_ROUTING_PREFIX, env_suffix)
+            if value is None:
+                continue
+            if value < 1:
+                if self._logger:
+                    self._logger.warning(
+                        "Ignoring %s%s: value must be >= 1, got %s",
+                        AGENTIC_ROUTING_PREFIX,
+                        env_suffix,
+                        value,
+                    )
+                continue
+            affinity_values[field_name] = value
+        if affinity_values:
+            self.session_affinity = replace(self.session_affinity, **affinity_values)
+            if self._logger:
+                self._logger.info(
+                    "Overriding session affinity: %s",
+                    affinity_values,
                 )
 
         keywords_prefix = f"{AGENTIC_ROUTING_PREFIX}MODE_"
@@ -436,6 +589,27 @@ class AgenticRoutingConfig(RoutingConfigBase):
         if self.top_k < 1:
             raise ValueError(f"AgenticRouting: top_k must be >= 1, got {self.top_k}")
 
+        known = self.mode_by_name
+        dangling = sorted(r.id for r in self.rules if r.mode not in known)
+        if dangling:
+            raise ValueError(
+                f"AgenticRouting: rules {dangling} reference unknown agent modes — "
+                "check 'rules[].then.mode' in the JSON config against the "
+                f"defined modes {sorted(known)}"
+            )
+
+        if self.session_affinity.ttl_seconds < 1:
+            raise ValueError(
+                "AgenticRouting: settings.session_affinity.ttl_seconds must be "
+                f">= 1, got {self.session_affinity.ttl_seconds}"
+            )
+
+        if self.session_affinity.max_entries < 1:
+            raise ValueError(
+                "AgenticRouting: settings.session_affinity.max_entries must be "
+                f">= 1, got {self.session_affinity.max_entries}"
+            )
+
 
 @dataclass(frozen=True)
 class AgentMode(RoutingTarget):
@@ -456,7 +630,7 @@ class AgentMode(RoutingTarget):
     examples : Tuple[str, ...]
         Example prompts representative of this mode, used for embedding.
     keywords : List[str]
-        Keywords for the heuristic fallback scorer (substring matches).
+        Keywords for the heuristic scorer (substring matches).
     phrases : List[str]
         Multi-word expressions for the heuristic scorer, optionally suffixed
         with ``":weight"`` (default weight 2.0).
@@ -464,9 +638,14 @@ class AgentMode(RoutingTarget):
         Regex patterns for the heuristic scorer (each match adds 3.0).
     weights : Dict[str, Any]
         Per-keyword weights overriding the default keyword weight of 1.
+    capabilities : Dict[str, Any]
+        Declared model capabilities of this mode, e.g. ``tool_calling``,
+        ``reasoning``, ``vision``, ``structured_output``, ``parallel_tools``
+        (booleans) and ``context_window`` (int tokens).
     """
 
-    keywords: List[str]
-    phrases: List[str]
-    patterns: List[str]
-    weights: Dict[str, Any]
+    keywords: List[str] = field(default_factory=list)
+    phrases: List[str] = field(default_factory=list)
+    patterns: List[str] = field(default_factory=list)
+    weights: Dict[str, Any] = field(default_factory=dict)
+    capabilities: Dict[str, Any] = field(default_factory=dict)

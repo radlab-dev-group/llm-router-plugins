@@ -10,17 +10,30 @@ The plugin activates only when ``payload["model"]`` is a string whose trimmed
 value is listed in ``settings.trigger`` (by default ``["agentic"]``).
 
 Mode detection runs as a cascade — the first layer that produces an answer
-wins:
+wins.  Every **deterministic** layer is tried before any embedding lookup, so
+an identical request is answered identically, offline and for free:
 
-1. **Explicit** — a mode declared in the payload itself, looked up in
-   ``agent_mode``, ``mode``, ``agent.mode`` and ``metadata.agent_mode``.
-2. **Semantic** — a BiEncoder + FAISS lookup reusing
+1. **Explicit** (``"explicit"``) — a mode declared in the payload itself,
+   looked up in ``agent_mode``, ``mode``, ``agent.mode`` and
+   ``metadata.agent_mode``.
+2. **Rules** (``"rules"``) — declarative ``rules`` matched against the
+   normalized request signals (agent, task, required capabilities, context
+   size).  Highest ``priority`` wins.
+3. **Session affinity** (``"affinity"``) — the mode already chosen earlier in
+   the same conversation, taken from a TTL/LRU cache keyed by ``session_id``.
+4. **Heuristic** (``"heuristic"``) — weighted keyword, phrase and regex
+   scoring over the mode definitions.
+5. **Semantic** (``"semantic"``) — a BiEncoder + FAISS lookup reusing
    :class:`EmbeddingRouter`; every agent mode acts as a routing target built
    from its description and examples.  A match is accepted when the cosine
    similarity is greater than or equal to ``settings.semantic.threshold``.
-3. **Heuristic** — weighted keyword, phrase and regex scoring over the mode
-   definitions.
-4. **Fallback** — the mode named in ``settings.fallback_mode``.
+6. **Fallback** (``"fallback"``, or ``"empty_text"`` when no text could be
+   extracted) — the mode named in ``settings.fallback_mode``.
+
+After a layer has selected a mode the capability gate checks it against the
+capabilities the request implies (tool calling, parallel tool calls,
+reasoning, vision, structured output, context window) and escalates to the
+most capable alternative when the selected model cannot serve the request.
 
 The plugin only replaces ``payload["model"]`` and adds routing metadata; it
 never touches temperature, token limits, prompts or tools.
@@ -38,7 +51,20 @@ and can be overridden by environment variables:
     LLM_ROUTER_ROUTING_AGENTIC_MODELS
         - per-mode model mapping, e.g. ``plan=model_a|code=model_b``
     LLM_ROUTER_ROUTING_AGENTIC_MODES
-        - pipe-separated whitelist of mode names
+        - pipe-separated whitelist of mode names (rules pointing at removed
+          modes are dropped)
+    LLM_ROUTER_ROUTING_AGENTIC_RULES_ENABLED
+        - master switch for the declarative rules layer
+    LLM_ROUTER_ROUTING_AGENTIC_CAPABILITIES_ENABLED
+        - master switch for the capability gate
+    LLM_ROUTER_ROUTING_AGENTIC_ESCALATION_ENABLED
+        - master switch for escalating to a capable mode
+    LLM_ROUTER_ROUTING_AGENTIC_SESSION_AFFINITY_ENABLED
+        - master switch for session affinity
+    LLM_ROUTER_ROUTING_AGENTIC_SESSION_TTL_SECONDS
+        - lifetime of a cached session decision
+    LLM_ROUTER_ROUTING_AGENTIC_SESSION_MAX_ENTRIES
+        - maximum number of cached sessions
     LLM_ROUTER_ROUTING_AGENTIC_SEMANTIC_ENABLED
         - ``1/0``, ``true/false``, ``yes/no``, ``on/off``
     LLM_ROUTER_ROUTING_AGENTIC_SIMILARITY_THRESHOLD
@@ -64,6 +90,10 @@ Example JSON configuration::
         "trigger": ["agentic"],
         "fallback_mode": "fallback",
         "vector_store_path": "",
+        "rules_enabled": true,
+        "capabilities_enabled": true,
+        "escalation_enabled": true,
+        "session_affinity": { "enabled": true, "ttl_seconds": 900 },
         "semantic": {
           "enabled": true,
           "threshold": 0.55,
@@ -72,6 +102,12 @@ Example JSON configuration::
           "chunk_overlap": 64
         }
       },
+      "rules": [
+        { "id": "task-coding", "priority": 100,
+          "when": { "task": ["coding", "implement"] }, "then": { "mode": "code" } },
+        { "id": "needs-tools", "priority": 80,
+          "when": { "requires_tools": true }, "mode": "code" }
+      ],
       "agent_modes": [
         {
           "name": "plan",
@@ -81,15 +117,16 @@ Example JSON configuration::
           "keywords": ["planning", "roadmap", ...],
           "phrases": ["zaplanuj pracę:5", ...],
           "patterns": ["\\\\bplan\\\\b", ...],
-          "weights": { "planning": 3, "roadmap": 3, ... }
+          "weights": { "planning": 3, "roadmap": 3, ... },
+          "capabilities": { "tool_calling": true, "context_window": 131072 }
         }
       ]
     }
 """
 
 import logging
-import re
 
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
 
 from llm_router_plugins.plugin_interface import PluginInterface
@@ -100,10 +137,29 @@ from llm_router_plugins.utils.routing.common import (
     resolve_persist_dir,
     should_route,
 )
+from llm_router_plugins.utils.routing.agentic_routing.capabilities import (
+    escalate,
+    missing_capabilities,
+    requirements_from_signals,
+    satisfies,
+)
 from llm_router_plugins.utils.routing.agentic_routing.config import (
     AgentMode,
     AgenticRoutingConfig,
 )
+from llm_router_plugins.utils.routing.agentic_routing.heuristics import (
+    detect_heuristic,
+    score_to_similarity,
+)
+from llm_router_plugins.utils.routing.agentic_routing.rules import (
+    describe_rule,
+    match_rule,
+)
+from llm_router_plugins.utils.routing.agentic_routing.semantic import SemanticLayer
+from llm_router_plugins.utils.routing.agentic_routing.session_affinity import (
+    SessionAffinityCache,
+)
+from llm_router_plugins.utils.routing.agentic_routing.signals import RequestSignals
 from llm_router_plugins.utils.routing.constants import AGENTIC_ROUTING_PREFIX
 
 _MISSING_DEPENDENCIES_MESSAGE = (
@@ -111,6 +167,44 @@ _MISSING_DEPENDENCIES_MESSAGE = (
     "/ FAISS dependencies are not installed — install them or set "
     f"semantic.enabled=false / {AGENTIC_ROUTING_PREFIX}SEMANTIC_ENABLED=false"
 )
+
+#: Sources whose decision is not worth remembering for the whole session.
+_NON_CACHABLE_SOURCES = ("fallback", "empty_text")
+
+
+@dataclass(frozen=True)
+class _RoutingDecision:
+    """
+    Result of one cascade pass.
+
+    Parameters
+    ----------
+    mode : AgentMode
+        The selected work mode.
+    source : str
+        Name of the layer that produced the decision.
+    similarity : float
+        Confidence of the decision (``1.0`` for the deterministic layers,
+        ``0.0`` for the fallback).
+    rule_id : str
+        Identifier of the matching rule; empty unless ``source == "rules"``.
+    escalated_from : str
+        Name of the mode replaced by the capability gate; empty when the
+        decision needed no escalation.
+    session : dict, optional
+        Session affinity information added for requests carrying a session id.
+
+    Raises
+    ------
+    None
+    """
+
+    mode: AgentMode
+    source: str
+    similarity: float
+    rule_id: str = ""
+    escalated_from: str = ""
+    session: Optional[Dict[str, Any]] = None
 
 
 class AgenticRoutingPlugin(PluginInterface):
@@ -120,6 +214,11 @@ class AgenticRoutingPlugin(PluginInterface):
     When ``payload["model"]`` matches a configured trigger (default
     ``"agentic"``) the plugin detects the current agent work mode and replaces
     the model with the one configured for that mode.
+
+    The cascade is ordered deterministic-first (explicit mode, declarative
+    rules, session affinity, keyword scoring) and semantic-last, so the
+    expensive embedding/vector-store lookup runs only when nothing cheaper
+    could decide.
 
     Attributes
     ----------
@@ -176,6 +275,59 @@ class AgenticRoutingPlugin(PluginInterface):
         if self._router is None and self._config.semantic_enabled:
             self._router = self._build_router()
 
+        self._semantic = SemanticLayer(
+            router=self._router,
+            threshold=self._config.similarity_threshold,
+            mode_by_name=self._config.mode_by_name,
+            logger=self._logger,
+        )
+        self._session_cache = SessionAffinityCache(
+            ttl_seconds=self._config.session_affinity.ttl_seconds,
+            max_entries=self._config.session_affinity.max_entries,
+            logger=self._logger,
+        )
+
+    @property
+    def config(self) -> AgenticRoutingConfig:
+        """
+        Return the active plugin configuration.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        AgenticRoutingConfig
+            The configuration used by the cascade.
+
+        Raises
+        ------
+        None
+        """
+        return self._config
+
+    def reset_sessions(self) -> None:
+        """
+        Drop every cached session decision.
+
+        Useful after a configuration change, so that requests of ongoing
+        conversations are re-routed through the cascade.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        None
+        """
+        self._session_cache.reset()
+
     def _build_router(self) -> Any:
         """
         Build and initialize the semantic (BiEncoder + FAISS) router.
@@ -213,8 +365,9 @@ class AgenticRoutingPlugin(PluginInterface):
         """
         Process *payload*, selecting the model for the detected agent mode.
 
-        Text is extracted from the payload, the work mode is resolved via the
-        explicit → semantic → heuristic → fallback cascade, and the payload is
+        Text is extracted from the payload (surrounding whitespace is removed,
+        so a whitespace-only request counts as having no text), the work mode
+        is resolved via the deterministic-first cascade and the payload is
         annotated with the resulting model and routing metadata.
 
         Parameters
@@ -233,9 +386,15 @@ class AgenticRoutingPlugin(PluginInterface):
 
             - ``"plugin"`` (str): ``"agentic_routing"``
             - ``"agent_mode"`` (str): name of the detected mode
-            - ``"source"`` (str): ``"explicit"``, ``"semantic"``,
-              ``"heuristic"``, ``"fallback"`` or ``"empty_text"``
+            - ``"source"`` (str): ``"explicit"``, ``"rules"``, ``"affinity"``,
+              ``"heuristic"``, ``"semantic"``, ``"fallback"`` or
+              ``"empty_text"``
             - ``"similarity"`` (float): confidence score of the decision
+            - ``"rule_id"`` (str): present only for ``source == "rules"``
+            - ``"escalated"`` (bool) and ``"escalated_from"`` (str): present
+              only when the capability gate replaced the selected mode
+            - ``"session"`` (dict): present only when the request carries a
+              session id and session affinity is enabled
 
         Raises
         ------
@@ -244,79 +403,422 @@ class AgenticRoutingPlugin(PluginInterface):
         if not should_route(payload, self._config.trigger):
             return payload
 
-        text = extract_user_text(payload)
-        mode, source, similarity = self._resolve_mode(text, payload)
-        return self._annotate(payload, mode, source, similarity, text)
+        text = extract_user_text(payload).strip()
+        decision = self._resolve_mode(text, payload)
+        return self._annotate(payload, decision, text)
 
-    def _resolve_mode(
-        self, text: str, payload: Dict[str, Any]
-    ) -> Tuple[AgentMode, str, float]:
+    def _resolve_mode(self, text: str, payload: Dict[str, Any]) -> _RoutingDecision:
         """
-        Resolve the agent work mode for *text* using the detection cascade.
+        Resolve the agent work mode using the deterministic-first cascade.
 
         Parameters
         ----------
         text : str
             The extracted user text used for detection.  When it is empty the
-            semantic and heuristic layers are skipped, unless the payload
-            declares an explicit mode.
+            inference layers are skipped, unless an earlier layer answers.
         payload : dict
-            The payload, consulted for an explicitly declared mode.
+            The payload, source of the request signals.
 
         Returns
         -------
-        Tuple[AgentMode, str, float]
-            The resolved mode, the name of the layer that resolved it, and the
-            associated confidence score.
+        _RoutingDecision
+            The resolved mode together with the layer, confidence and optional
+            rule/session information.
 
         Raises
         ------
         None
         """
-        explicit = self._get_explicit_mode_name(payload)
-        if explicit:
-            mode = self._config.mode_by_name.get(explicit)
-            if mode is not None:
-                return mode, "explicit", 1.0
-            if self._logger:
-                self._logger.warning(
-                    "AgenticRouting: unknown agent_mode '%s', "
-                    "continuing with detection cascade",
-                    explicit,
-                )
+        signals = RequestSignals.from_payload(payload, text)
+        requirements = (
+            requirements_from_signals(signals)
+            if self._config.capabilities_enabled
+            else {}
+        )
+
+        for resolve in (
+            lambda: self._resolve_explicit(payload, requirements),
+            lambda: self._resolve_rules(signals, text, requirements),
+            lambda: self._resolve_affinity(signals, requirements),
+            lambda: self._resolve_inference(text, requirements),
+        ):
+            decision = resolve()
+            if decision is not None:
+                return self._attach_session(decision, signals)
 
         if not text:
             if self._logger:
                 self._logger.warning(
                     "AgenticRouting: no text content found, using fallback mode"
                 )
-            return (
-                self._config.mode_by_name[self._config.fallback_mode],
-                "empty_text",
-                0.0,
-            )
+            decision = self._fallback_decision("empty_text")
+        else:
+            decision = self._fallback_decision("fallback")
 
-        if self._config.semantic_enabled and self._router is not None:
-            result = self._router.route(text)
-            similarity = float(result["similarity"])
-            target = str(result.get("target_name", ""))
-            mode = self._config.mode_by_name.get(target)
-            if mode is not None and similarity >= self._config.similarity_threshold:
-                return mode, "semantic", similarity
+        return self._attach_session(decision, signals)
+
+    def _fallback_decision(self, source: str) -> _RoutingDecision:
+        """
+        Build the decision pointing at the configured fallback mode.
+
+        Parameters
+        ----------
+        source : str
+            ``"fallback"`` for unmatched text, ``"empty_text"`` when the
+            request carried no text at all.
+
+        Returns
+        -------
+        _RoutingDecision
+            A zero-confidence decision for the fallback mode.
+
+        Raises
+        ------
+        None
+        """
+        mode = self._config.mode_by_name[self._config.fallback_mode]
+        return _RoutingDecision(mode=mode, source=source, similarity=0.0)
+
+    def _resolve_explicit(
+        self, payload: Dict[str, Any], requirements: Dict[str, Any]
+    ) -> Optional[_RoutingDecision]:
+        """
+        Resolve a mode explicitly declared in *payload*.
+
+        An explicit declaration is the intent of the caller: when the named
+        mode lacks a capability the gate only warns, it never overrides the
+        choice.
+
+        Parameters
+        ----------
+        payload : dict
+            The payload to inspect.
+        requirements : dict
+            Capabilities implied by the request, used for warnings only.
+
+        Returns
+        -------
+        Optional[_RoutingDecision]
+            The explicit decision, or ``None`` when no known mode is declared.
+
+        Raises
+        ------
+        None
+        """
+        name = self._get_explicit_mode_name(payload)
+        if not name:
+            return None
+
+        mode = self._config.mode_by_name.get(name)
+        if mode is None:
+            if self._logger:
+                self._logger.warning(
+                    "AgenticRouting: unknown agent_mode '%s', "
+                    "continuing with detection cascade",
+                    name,
+                )
+            return None
+
+        if requirements and self._logger:
+            missing = missing_capabilities(mode.capabilities, requirements)
+            if missing:
+                self._logger.warning(
+                    "AgenticRouting: explicitly requested mode '%s' does not "
+                    "satisfy %s — keeping the explicit choice",
+                    mode.name,
+                    ", ".join(missing),
+                )
+
+        return _RoutingDecision(mode=mode, source="explicit", similarity=1.0)
+
+    def _resolve_rules(
+        self,
+        signals: RequestSignals,
+        text: str,
+        requirements: Dict[str, Any],
+    ) -> Optional[_RoutingDecision]:
+        """
+        Resolve the mode through the declarative rules layer.
+
+        Parameters
+        ----------
+        signals : RequestSignals
+            Normalized request signals.
+        text : str
+            The extracted user text, used by text-based rule conditions.
+        requirements : dict
+            Capabilities implied by the request.
+
+        Returns
+        -------
+        Optional[_RoutingDecision]
+            The decision of the first matching rule, or ``None`` when rules
+            are disabled or none applies.
+
+        Raises
+        ------
+        None
+        """
+        if not self._config.rules_enabled or not self._config.rules:
+            return None
+
+        rule = match_rule(self._config.rules, signals, text)
+        if rule is None:
+            return None
+
+        mode = self._config.mode_by_name.get(rule.mode)
+        if mode is None:
+            if self._logger:
+                self._logger.warning(
+                    "AgenticRouting: rule '%s' targets unknown mode '%s', "
+                    "ignoring it",
+                    rule.id,
+                    rule.mode,
+                )
+            return None
+
+        if self._logger:
+            self._logger.info(
+                "AgenticRouting: rule %s matched the request signals",
+                describe_rule(rule),
+            )
+        return self._enforce_capabilities(
+            mode, "rules", 1.0, requirements, rule_id=rule.id
+        )
+
+    def _resolve_affinity(
+        self, signals: RequestSignals, requirements: Dict[str, Any]
+    ) -> Optional[_RoutingDecision]:
+        """
+        Reuse the mode already chosen for the current session.
+
+        A cached entry whose mode disappeared from the configuration, or that
+        can no longer serve the request, is dropped and the cascade continues.
+
+        Parameters
+        ----------
+        signals : RequestSignals
+            Normalized request signals; ``session_id`` selects the entry.
+        requirements : dict
+            Capabilities implied by the request.
+
+        Returns
+        -------
+        Optional[_RoutingDecision]
+            The cached decision, or ``None`` on a miss.
+
+        Raises
+        ------
+        None
+        """
+        if not self._config.session_affinity.enabled or not signals.session_id:
+            return None
+
+        cached = self._session_cache.get(signals.session_id)
+        if cached is None:
+            return None
+
+        mode = self._config.mode_by_name.get(cached.mode_name)
+        if mode is None:
             if self._logger:
                 self._logger.info(
-                    "AgenticRouting: semantic match '%s' similarity=%.4f is "
-                    "below threshold %.4f, falling back to heuristics",
-                    target or "unknown",
-                    similarity,
-                    self._config.similarity_threshold,
+                    "AgenticRouting: cached session mode '%s' is no longer "
+                    "configured, re-routing session '%s'",
+                    cached.mode_name,
+                    signals.session_id,
                 )
+            self._session_cache.invalidate(signals.session_id)
+            return None
+
+        if not satisfies(mode.capabilities, requirements):
+            if self._logger:
+                self._logger.warning(
+                    "AgenticRouting: cached session mode '%s' cannot serve the "
+                    "request anymore, re-routing session '%s'",
+                    mode.name,
+                    signals.session_id,
+                )
+            self._session_cache.invalidate(signals.session_id)
+            return None
+
+        return _RoutingDecision(mode=mode, source="affinity", similarity=1.0)
+
+    def _resolve_inference(
+        self, text: str, requirements: Dict[str, Any]
+    ) -> Optional[_RoutingDecision]:
+        """
+        Resolve the mode from the text: heuristic scoring, then semantics.
+
+        Parameters
+        ----------
+        text : str
+            The extracted user text.
+        requirements : dict
+            Capabilities implied by the request.
+
+        Returns
+        -------
+        Optional[_RoutingDecision]
+            The inferred decision, or ``None`` when neither layer matched.
+
+        Raises
+        ------
+        None
+        """
+        if not text:
+            return None
 
         mode, score = self._detect_heuristic(text)
         if mode is not None and score > 0:
-            return mode, "heuristic", score / (score + 1.0)
+            return self._enforce_capabilities(
+                mode,
+                "heuristic",
+                score_to_similarity(score),
+                requirements,
+            )
 
-        return self._config.mode_by_name[self._config.fallback_mode], "fallback", 0.0
+        return self._resolve_semantic(text, requirements)
+
+    def _resolve_semantic(
+        self, text: str, requirements: Dict[str, Any]
+    ) -> Optional[_RoutingDecision]:
+        """
+        Resolve the mode through the embedding / vector-store layer.
+
+        Parameters
+        ----------
+        text : str
+            The extracted user text.
+        requirements : dict
+            Capabilities implied by the request.
+
+        Returns
+        -------
+        Optional[_RoutingDecision]
+            The semantic decision, or ``None`` when the layer is disabled,
+            unavailable, or below the configured threshold.
+
+        Raises
+        ------
+        None
+        """
+        if not self._config.semantic_enabled or not self._semantic.available:
+            return None
+
+        mode, similarity = self._semantic.resolve(text)
+        if mode is None:
+            return None
+
+        return self._enforce_capabilities(mode, "semantic", similarity, requirements)
+
+    def _enforce_capabilities(
+        self,
+        mode: AgentMode,
+        source: str,
+        similarity: float,
+        requirements: Dict[str, Any],
+        rule_id: str = "",
+    ) -> _RoutingDecision:
+        """
+        Guard *mode* against the capabilities the request demands.
+
+        When the selected model cannot serve the request the decision is
+        escalated to the most capable alternative — the candidate with the
+        largest declared ``context_window``.  Escalation keeps the layer
+        and the confidence of the original decision and only records which
+        mode was replaced.
+
+        Parameters
+        ----------
+        mode : AgentMode
+            The mode selected by a cascade layer.
+        source : str
+            Name of that layer.
+        similarity : float
+            Confidence of the original decision.
+        requirements : dict
+            Capabilities implied by the request; empty means "anything fits".
+        rule_id : str, optional
+            Identifier of the matching rule, passed through to the decision.
+
+        Returns
+        -------
+        _RoutingDecision
+            The original decision, or the escalated one.
+
+        Raises
+        ------
+        None
+        """
+        base = _RoutingDecision(
+            mode=mode,
+            source=source,
+            similarity=similarity,
+            rule_id=rule_id,
+        )
+        if not requirements or not self._config.escalation_enabled:
+            return base
+
+        escalation = escalate(
+            mode,
+            self._config.agent_modes,
+            requirements,
+            fallback_mode=self._config.fallback_mode,
+            logger=self._logger,
+        )
+        if not escalation.changed:
+            return base
+
+        return replace(
+            base,
+            mode=escalation.mode,
+            escalated_from=mode.name,
+        )
+
+    def _attach_session(
+        self, decision: _RoutingDecision, signals: RequestSignals
+    ) -> _RoutingDecision:
+        """
+        Record *decision* in the session cache and annotate it.
+
+        A hit refreshes the entry, a miss stores the decision so that the rest
+        of the conversation keeps the same model.  Fallback decisions are not
+        remembered: they carry no information about the session and must not
+        pin a bad mode to it.
+
+        Parameters
+        ----------
+        decision : _RoutingDecision
+            The decision to remember.
+        signals : RequestSignals
+            Normalized request signals; ``session_id`` selects the entry.
+
+        Returns
+        -------
+        _RoutingDecision
+            The same decision, with the ``session`` field filled in when
+            session affinity is active.
+
+        Raises
+        ------
+        None
+        """
+        if not self._config.session_affinity.enabled or not signals.session_id:
+            return decision
+
+        reused = decision.source == "affinity"
+        if decision.source not in _NON_CACHABLE_SOURCES:
+            self._session_cache.set(
+                signals.session_id, decision.mode.name, decision.mode.model_name
+            )
+
+        session = {
+            "session_id": signals.session_id,
+            "mode": decision.mode.name,
+            "model": decision.mode.model_name,
+            "reused": reused,
+        }
+        return replace(decision, session=session)
 
     def _get_explicit_mode_name(self, payload: Dict[str, Any]) -> str:
         """
@@ -386,47 +888,10 @@ class AgenticRoutingPlugin(PluginInterface):
         ------
         None
         """
-        text_lower = text.lower()
-        best_mode: Optional[AgentMode] = None
-        best_score = 0.0
-
-        for mode in self._config.agent_modes:
-            score = 0.0
-
-            for kw in mode.keywords:
-                w = mode.weights.get(kw, 1)
-                if kw in text_lower:
-                    score += w
-
-            for phrase in mode.phrases:
-                if isinstance(phrase, str) and ":" in phrase:
-                    parts = phrase.rsplit(":", 1)
-                    p_text, w = parts[0].strip().lower(), float(parts[1].strip())
-                else:
-                    p_text, w = phrase.lower(), 2.0
-                if p_text in text_lower:
-                    score += w
-
-            for pat in mode.patterns:
-                try:
-                    if re.search(pat, text_lower):
-                        score += 3.0
-                except re.error:
-                    pass
-
-            if score > best_score:
-                best_score = score
-                best_mode = mode
-
-        return best_mode, best_score
+        return detect_heuristic(text, self._config.agent_modes)
 
     def _annotate(
-        self,
-        payload: Dict[str, Any],
-        mode: AgentMode,
-        source: str,
-        similarity: float,
-        text: str,
+        self, payload: Dict[str, Any], decision: _RoutingDecision, text: str
     ) -> Dict[str, Any]:
         """
         Write the routing decision into *payload*.
@@ -435,12 +900,8 @@ class AgenticRoutingPlugin(PluginInterface):
         ----------
         payload : dict
             The payload to annotate.
-        mode : AgentMode
-            The resolved agent work mode.
-        source : str
-            Name of the cascade layer that resolved the mode.
-        similarity : float
-            Confidence score of the decision.
+        decision : _RoutingDecision
+            The resolved decision.
         text : str
             The extracted text, used for logging only.
 
@@ -454,14 +915,26 @@ class AgenticRoutingPlugin(PluginInterface):
         ------
         None
         """
+        mode = decision.mode
+        extras: Dict[str, Any] = {
+            "agent_mode": mode.name,
+            "source": decision.source,
+        }
+        if decision.rule_id:
+            extras["rule_id"] = decision.rule_id
+        if decision.escalated_from:
+            extras["escalated"] = True
+            extras["escalated_from"] = decision.escalated_from
+        if decision.session is not None:
+            extras["session"] = decision.session
+
         payload["agent_mode"] = mode.name
         annotate_routing(
             payload,
             self.name,
             mode.model_name,
-            similarity,
-            agent_mode=mode.name,
-            source=source,
+            decision.similarity,
+            **extras,
         )
 
         if self._logger:
@@ -470,8 +943,8 @@ class AgenticRoutingPlugin(PluginInterface):
                 "similarity=%.4f -> model=%s",
                 text[:80],
                 mode.name,
-                source,
-                float(similarity),
+                decision.source,
+                float(decision.similarity),
                 mode.model_name,
             )
 
