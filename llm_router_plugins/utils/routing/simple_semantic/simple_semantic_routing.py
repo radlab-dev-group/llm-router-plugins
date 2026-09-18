@@ -272,7 +272,7 @@ class SimpleSemanticRoutingPlugin(PluginInterface):
                 f"{SEMANTIC_ROUTING_PREFIX}DEFAULT_MODEL environment variable"
             )
 
-    def apply(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def apply(self, payload: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
         """
         Process *payload*.  If ``payload["model"] == "auto"`` route to the
         best-matching model based on intent + complexity.

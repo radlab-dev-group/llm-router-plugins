@@ -6,7 +6,7 @@ from llm_router_plugins.plugin_interface import HttpPluginInterface
 
 class HttpMaskersBase(HttpPluginInterface, ABC):
 
-    def apply(self, payload: Any) -> Tuple[Any, Dict]:
+    def apply(self, payload: Any, **kwargs: Any) -> Tuple[Any, Dict]:
         """
         Send ``payload`` to the guardrail service, parse the JSON response,
         and expose the most relevant fields.
