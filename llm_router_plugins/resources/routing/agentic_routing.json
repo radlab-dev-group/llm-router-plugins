@@ -5,6 +5,14 @@
     "trigger": ["agentic"],
     "fallback_mode": "fallback",
     "vector_store_path": "",
+    "rules_enabled": true,
+    "capabilities_enabled": true,
+    "escalation_enabled": true,
+    "session_affinity": {
+      "enabled": true,
+      "ttl_seconds": 900,
+      "max_entries": 1024
+    },
     "semantic": {
       "enabled": true,
       "threshold": 0.55,
@@ -13,6 +21,62 @@
       "chunk_overlap": 64
     }
   },
+  "rules": [
+    {
+      "id": "task-coding",
+      "priority": 100,
+      "when": { "task": ["coding", "code", "implement", "implementation", "refactor"] },
+      "then": { "mode": "code" }
+    },
+    {
+      "id": "task-planning",
+      "priority": 100,
+      "when": { "task": ["planning", "plan", "architecture", "design", "roadmap"] },
+      "then": { "mode": "plan" }
+    },
+    {
+      "id": "task-review",
+      "priority": 100,
+      "when": { "task": ["review", "code_review", "audit", "lint"] },
+      "then": { "mode": "review" }
+    },
+    {
+      "id": "task-testing",
+      "priority": 100,
+      "when": { "task": ["testing", "test", "tests", "write_tests", "qa"] },
+      "then": { "mode": "test" }
+    },
+    {
+      "id": "task-debugging",
+      "priority": 100,
+      "when": { "task": ["debugging", "debug", "fix", "diagnose", "investigate_error"] },
+      "then": { "mode": "debug" }
+    },
+    {
+      "id": "task-research",
+      "priority": 100,
+      "when": { "task": ["research", "investigate", "compare", "documentation"] },
+      "then": { "mode": "research" }
+    },
+    {
+      "id": "task-summarize",
+      "priority": 100,
+      "when": { "task": ["summarize", "summary", "summarise", "condense", "recap"] },
+      "then": { "mode": "summarize" }
+    },
+    {
+      "id": "needs-tools",
+      "priority": 80,
+      "when": { "requires_tools": true },
+      "then": { "mode": "code" }
+    },
+    {
+      "id": "needs-reasoning",
+      "priority": 70,
+      "when": { "requires_reasoning": true },
+      "then": { "mode": "plan" }
+    }
+  ],
   "agent_modes": [
     {
       "name": "plan",
@@ -55,6 +119,14 @@
         "backlog": 2,
         "prioritize": 2,
         "strategy": 2
+      },
+      "capabilities": {
+        "tool_calling": true,
+        "parallel_tool_calls": true,
+        "reasoning": true,
+        "vision": true,
+        "structured_output": true,
+        "context_window": 131072
       }
     },
     {
@@ -94,6 +166,14 @@
         "programming": 2,
         "algorithm": 2,
         "compile": 2
+      },
+      "capabilities": {
+        "tool_calling": true,
+        "parallel_tool_calls": true,
+        "reasoning": true,
+        "vision": false,
+        "structured_output": true,
+        "context_window": 131072
       }
     },
     {
@@ -134,6 +214,14 @@
         "audit": 2,
         "maintainability": 2,
         "readability": 2
+      },
+      "capabilities": {
+        "tool_calling": false,
+        "parallel_tool_calls": false,
+        "reasoning": true,
+        "vision": false,
+        "structured_output": true,
+        "context_window": 32768
       }
     },
     {
@@ -175,6 +263,14 @@
         "assertion": 2,
         "fixture": 2,
         "regression": 2
+      },
+      "capabilities": {
+        "tool_calling": false,
+        "parallel_tool_calls": false,
+        "reasoning": true,
+        "vision": false,
+        "structured_output": true,
+        "context_window": 32768
       }
     },
     {
@@ -220,6 +316,14 @@
         "exception": 2,
         "reproduce": 2,
         "bisect": 2
+      },
+      "capabilities": {
+        "tool_calling": true,
+        "parallel_tool_calls": true,
+        "reasoning": true,
+        "vision": false,
+        "structured_output": true,
+        "context_window": 131072
       }
     },
     {
@@ -262,6 +366,14 @@
         "survey": 2,
         "documentation": 2,
         "findings": 2
+      },
+      "capabilities": {
+        "tool_calling": true,
+        "parallel_tool_calls": true,
+        "reasoning": true,
+        "vision": true,
+        "structured_output": true,
+        "context_window": 131072
       }
     },
     {
@@ -299,6 +411,14 @@
         "recap": 2,
         "condense": 2,
         "paraphrase": 2
+      },
+      "capabilities": {
+        "tool_calling": true,
+        "parallel_tool_calls": true,
+        "reasoning": true,
+        "vision": true,
+        "structured_output": true,
+        "context_window": 131072
       }
     },
     {
@@ -323,6 +443,14 @@
         "various": 1,
         "casual": 1,
         "anything": 1
+      },
+      "capabilities": {
+        "tool_calling": true,
+        "parallel_tool_calls": true,
+        "reasoning": true,
+        "vision": true,
+        "structured_output": true,
+        "context_window": 131072
       }
     }
   ]
