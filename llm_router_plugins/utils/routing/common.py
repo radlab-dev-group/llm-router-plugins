@@ -20,7 +20,7 @@ import json
 import os
 import pathlib
 
-from typing import Any, Collection, Dict, Optional
+from typing import Any, ClassVar, Collection, Dict, Optional, TypeVar
 
 from llm_router_plugins.utils.routing.embedder import (
     EmbeddingRouter,
@@ -31,6 +31,11 @@ from llm_router_plugins.utils.routing.embedder import (
 # Accepted textual representations of booleans coming from env vars.
 _BOOL_TRUE_VALUES = ("1", "true", "yes", "on")
 _BOOL_FALSE_VALUES = ("0", "false", "no", "off")
+
+
+# Self-type of the config base, so that ``from_file``/``from_json`` return the
+# concrete subclass they are called on instead of ``RoutingConfigBase``.
+RoutingConfigT = TypeVar("RoutingConfigT", bound="RoutingConfigBase")
 
 
 class RoutingConfigBase:
@@ -51,8 +56,8 @@ class RoutingConfigBase:
     (none — the base class adds no fields)
     """
 
-    _ENV_PREFIX: str = ""
-    _DEFAULT_CONFIG_PATH: Optional[pathlib.Path] = None
+    _ENV_PREFIX: ClassVar[str] = ""
+    _DEFAULT_CONFIG_PATH: ClassVar[Optional[pathlib.Path]] = None
 
     @classmethod
     def _config_json_env(cls) -> str:
@@ -60,7 +65,9 @@ class RoutingConfigBase:
         return f"{cls._ENV_PREFIX}CONFIG"
 
     @classmethod
-    def from_file(cls, path: Optional[pathlib.Path] = None) -> "RoutingConfigBase":
+    def from_file(
+        cls: type[RoutingConfigT], path: Optional[pathlib.Path] = None
+    ) -> RoutingConfigT:
         """
         Load configuration from a JSON file or from the ``..._CONFIG`` env var.
 
@@ -86,8 +93,9 @@ class RoutingConfigBase:
 
         Returns
         -------
-        RoutingConfigBase
-            A config dataclass populated from the JSON source.
+        RoutingConfigT
+            An instance of the subclass ``from_file`` was called on, populated
+            from the JSON source.
 
         Raises
         ------
@@ -132,7 +140,7 @@ class RoutingConfigBase:
         return cls._from_raw(raw)
 
     @classmethod
-    def from_json(cls, raw: str) -> "RoutingConfigBase":
+    def from_json(cls: type[RoutingConfigT], raw: str) -> RoutingConfigT:
         """
         Parse configuration from a raw JSON string.
 
@@ -143,8 +151,9 @@ class RoutingConfigBase:
 
         Returns
         -------
-        RoutingConfigBase
-            A config dataclass populated from the parsed JSON.
+        RoutingConfigT
+            An instance of the subclass ``from_json`` was called on, populated
+            from the parsed JSON.
 
         Raises
         ------
@@ -164,6 +173,30 @@ class RoutingConfigBase:
             )
         parsed = json.loads(raw)
         return cls._from_raw(parsed)
+
+    @classmethod
+    def _from_raw(cls: type[RoutingConfigT], raw: Dict[str, Any]) -> RoutingConfigT:
+        """
+        Build a config instance from the decoded JSON dict — subclass hook.
+
+        Parameters
+        ----------
+        raw : Dict[str, Any]
+            The decoded JSON object holding the config.
+
+        Returns
+        -------
+        RoutingConfigT
+            A populated and validated instance of the subclass.
+
+        Raises
+        ------
+        NotImplementedError
+            If the subclass does not implement the hook.
+        """
+        raise NotImplementedError(
+            f"{cls.__name__} must implement the '_from_raw' class method"
+        )
 
     @staticmethod
     def validate_semantic_params(
