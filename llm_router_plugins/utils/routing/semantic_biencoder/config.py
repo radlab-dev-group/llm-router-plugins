@@ -69,7 +69,7 @@ class SemanticBiEncoderConfig(RoutingConfigBase):
 
     # RoutingConfigBase hooks (ClassVar — not dataclass fields)
     _ENV_PREFIX: ClassVar[str] = SEMANTIC_BIENCODER_ROUTING_PREFIX
-    _DEFAULT_CONFIG_PATH: ClassVar[pathlib.Path] = (
+    _DEFAULT_CONFIG_PATH: ClassVar[Optional[pathlib.Path]] = (
         pathlib.Path(__file__).resolve().parent.parent.parent.parent
         / "resources"
         / "routing"
@@ -108,8 +108,8 @@ class SemanticBiEncoderConfig(RoutingConfigBase):
         """
         return {t.name: t.model_name for t in self.routing_targets}
 
-    @staticmethod
-    def _from_raw(raw: Dict[str, Any]) -> "SemanticBiEncoderConfig":
+    @classmethod
+    def _from_raw(cls, raw: Dict[str, Any]) -> "SemanticBiEncoderConfig":
         """Parse and validate the decoded JSON dict (``RoutingConfigBase`` hook)."""
         for required_key in ("embedding_model", "settings", "routing_targets"):
             if required_key not in raw:
