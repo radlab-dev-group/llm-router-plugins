@@ -11,8 +11,8 @@ import abc
 import logging
 import requests
 
-from typing import Dict, Optional, Tuple, Any
 from requests.exceptions import RequestException
+from typing import Any, ClassVar, Dict, Optional, Tuple, cast
 
 
 class PluginInterface(abc.ABC):
@@ -22,10 +22,10 @@ class PluginInterface(abc.ABC):
     Sub‑classes must provide a concrete implementation of the
     :py:meth:`apply` method.  The ``name`` attribute can be overridden by a
     subclass to give the plugin a human‑readable identifier; it defaults to
-    ``None`` when not set.
+    an empty string when not set.
     """
 
-    name = None
+    name: ClassVar[str] = ""
 
     def __init__(self, logger: Optional[logging.Logger] = None):
         """
@@ -45,7 +45,7 @@ class PluginInterface(abc.ABC):
         self._logger = logger
 
     @abc.abstractmethod
-    def apply(self, payload: Any) -> Any:
+    def apply(self, payload: Any, **kwargs: Any) -> Any:
         """
         Process an input payload and return a transformed payload.
 
@@ -59,6 +59,9 @@ class PluginInterface(abc.ABC):
         payload : Any
             The incoming payload to process.  The exact shape depends on the
             concrete plugin implementation.
+        **kwargs :
+            Additional arguments supported by specific plugin implementations
+            (e.g. ``model_config``). Not all plugins accept extra arguments.
 
         Returns
         -------
@@ -96,8 +99,8 @@ class HttpPluginInterface(PluginInterface, abc.ABC):
         API path appended to *host_url* (e.g. ``"api/guardrails/nask"``).
     """
 
-    host_url = None
-    endpoint_path = None
+    host_url: ClassVar[str] = ""
+    endpoint_path: ClassVar[str] = ""
 
     def __init__(self, logger: Optional[logging.Logger] = None):
         """
@@ -118,8 +121,7 @@ class HttpPluginInterface(PluginInterface, abc.ABC):
         Raises
         ------
         Exception
-            If ``host_url`` or ``endpoint_path`` are not set (``None`` or
-            empty string).
+            If ``host_url`` or ``endpoint_path`` are not set (empty).
         """
         if not self.host_url or not self.endpoint_path:
             raise Exception(
@@ -144,7 +146,7 @@ class HttpPluginInterface(PluginInterface, abc.ABC):
         return self.host_url.rstrip("/") + "/" + self.endpoint_path
 
     @abc.abstractmethod
-    def apply(self, payload: Any) -> Tuple[bool | str, Dict]:
+    def apply(self, payload: Any) -> Tuple[bool | str, Dict[str, Any]]:
         """
         Process *payload* using the common HTTP request mechanism.
 
@@ -169,7 +171,7 @@ class HttpPluginInterface(PluginInterface, abc.ABC):
         """
         pass
 
-    def _request(self, payload: Dict) -> Dict:
+    def _request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Send *payload* to ``self.host_url`` via an HTTP POST request and return
         the JSON response.
@@ -197,7 +199,7 @@ class HttpPluginInterface(PluginInterface, abc.ABC):
         try:
             response = requests.post(self.endpoint_url, json=payload, timeout=60)
             response.raise_for_status()
-            return response.json()
+            return cast(Dict[str, Any], response.json())
         except RequestException as exc:
             if self._logger:
                 self._logger.error(
