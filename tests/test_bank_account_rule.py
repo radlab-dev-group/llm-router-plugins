@@ -174,13 +174,13 @@ class TestPartialMasking:
 
     def test_dashed_x_masked(self, rule: BankAccountRule):
         """Dashed format with X check digits should also work."""
-        text = "PL-XX-10XX-5799-XXXX-0000-ABCD"  # strips to 28 alnum/X
+        text = "PL-XX-10XX-5799-XXXX-0000-0000-ABCD"  # strips to 28 alnum/X
         result = _masked_text(rule, text)
         assert "BANK_ACCOUNT" in result, f"Dashed X-masked not detected: {result}"
 
     def test_spaced_x_masked(self, rule: BankAccountRule):
         """Spaced format with X check digits should also work."""
-        text = "PL 10 10XX 5799 XXXX 0000 AB CD"
+        text = "PL XX 10XX 5799 XXXX 0000 0000 ABCD"
         result = _masked_text(rule, text)
         assert "BANK_ACCOUNT" in result, f"Spaced X-masked not detected: {result}"
 

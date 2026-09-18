@@ -248,7 +248,9 @@ class TestRoutingIntegration:
         )
 
         raw = _load_config()
-        raw["settings"]["similarity_threshold"] = 2.0  # unreachable by any cosine score
+        raw["settings"][
+            "similarity_threshold"
+        ] = 2.0  # unreachable by any cosine score
         monkeypatch.setenv(
             "LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CONFIG", json.dumps(raw)
         )
@@ -309,7 +311,9 @@ class TestRoutingIntegration:
 
 
 class TestEnvOverrides:
-    def test_env_override_embedding_model(self, monkeypatch, mock_sentence_transformer):
+    def test_env_override_embedding_model(
+        self, monkeypatch, mock_sentence_transformer
+    ):
         from llm_router_plugins.utils.routing.semantic_biencoder.semantic_biencoder_routing import (
             SemanticBiEncoderRoutingPlugin,
         )
@@ -349,7 +353,9 @@ class TestEnvOverrides:
         plugin = SemanticBiEncoderRoutingPlugin()
         assert plugin._config.chunk_size == 128
 
-    def test_invalid_target_name_ignored(self, monkeypatch, mock_sentence_transformer):
+    def test_invalid_target_name_ignored(
+        self, monkeypatch, mock_sentence_transformer
+    ):
         from llm_router_plugins.utils.routing.semantic_biencoder.semantic_biencoder_routing import (
             SemanticBiEncoderRoutingPlugin,
         )
