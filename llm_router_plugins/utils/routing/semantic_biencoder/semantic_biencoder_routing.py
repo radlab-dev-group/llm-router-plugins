@@ -171,7 +171,7 @@ class SemanticBiEncoderRoutingPlugin(PluginInterface):
                 f"got {self._config.chunk_overlap}"
             )
 
-    def apply(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def apply(self, payload: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
         """
         Process *payload*.  If ``payload["model"] == "auto"`` route to the
         best-matching model via semantic similarity.
