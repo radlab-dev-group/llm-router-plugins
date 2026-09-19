@@ -50,6 +50,7 @@ JSON structure::
     }
 """
 
+import logging
 import os
 import pathlib
 
@@ -169,7 +170,7 @@ class AgenticRoutingConfig(RoutingConfigBase):
 
     # RoutingConfigBase hooks (ClassVar — not dataclass fields)
     _ENV_PREFIX: ClassVar[str] = AGENTIC_ROUTING_PREFIX
-    _DEFAULT_CONFIG_PATH: ClassVar[pathlib.Path] = (
+    _DEFAULT_CONFIG_PATH: ClassVar[Optional[pathlib.Path]] = (
         pathlib.Path(__file__).resolve().parent.parent.parent.parent
         / "resources"
         / "routing"
@@ -218,14 +219,14 @@ class AgenticRoutingConfig(RoutingConfigBase):
         """
         return {m.name: m for m in self.agent_modes}
 
-    def override_from_env(self, logger: Optional[Any] = None) -> None:
+    def override_from_env(self, logger: Optional[logging.Logger] = None) -> None:
         self._override_from_env(logger=logger)
 
     def validate_args(self) -> None:
         self._validate_args()
 
-    @staticmethod
-    def _from_raw(raw: Dict[str, Any]) -> "AgenticRoutingConfig":
+    @classmethod
+    def _from_raw(cls, raw: Dict[str, Any]) -> "AgenticRoutingConfig":
         """Parse and validate the decoded JSON dict (``RoutingConfigBase`` hook)."""
         for required_key in ("settings", "agent_modes"):
             if required_key not in raw:
@@ -303,7 +304,7 @@ class AgenticRoutingConfig(RoutingConfigBase):
             session_affinity=_session_affinity_from_settings(settings),
         )
 
-    def _override_from_env(self, logger: Optional[Any] = None) -> None:
+    def _override_from_env(self, logger: Optional[logging.Logger] = None) -> None:
         """
         Apply environment variable overrides to the config **in place**.
 
@@ -336,21 +337,19 @@ class AgenticRoutingConfig(RoutingConfigBase):
         -------
         None
         """
-        self._logger = logger
-
         trigger_env = os.getenv(f"{AGENTIC_ROUTING_PREFIX}TRIGGER")
         if trigger_env:
             triggers = [t.strip() for t in trigger_env.split("|") if t.strip()]
             if triggers:
                 self.trigger = triggers
-                if self._logger:
-                    self._logger.info("Overriding trigger: %s", trigger_env)
+                if logger:
+                    logger.info("Overriding trigger: %s", trigger_env)
 
         model_env = os.getenv(f"{AGENTIC_ROUTING_PREFIX}MODEL")
         if model_env:
             self.embedding_model = model_env
-            if self._logger:
-                self._logger.info("Overriding embedding model: %s", model_env)
+            if logger:
+                logger.info("Overriding embedding model: %s", model_env)
 
         models_env = os.getenv(f"{AGENTIC_ROUTING_PREFIX}MODELS")
         if models_env:
@@ -366,8 +365,8 @@ class AgenticRoutingConfig(RoutingConfigBase):
             for mode_name, model_name in mapping.items():
                 mode = known.get(mode_name)
                 if mode is None:
-                    if self._logger:
-                        self._logger.warning(
+                    if logger:
+                        logger.warning(
                             "Ignoring MODELS override for unknown mode '%s'",
                             mode_name,
                         )
@@ -376,8 +375,8 @@ class AgenticRoutingConfig(RoutingConfigBase):
                     replace(m, model_name=model_name) if m.name == mode_name else m
                     for m in self.agent_modes
                 )
-                if self._logger:
-                    self._logger.info(
+                if logger:
+                    logger.info(
                         "Overriding model for mode '%s': %s",
                         mode_name,
                         model_name,
@@ -399,13 +398,13 @@ class AgenticRoutingConfig(RoutingConfigBase):
                 dropped = [r.id for r in self.rules if r.mode not in kept_modes]
                 if dropped:
                     self.rules = tuple(r for r in self.rules if r.mode in kept_modes)
-                    if self._logger:
-                        self._logger.warning(
+                    if logger:
+                        logger.warning(
                             "Dropped rules referencing removed modes: %s",
                             ", ".join(dropped),
                         )
-                if self._logger:
-                    self._logger.info(
+                if logger:
+                    logger.info(
                         "Overriding agent modes: %s",
                         "|".join(selected),
                     )
@@ -438,8 +437,8 @@ class AgenticRoutingConfig(RoutingConfigBase):
         fallback_env = os.getenv(f"{AGENTIC_ROUTING_PREFIX}FALLBACK_MODE")
         if fallback_env:
             self.fallback_mode = fallback_env.strip()
-            if self._logger:
-                self._logger.info(
+            if logger:
+                logger.info(
                     "Overriding fallback mode: %s",
                     self.fallback_mode,
                 )
@@ -452,8 +451,8 @@ class AgenticRoutingConfig(RoutingConfigBase):
             flag = env_bool(AGENTIC_ROUTING_PREFIX, flag_suffix, logger)
             if flag is not None:
                 setattr(self, attr_name, flag)
-                if self._logger:
-                    self._logger.info(
+                if logger:
+                    logger.info(
                         "Overriding %s: %s",
                         flag_suffix.lower(),
                         flag,
@@ -467,56 +466,69 @@ class AgenticRoutingConfig(RoutingConfigBase):
                 self.session_affinity, enabled=affinity_enabled
             )
 
-        affinity_values: Dict[str, int] = {}
-        for env_suffix, field_name in (
-            ("SESSION_TTL_SECONDS", "ttl_seconds"),
-            ("SESSION_MAX_ENTRIES", "max_entries"),
-        ):
-            value = env_int(AGENTIC_ROUTING_PREFIX, env_suffix)
-            if value is None:
-                continue
-            if value < 1:
-                if self._logger:
-                    self._logger.warning(
-                        "Ignoring %s%s: value must be >= 1, got %s",
+        affinity_overrides: List[str] = []
+        ttl_seconds = env_int(AGENTIC_ROUTING_PREFIX, "SESSION_TTL_SECONDS")
+        if ttl_seconds is not None:
+            if ttl_seconds < 1:
+                if logger:
+                    logger.warning(
+                        "Ignoring %sSESSION_TTL_SECONDS: value must be >= 1, got %s",
                         AGENTIC_ROUTING_PREFIX,
-                        env_suffix,
-                        value,
+                        ttl_seconds,
                     )
-                continue
-            affinity_values[field_name] = value
-        if affinity_values:
-            self.session_affinity = replace(self.session_affinity, **affinity_values)
-            if self._logger:
-                self._logger.info(
-                    "Overriding session affinity: %s",
-                    affinity_values,
+            else:
+                self.session_affinity = replace(
+                    self.session_affinity, ttl_seconds=ttl_seconds
                 )
+                affinity_overrides.append(f"ttl_seconds={ttl_seconds}")
+
+        max_entries = env_int(AGENTIC_ROUTING_PREFIX, "SESSION_MAX_ENTRIES")
+        if max_entries is not None:
+            if max_entries < 1:
+                if logger:
+                    logger.warning(
+                        "Ignoring %sSESSION_MAX_ENTRIES: value must be >= 1, got %s",
+                        AGENTIC_ROUTING_PREFIX,
+                        max_entries,
+                    )
+            else:
+                self.session_affinity = replace(
+                    self.session_affinity, max_entries=max_entries
+                )
+                affinity_overrides.append(f"max_entries={max_entries}")
+
+        if affinity_overrides and logger:
+            logger.info(
+                "Overriding session affinity: %s",
+                ", ".join(affinity_overrides),
+            )
 
         keywords_prefix = f"{AGENTIC_ROUTING_PREFIX}MODE_"
-        for key, value in os.environ.items():
-            if not key.startswith(keywords_prefix) or not key.endswith("_KEYWORDS"):
+        for env_name, env_keywords in os.environ.items():
+            if not env_name.startswith(keywords_prefix) or not env_name.endswith(
+                "_KEYWORDS"
+            ):
                 continue
-            mode_name = key[len(keywords_prefix) : -len("_KEYWORDS")].lower()
+            mode_name = env_name[len(keywords_prefix) : -len("_KEYWORDS")].lower()
             mode = self.mode_by_name.get(mode_name)
             if mode is None:
-                if self._logger:
-                    self._logger.warning(
+                if logger:
+                    logger.warning(
                         "Ignoring %s override for unknown mode '%s'",
-                        key,
+                        env_name,
                         mode_name,
                     )
                 continue
-            keywords = [k.strip() for k in value.split("|") if k.strip()]
+            keywords = [k.strip() for k in env_keywords.split("|") if k.strip()]
             self.agent_modes = tuple(
                 replace(m, keywords=keywords) if m.name == mode_name else m
                 for m in self.agent_modes
             )
-            if self._logger:
-                self._logger.info(
+            if logger:
+                logger.info(
                     "Overriding keywords for mode '%s': %s",
                     mode_name,
-                    value,
+                    env_keywords,
                 )
 
     def _validate_args(self) -> None:
