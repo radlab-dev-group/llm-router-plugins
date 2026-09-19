@@ -2,7 +2,7 @@
   "description": "Agentic routing configuration — selects the model based on the agent's current work mode (planning, coding, review, testing, debugging, research, summarizing).",
   "embedding_model": "google/embeddinggemma-300m",
   "settings": {
-    "trigger": ["agentic"],
+    "trigger": ["auto_agentic"],
     "fallback_mode": "fallback",
     "vector_store_path": "",
     "rules_enabled": true,
@@ -80,7 +80,7 @@
   "agent_modes": [
     {
       "name": "plan",
-      "model_name": "qwen3.6:35b",
+      "model_name": "qwen/Qwen3.8-Flash-Next",
       "description": "Agent works in planning mode: breaking work down into steps, defining architecture, roadmap, scope and strategy before anything is implemented.",
       "examples": [
         "Plan the migration of this service to Kubernetes in three phases",
@@ -131,7 +131,7 @@
     },
     {
       "name": "code",
-      "model_name": "gpt-oss:120b",
+      "model_name": "qwen/Qwen3.8-27B",
       "description": "Agent works in coding mode: writing, implementing and refactoring source code, functions and modules.",
       "examples": [
         "Implement a Python function that parses this CSV file",
@@ -178,7 +178,7 @@
     },
     {
       "name": "review",
-      "model_name": "granite3.3:8b",
+      "model_name": "qwen/Qwen3.8-27B",
       "description": "Agent works in review mode: auditing merge requests, commenting on style, security and maintainability of code written by others.",
       "examples": [
         "Review my pull request and point out maintainability problems",
@@ -226,7 +226,7 @@
     },
     {
       "name": "test",
-      "model_name": "granite3.3:8b",
+      "model_name": "qwen/Qwen3.8-27B",
       "description": "Agent works in testing mode: writing and running unit tests, fixtures and assertions, and raising coverage.",
       "examples": [
         "Write unit tests for the payment module with pytest",
@@ -275,7 +275,7 @@
     },
     {
       "name": "debug",
-      "model_name": "gpt-oss:120b",
+      "model_name": "qwen/Qwen3.8-Flash-Next",
       "description": "Agent works in debugging mode: analysing tracebacks, exceptions and crashes, reproducing and fixing failures.",
       "examples": [
         "Debug this traceback and find out why the worker crashes",
@@ -328,7 +328,7 @@
     },
     {
       "name": "research",
-      "model_name": "qwen3.6:35b",
+      "model_name": "qwen/Qwen3.8-Flash-Next",
       "description": "Agent works in research mode: investigating documentation, comparing alternatives and gathering background findings.",
       "examples": [
         "Research which vector database fits our workload and benchmark them",
@@ -378,7 +378,7 @@
     },
     {
       "name": "summarize",
-      "model_name": "qwen3.6:35b",
+      "model_name": "qwen/Qwen3.8-27B",
       "description": "Agent works in summarizing mode: condensing long documents, threads and transcripts into a concise recap.",
       "examples": [
         "Summarize this 40-page report in ten bullet points",
@@ -423,7 +423,7 @@
     },
     {
       "name": "fallback",
-      "model_name": "qwen3.6:35b",
+      "model_name": "qwen/Qwen3.8-27B",
       "description": "Default general-purpose mode used when no specific agent work mode can be detected.",
       "examples": [
         "Hello, can you help me with something today?",
