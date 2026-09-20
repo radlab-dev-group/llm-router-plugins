@@ -289,6 +289,7 @@ class AgenticRoutingPlugin(PluginInterface):
         #     logger=self._logger,
         # )
         pass
+
     #
     # @property
     # def config(self) -> AgenticRoutingConfig:
@@ -364,7 +365,12 @@ class AgenticRoutingPlugin(PluginInterface):
             missing_deps_hint=_MISSING_DEPENDENCIES_MESSAGE,
         )
 
-    def apply(self, payload: Dict[str, Any], model_config: Optional[ApiModelConfig] = None, **kwargs: Any) -> Dict[str, Any]:
+    def apply(
+        self,
+        payload: Dict[str, Any],
+        model_config: Optional[ApiModelConfig] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
         """
         Process *payload*, selecting the model for the detected agent mode.
 
@@ -423,6 +429,7 @@ class AgenticRoutingPlugin(PluginInterface):
         # decision = self._resolve_mode(text, payload)
         # return self._annotate(payload, decision, text)
         return payload
+
     #
     # def _resolve_mode(self, text: str, payload: Dict[str, Any]) -> _RoutingDecision:
     #     """

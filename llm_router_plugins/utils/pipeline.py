@@ -40,7 +40,9 @@ class UtilsPipeline:
         # Resolve concrete plugin instances.
         self._plugin_instances = [UtilsRegistry.get(name) for name in plugin_names]
 
-    def apply(self, payload: Dict, model_config: Optional[ApiModelConfig] = None) -> Dict:
+    def apply(
+        self, payload: Dict, model_config: Optional[ApiModelConfig] = None
+    ) -> Dict:
         """
         Execute the pipeline.
 
