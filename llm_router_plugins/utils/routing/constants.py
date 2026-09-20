@@ -12,3 +12,6 @@ SEMANTIC_BIENCODER_ROUTING_PREFIX = f"{SEMANTIC_ROUTING_PREFIX}BIENCODER_"
 
 # Prefix for agentic-routing environment variable names.
 AGENTIC_ROUTING_PREFIX = f"{SEMANTIC_ROUTING_PREFIX}AGENTIC_"
+
+# Prefix for Codex-agentic routing environment variable names.
+AGENTIC_CODEX_ROUTING_PREFIX = f"{AGENTIC_ROUTING_PREFIX}CODEX_"

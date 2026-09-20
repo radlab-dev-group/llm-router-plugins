@@ -1,0 +1,323 @@
+{
+  "description": "Codex agentic routing configuration — selects the model for OpenAI-Responses-style requests emitted by the Codex CLI agent, based on the request class (main turn, auxiliary title generation, context compaction) and on the work mode of the turn (planning, implementing, testing, reviewing, debugging).",
+  "embedding_model": "google/embeddinggemma-300m",
+  "settings": {
+    "trigger_model": "auto_codex",
+    "fallback_mode": "implement",
+    "heuristic_enabled": true,
+    "heuristic_min_score": 2.0,
+    "vector_store_path": "",
+    "semantic": {
+      "enabled": true,
+      "threshold": 0.51,
+      "top_k": 3,
+      "chunk_size": 256,
+      "chunk_overlap": 64
+    }
+  },
+  "codex_modes": [
+    {
+      "name": "plan",
+      "model_name": "qwen/Qwen3.8-Flash-Next",
+      "description": "The agent plans before touching any file: breaking work down into steps, defining architecture, roadmap, scope and strategy. Selected for every main turn that runs in Codex Plan Mode, where the CLI injects a collaboration_mode block describing the planning phases and forbids edits.",
+      "examples": [
+        "Zaplanuj migrację tej usługi do nowego schematu bazy danych.",
+        "Jak najlepiej podzielić ten moduł na mniejsze części?",
+        "Przygotuj plan refaktoryzacji pakietu routing.",
+        "Zastanów się, które pliki trzeba zmienić, żeby dodać cache.",
+        "Zaprojektuj interfejs nowego pluginu i wypisz etapy prac.",
+        "Co trzeba wiedzieć zanim zaczniemy implementację tego feature'u?",
+        "Plan the rollout of the new authentication flow.",
+        "Which modules are affected by this change? Do not edit anything yet.",
+        "Draft an architecture for the plugin registry.",
+        "Outline the steps needed to migrate the config to JSON."
+      ],
+      "keywords": [
+        "plan",
+        "planuj",
+        "planning",
+        "roadmap",
+        "architektura",
+        "architecture",
+        "strategia",
+        "strategy",
+        "zaprojektuj",
+        "design",
+        "etape",
+        "krok"
+      ],
+      "phrases": [
+        "plan działania:3",
+        "plan refactor:3",
+        "przygotuj plan:3",
+        "plan implementacji:3",
+        "krok po kroku:2",
+        "nie edytuj:3",
+        "tylko planuj:3",
+        "roadmap for:3",
+        "design document:3",
+        "prepare plan:3",
+        "high level:2",
+        "do not edit:3",
+        "no changes yet:3",
+        "outline the steps:3"
+      ],
+      "patterns": [
+        "\\b(plan|planuj|planowanie)\\b",
+        "\\b(architektur|design|strategi|roadmap)\\b"
+      ],
+      "weights": {
+        "plan": 2,
+        "planuj": 2,
+        "planning": 2,
+        "roadmap": 2,
+        "architektura": 2,
+        "architecture": 2,
+        "strategia": 2,
+        "strategy": 2,
+        "zaprojektuj": 2,
+        "design": 2
+      }
+    },
+    {
+      "name": "implement",
+      "model_name": "qwen/Qwen3.8-27B",
+      "description": "The agent writes and edits code: implementing features, wiring modules, adding files and changing behaviour. This is the default mode of a Codex main turn in Default collaboration mode, and the fallback when nothing more specific can be detected.",
+      "examples": [
+        "Dodaj obsługę zmiennych środowiskowych do tej konfiguracji.",
+        "Zaimplementuj nowy plugin routingowy i zarejestruj go.",
+        "Podmień stary format konfiguracji na JSON.",
+        "Napisz funkcję parsującą odpowiedź i podłącz ją do API.",
+        "Refaktoryzuj ten moduł, żeby dało się go przetestować osobno.",
+        "Przenieś te stałe do osobnego pliku.",
+        "Implement the payload normalizer for the Responses API.",
+        "Add a new configuration field and wire it through the plugin.",
+        "Create the module that decodes turn metadata.",
+        "Move these helpers into a shared utils package."
+      ],
+      "keywords": [
+        "implement",
+        "implementuj",
+        "zaimplementuj",
+        "dodaj",
+        "dodac",
+        "write",
+        "napisz",
+        "naprawic",
+        "code",
+        "kod",
+        "zmien",
+        "przenies"
+      ],
+      "phrases": [
+        "napisz kod:3",
+        "dodaj funkcje:3",
+        "dodaj plugin:3",
+        "zaimplementuj:3",
+        "write the code:3",
+        "add support for:3",
+        "wire it through:2",
+        "create the module:3",
+        "implement the:3"
+      ],
+      "patterns": [
+        "\\b(implementuj|zaimplementuj|implement)\\b",
+        "\\b(napisz|dodaj|stworz)\\b"
+      ],
+      "weights": {
+        "implement": 2,
+        "implementuj": 2,
+        "zaimplementuj": 2,
+        "napisz": 1,
+        "dodaj": 1
+      }
+    },
+    {
+      "name": "test",
+      "model_name": "qwen/Qwen3.8-27B",
+      "description": "The agent writes, repairs or runs automated tests: unit and integration suites, coverage, fixtures and CI test commands. Detected from explicit testing wording in the latest user message of a Default-mode main turn.",
+      "examples": [
+        "Przygotuj testy jednostkowe dla modułu wandb.",
+        "Napraw testy, które przestały przechodzić po zmianie konfigu.",
+        "Uruchom pytest i popraw czerwone przypadki.",
+        "Napisz testy regresji dla parsowania payloadu.",
+        "Sprawdź coverage i uzupełnij brakujące przypadki.",
+        "Dodaj fixture dla konfiguracji z pliku JSON.",
+        "Run the tests and fix the failing cases.",
+        "Write unit tests for the payload parser.",
+        "Add regression tests for the classification cascade.",
+        "Increase coverage of the scoring module."
+      ],
+      "keywords": [
+        "test",
+        "testy",
+        "testow",
+        "pytest",
+        "unittest",
+        "coverage",
+        "fixture",
+        "spec",
+        "suit"
+      ],
+      "phrases": [
+        "napraw testy:3",
+        "napisz testy:3",
+        "przygotuj testy:3",
+        "uruchom testy:3",
+        "dodaj testy:3",
+        "testy jednostkowe:3",
+        "testy regresji:3",
+        "run the tests:3",
+        "write tests:3",
+        "add tests:3",
+        "unit tests:3",
+        "fix the tests:3",
+        "failing test:3"
+      ],
+      "patterns": [
+        "\\btesty\\b",
+        "\\bpytest\\b",
+        "\\b(runs?|write|add|fix|execute|cover)\\s+(the\\s+)?[\\w.\\-]*\\s*tests?\\b"
+      ],
+      "weights": {
+        "pytest": 2,
+        "unittest": 2,
+        "coverage": 2,
+        "testy": 2
+      }
+    },
+    {
+      "name": "review",
+      "model_name": "qwen/Qwen3.8-Flash-Next",
+      "description": "The agent reviews existing code without owning the change: reading a diff or a directory, pointing out problems and proposing improvements. Detected from explicit review wording in the latest user message of a Default-mode main turn.",
+      "examples": [
+        "Przejrzyj ten katalog i zaproponuj poprawki do modułów.",
+        "Zrób code review tego diffu.",
+        "Czy ten kod ma jakieś błędy lub dziury?",
+        "Zaudytuj obsługe błędów w tym pluginie.",
+        "Co tu można uprościć?",
+        "Wskaż nieczytelne fragmenty i duplikaty.",
+        "Review this module and suggest improvements.",
+        "Check the diff for issues and edge cases.",
+        "Audit the error handling of this plugin.",
+        "Is there duplicated logic worth extracting?"
+      ],
+      "keywords": [
+        "review",
+        "przejrzyj",
+        "przeglad",
+        "audyt",
+        "audit",
+        "poprawki",
+        "refactor",
+        "uprosc",
+        "duplikat"
+      ],
+      "phrases": [
+        "code review:3",
+        "review this:3",
+        "przejrzyj kod:3",
+        "przejrzyj ten:3",
+        "zaproponuj poprawki:3",
+        "check for issues:3",
+        "suggest improvements:3",
+        "czy ten kod:2"
+      ],
+      "patterns": [
+        "\\b(review|audit)\\b",
+        "\\b(przejrzyj|przeanalizuj|zaudytuj)\\b"
+      ],
+      "weights": {
+        "review": 2,
+        "przejrzyj": 2,
+        "audyt": 2,
+        "audit": 2,
+        "poprawki": 2
+      }
+    },
+    {
+      "name": "debug",
+      "model_name": "qwen/Qwen3.8-Flash-Next",
+      "description": "The agent diagnoses and repairs broken behaviour: stack traces, exceptions, crashes and regressions. Detected from explicit failure wording in the latest user message of a Default-mode main turn.",
+      "examples": [
+        "Napraw ten błąd w module auth.",
+        "Dlaczego to rzuca wyjątek przy starcie?",
+        "Mam traceback na produkcji — znajdź przyczynę.",
+        "Program się crashuje po zmianie konfigu.",
+        "Znajdź dlaczego test integracyjny wisi.",
+        "To nie działa, sprawdz logi i napraw.",
+        "Fix the bug that crashes the request handler.",
+        "Why is this throwing a KeyError?",
+        "Debug this stack trace and find the root cause.",
+        "The plugin fails on startup — investigate."
+      ],
+      "keywords": [
+        "debug",
+        "debuguj",
+        "napraw",
+        "blad",
+        "błąd",
+        "błędu",
+        "error",
+        "exception",
+        "wyjątek",
+        "wyjatek",
+        "traceback",
+        "crash",
+        "crashuje",
+        "usterka",
+        "regres"
+      ],
+      "phrases": [
+        "fix the bug:3",
+        "debug this:3",
+        "napraw blad:3",
+        "napraw błąd:3",
+        "nie działa:3",
+        "nie dziala:3",
+        "stack trace:3",
+        "why is it failing:3",
+        "root cause:3",
+        "znajdz przyczyne:3"
+      ],
+      "patterns": [
+        "\\b(debug|traceback|stack\\s*trace)\\b",
+        "\\b(napraw|nie\\s+dziala)\\b"
+      ],
+      "weights": {
+        "debug": 2,
+        "debuguj": 2,
+        "traceback": 2,
+        "exception": 2,
+        "crash": 2,
+        "usterka": 2
+      }
+    },
+    {
+      "name": "aux_title",
+      "model_name": "qwen/Qwen3.8-27B",
+      "description": "Auxiliary request emitted by the Codex CLI on a system thread to generate the one-line thread title. Carries no tools at all and a codex_output_schema JSON schema in text, so it needs a cheap fast model rather than a coding model. Routed by request class only — never by keywords.",
+      "examples": [
+        "Generate a short title for this conversation.",
+        "Summarize the thread in one line."
+      ],
+      "keywords": [],
+      "phrases": [],
+      "patterns": [],
+      "weights": {}
+    },
+    {
+      "name": "compaction",
+      "model_name": "qwen/Qwen3.8-Flash-Next",
+      "description": "Context compaction request emitted by the Codex CLI when the conversation window has to be summarized so it fits the model context. Carries the whole transcript, so cost dominates quality and a cheap fast model is the right choice. Routed by request class only and takes precedence over every other signal.",
+      "examples": [
+        "Summarize the conversation so far, keeping decisions and open tasks.",
+        "Compact this context window into a shorter summary."
+      ],
+      "keywords": [],
+      "phrases": [],
+      "patterns": [],
+      "weights": {}
+    }
+  ]
+}

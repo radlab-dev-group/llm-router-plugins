@@ -1,10 +1,12 @@
 # Semantic Routing Plugins
 
-Three routing plugins are available for **model selection** in the **LLM‑Router** system.
+Four routing plugins are available for **model selection** in the **LLM‑Router** system.
 
 - `simple_semantic_routing` and `semantic_biencoder_routing` activate when `payload["model"] == "auto"`.
 - `agentic_routing` activates when `payload["model"]` equals its own trigger value (`"agentic"` by default) and routes
   on the agent's **work mode**.
+- `agentic_routing_codex` activates when `payload["model"]` equals its own trigger value (`"auto_codex"` by default) and
+  routes the **Codex CLI's** request class (main turn, title generation, compaction) and work mode.
 
 ---
 
@@ -984,23 +986,280 @@ FAISS-backed cases are skipped automatically when `faiss` is not installed; the 
 `tests/test_agentic_routing_deterministic.py` covers the deterministic layers — signals, rules, capabilities and
 escalation, session affinity and the cascade order — and runs with no ML dependency at all.
 
+### 3.12 Codex Routing (Codex CLI Requests)
+
+The **Codex Routing plugin** (`agentic_routing_codex`) routes OpenAI-Responses-style requests emitted by the
+**Codex CLI** coding agent. It activates when `payload["model"]` equals its own trigger value (`"auto_codex"` by
+default), resolves the agent's **work mode** (`plan`, `implement`, `test`, `review`, `debug`, `aux_title`,
+`compaction`) and rewrites `payload["model"]`. Exactly three keys change — `model`, `routing` and `agent_mode`;
+`tools`, `instructions`, `input`, `reasoning`, `text` and `stream` are forwarded byte-identical.
+
+The Codex CLI needs a plugin of its own for two reasons:
+
+- A Codex session contains requests that are **not conversations at all**. Auxiliary thread-title generation and
+  context compaction carry no user intent, so guessing a mode from their text is always wrong — they must be
+  recognized by *request class* and pinned to a cheap model.
+- The CLI **declares** the active mode in a `<collaboration_mode>` block injected into a developer message. A
+  declared fact has to win over any keyword or embedding guess.
+
+The subpackage is self-contained — its own config, scorer, semantic layer and JSON resource — and shares only the
+generic infrastructure (`common.py`, `constants.py`, `target.py`, `plugin_interface.py`). It never reads the
+`agentic_routing` configuration, so both plugins coexist on one router: `agentic` / `auto_agentic` keep going to
+the generic plugin, `auto_codex` comes here.
+
+#### Module Layout
+
+| Module          | Contents                                                                              |
+|-----------------|-----------------------------------------------------------------------------------------|
+| `payload.py`    | `CodexRequest` and `parse_codex_payload()` — the read-only request normalizer            |
+| `scoring.py`    | `detect_mode()`, `score_mode()`, `score_to_similarity()` — deterministic keyword scoring |
+| `semantic.py`   | `CodexSemanticLayer` — availability gate and cosine-similarity lookup                    |
+| `classifier.py` | `classify()` and `RoutingDecision` — the resolution cascade                              |
+| `config.py`     | `CodexRoutingConfig`, `CodexMode`, defaults, validation, env overrides                   |
+| `plugin.py`     | `CodexRoutingPlugin` — trigger check, cascade, payload annotation                        |
+
+#### Request Classes
+
+`payload.py` is the only module that knows where Codex metadata lives on the wire. Everything else works on the
+frozen `CodexRequest` snapshot, so detection never depends on the shape of an individual request. Every request is
+labelled with a class, in strict priority order **compaction → aux_title → main**:
+
+| Class        | `request_class` | Detected from                                                                                   | Routed as    |
+|--------------|-----------------|-------------------------------------------------------------------------------------------------|--------------|
+| Compaction   | `compaction`    | `request_kind == "compaction"` in the turn metadata                                              | `compaction` |
+| Title        | `aux_title`     | `request_kind == "turn"` **and** `thread_source == "system"`, corroborated by `tools == []` and a `codex_output_schema` JSON-schema output | `aux_title`  |
+| Main turn    | `main`          | everything else                                                                                  | mode layers  |
+
+Notes on the wire format:
+
+- IDs come from `client_metadata`: `session_id`, `thread_id`, `turn_id`, `root_turn_id`, `agent_name` and
+  `x-codex-window-id`. `x-codex-turn-metadata` is a **JSON string**, not an object — it is decoded defensively and
+  a malformed value degrades to `{}` instead of raising.
+- Tool names follow the flat Responses shape `{"type": "function", "name": ...}`. An entry without `name` falls
+  back to its `type`, because the CLI really does send `{"type": "web_search", "external_web_access": true}`.
+- `structured_output` reads `text.format.type == "json_schema"`; `reasoning_effort` reads `reasoning.effort`;
+  `context_tokens` is an estimate (`context_chars // 4` over `instructions` plus `input`).
+- `collaboration_mode` is matched with `<collaboration_mode>(.*?)(</collaboration_mode>|\Z)` (`re.S`) over every
+  `input_text` part of a `role == "developer"` message. The **last** block wins and its first non-empty line
+  decides: `# Plan Mode` → `plan`, `# Collaboration Mode: Default` → `default`, anything else → `""`. Taking the
+  latest occurrence is what makes a mid-session Plan → Default switch reclassify correctly.
+- `latest_user_text` is the last `role == "user"` message item; `<environment_context>` messages are skipped, and
+  `payload["prompt"]` is the final fallback. `instructions` is deliberately **not** classified — in captured
+  sessions it is one constant 16 979-character preamble that would drown the signal.
+- Parsing never mutates the payload and never raises: a missing or non-list `input`, `tools=None`, an absent
+  `client_metadata` or a missing `text` all yield a well-formed `CodexRequest` with empty defaults.
+
+#### Detection Cascade
+
+Mode resolution is strictly ordered — the first layer that answers wins:
+
+| # | Layer                  | `source`             | Behaviour                                                                                    | ML    |
+|---|------------------------|----------------------|------------------------------------------------------------------------------------------------|-------|
+| 1 | **Explicit**           | `explicit`           | First present key wins: `agent_mode` → `codex_mode` → `metadata.agent_mode`, when it names a configured mode | no    |
+| 2 | **Class: compaction**  | `class`              | Context compaction — never keyword-scored, outranks a plan block                                | no    |
+| 3 | **Class: aux title**   | `class`              | Auxiliary title generation on a system thread — never keyword-scored                           | no    |
+| 4 | **Collaboration mode** | `collaboration_mode` | The CLI declared Plan Mode in the latest `<collaboration_mode>` block                          | no    |
+| 5 | **Heuristic**          | `heuristic`          | Keywords (default 1.0), `text:weight` phrases (default 2.0), regex patterns (default 3.0)      | no    |
+| 6 | **Semantic**           | `semantic`           | Embedding cosine similarity over mode descriptions/examples, accepted at `similarity >= threshold` | yes   |
+| 7 | **Fallback**           | `fallback`           | The configured `fallback_mode` (`implement`)                                                    | no    |
+
+Details worth knowing:
+
+- **Compaction outranks everything except an explicit mode**, including a plan collaboration block — a compaction
+  request still carries the mode text of the conversation it is compacting.
+- Only `test`, `review` and `debug` are keyword-scored. `plan` is decided by the declared collaboration block, and
+  a main turn never falls below `implement`: the probabilistic layers can specialise a decision but can never make
+  it weaker.
+- A heuristic hit needs `score >= heuristic_min_score` (`2.0` by default); below it the request stays on the
+  fallback mode. Scores sum across keywords, phrases and patterns, and ties are won by the mode declared first in
+  `codex_modes`.
+- Keywords and phrases are Polish **and** English, because real prompts are short and mixed: `"napraw testy"` and
+  `"run the tests"` both resolve to `test`, `"Przejrzyj ten katalog i zaproponuj poprawki"` to `review`.
+- An explicit mode is honoured even without usable text, and empty text never reaches the vector store.
+- Everything fails open. Any exception during parse or classify logs a warning and returns the payload untouched,
+  so a routing bug can never turn into a failed request; an unknown mode name or a mode with an empty `model_name`
+  is likewise a passthrough.
+
+#### Similarity: Cosine over Mode Embeddings
+
+`payload["routing"]["similarity"]` is a real **embedding cosine similarity**, produced by exactly the same stack as
+the `agentic_routing` plugin: the shared `build_embedding_router()` (sentence-transformers BiEncoder + FAISS)
+indexes the `description` and `examples` of each mode, so scores are on the same scale and are comparable across
+plugins. The bundled embedding model is `google/embeddinggemma-300m`.
+
+| `source`                                       | Reported `similarity`                                                              |
+|--------------------------------------------------|--------------------------------------------------------------------------------------|
+| `explicit` / `class` / `collaboration_mode`      | `1.0` — the mode was declared, not inferred                                          |
+| `heuristic`                                      | Cosine of the winning mode; falls back to `score / (score + 1)` when no layer exists  |
+| `semantic`                                       | The accepted cosine similarity                                                       |
+| `fallback`                                       | Cosine of the fallback mode, else `0.0`                                              |
+
+Notes:
+
+- `aux_title` and `compaction` are **excluded from the index** — they are class-routed, so indexing them would only
+  add near-miss neighbours for real turns. The indexed targets are `plan`, `implement`, `test`, `review`, `debug`.
+- A request queries the store **at most once**: the same lookup both accepts a semantic match and supplies the
+  cosine reported for heuristic and fallback decisions, so the text is never embedded twice.
+- The layer is optional by construction. With `SEMANTIC_ENABLED=false`, with missing
+  `faiss` / `sentence-transformers`, or with an unloadable embedding model, no router is built, every lookup
+  returns nothing, and routing stays purely deterministic. The chosen mode and `agent_mode` are unchanged — only
+  the heuristic similarity reverts to `score / (score + 1)`.
+- The index persists to disk through the shared `resolve_persist_dir()` helper (`PERSIST_DIR`,
+  `settings.vector_store_path`).
+
+#### Configuration
+
+`llm_router_plugins/resources/routing/agentic_routing_codex.json`:
+
+```json
+{
+  "embedding_model": "google/embeddinggemma-300m",
+  "settings": {
+    "trigger_model": "auto_codex",
+    "fallback_mode": "implement",
+    "heuristic_enabled": true,
+    "heuristic_min_score": 2.0,
+    "vector_store_path": "",
+    "semantic": {
+      "enabled": true,
+      "threshold": 0.55,
+      "top_k": 3,
+      "chunk_size": 256,
+      "chunk_overlap": 64
+    }
+  },
+  "codex_modes": [
+    {
+      "name": "plan",
+      "model_name": "qwen/Qwen3.8-Flash-Next",
+      "description": "The agent plans before touching any file...",
+      "examples": ["Zaplanuj migrację bazy danych.", "Plan the refactor of the billing module."],
+      "keywords": ["plan", "zaplanuj"],
+      "phrases": ["step by step:2.5"],
+      "patterns": ["(zaplanuj|plan(ning)?)\\b"],
+      "weights": {"plan": 1.5}
+    }
+  ]
+}
+```
+
+`codex_modes` is a **list**, so declaration order is meaningful: it breaks heuristic score ties and fixes the
+precedence the cascade works through.
+
+| Mode         | Default model                | Decided by                                  |
+|--------------|------------------------------|-----------------------------------------------|
+| `plan`       | `qwen/Qwen3.8-Flash-Next`    | Collaboration block, then keywords/embeddings |
+| `implement`  | `qwen/Qwen3.8-27B`           | Fallback for main turns, then keywords        |
+| `test`       | `qwen/Qwen3.8-27B`           | Keywords / embeddings                         |
+| `review`     | `qwen/Qwen3.8-27B`           | Keywords / embeddings                         |
+| `debug`      | `qwen/Qwen3.8-27B`           | Keywords / embeddings                         |
+| `aux_title`  | `qwen/Qwen3.8-Flash-Next`    | Request class only (no keywords)              |
+| `compaction` | `qwen/Qwen3.8-Flash-Next`    | Request class only (no keywords)              |
+
+A mode whose `model_name` is empty is a deliberate **passthrough**: the payload is returned unchanged, so an
+operator can disable a single mode without removing it or touching the plugin.
+
+#### Environment Variable Overrides
+
+All variables use the `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_` prefix:
+
+| Env variable                          | Purpose                                                        |
+|---------------------------------------|------------------------------------------------------------------|
+| `..._CONFIG`                          | Full config as a raw JSON string or a path to a config file     |
+| `..._TRIGGER`                         | The single `payload["model"]` trigger value                     |
+| `..._MODEL_<MODE>`                    | Per-mode model override, e.g. `..._MODEL_PLAN`                  |
+| `..._MODELS`                          | Per-mode model mapping, e.g. `plan=model_a\|test=model_b`       |
+| `..._MODES`                           | Pipe-separated whitelist of enabled mode names                  |
+| `..._FALLBACK_MODE`                   | Override the fallback mode name                                 |
+| `..._HEURISTIC_ENABLED`               | Turn the keyword layer on/off (`1/0`, `true/false`, `on/off`)   |
+| `..._HEURISTIC_MIN_SCORE`             | Override the heuristic acceptance threshold                     |
+| `..._MODE_<name>_KEYWORDS`            | Pipe-separated keyword list for one mode                        |
+| `..._MODEL`                           | Embedding model used by the similarity layer                    |
+| `..._SEMANTIC_ENABLED`                | Turn the embedding similarity layer on/off                      |
+| `..._SIMILARITY_THRESHOLD`            | Minimum cosine similarity to accept a semantic match            |
+| `..._TOP_K` / `..._CHUNK_SIZE` / `..._CHUNK_OVERLAP` | Embedding router knobs                          |
+| `..._PERSIST_DIR`                     | Directory holding the persisted FAISS index                     |
+
+Unparseable booleans and floats and unknown mode names are logged as warnings and otherwise ignored. A `MODES`
+whitelist that excludes the `fallback_mode` is a startup validation error rather than a silent
+misconfiguration — the plugin refuses to start instead of falling back to a mode it no longer has.
+
+#### Usage Example
+
+```python
+from llm_router_plugins.utils.routing.agentic_routing.codex import CodexRoutingPlugin
+
+plugin = CodexRoutingPlugin()
+
+payload = {
+    "model": "auto_codex",
+    "instructions": "You are a coding agent running in the Codex CLI.",
+    "input": [
+        {"type": "message", "role": "developer", "content": [
+            {"type": "input_text", "text": "...\n\n"
+             "<collaboration_mode># Plan Mode (Conversational)\n\n"
+             "Think, do not edit.</collaboration_mode>"}]},
+        {"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "Zaplanuj migrację bazy danych."}]},
+    ],
+    "client_metadata": {"thread_id": "thread-1", "turn_id": "turn-7"},
+}
+
+result = plugin.apply(payload)
+result["model"]
+# 'qwen/Qwen3.8-Flash-Next'
+result["agent_mode"]
+# 'plan'
+result["routing"]
+# {'plugin': 'agentic_routing_codex', 'similarity': 1.0, 'agent_mode': 'plan',
+#  'source': 'collaboration_mode', 'codex_class': 'main', 'collaboration_mode': 'plan',
+#  'request_kind': 'turn', 'thread_id': 'thread-1', 'turn_id': 'turn-7'}
+```
+
+With the same plugin and a Default-mode collaboration block, the latest user message decides:
+
+| Latest user message                                          | `model`                | `agent_mode` | `source`             | `similarity` |
+|----------------------------------------------------------------|------------------------|--------------|----------------------|--------------|
+| `"Zaplanuj migrację bazy danych."` + Plan Mode block           | `qwen/Qwen3.8-Flash-Next` | `plan`     | `collaboration_mode` | 1.0          |
+| `"Zaimplementuj nowy moduł eksportu."`                         | `qwen/Qwen3.8-27B`     | `implement`  | `fallback`           | 0.0          |
+| `"napraw testy w tests/"`                                      | `qwen/Qwen3.8-27B`     | `test`       | `heuristic`          | 0.9          |
+| `"Przejrzyj ten katalog i zaproponuj poprawki do modułów"`     | `qwen/Qwen3.8-27B`     | `review`     | `heuristic`          | 0.9285714285714286 |
+| `"hello world"`                                                | `qwen/Qwen3.8-27B`     | `implement`  | `fallback`           | 0.0          |
+| Title generation (`thread_source="system"`, `tools: []`)       | `qwen/Qwen3.8-Flash-Next` | `aux_title` | `class`             | 1.0          |
+| `request_kind="compaction"`                                    | `qwen/Qwen3.8-Flash-Next` | `compaction` | `class`            | 1.0          |
+| Any payload with `model="gpt-4"`                               | the payload object itself (identity) | — | —            | —            |
+
+The table was captured with `..._SEMANTIC_ENABLED=false`, so heuristic rows still show `score / (score + 1)`. With
+the embedding layer enabled those rows report the cosine similarity of the winning mode instead, while declared
+sources (`class`, `collaboration_mode`) stay at `1.0`.
+
+#### Running Tests
+
+```bash
+pytest tests/test_agentic_routing_codex.py -v
+```
+
+No `faiss` or `sentence-transformers` installation is required: the tests inject stub routers through
+`CodexRoutingPlugin(emb_router=...)` / `CodexRoutingPlugin(semantic=...)`, so the real embedding model is never
+loaded, and `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_SEMANTIC_ENABLED=false` keeps the plugin from building one.
+
 ---
 
 ## 4. Comparison: Which Plugin to Use?
 
-| Feature                 | Simple Semantic Routing          | Bi-Encoder Semantic Routing           | Agentic Routing                                      |
-|-------------------------|----------------------------------|---------------------------------------|------------------------------------------------------|
-| **Trigger**             | `model == "auto"`                | `model == "auto"`                     | `model == "agentic"`                                 |
-| **Decides from**        | Intent + token complexity        | Nearest embedding target              | Declared agent facts + work mode                     |
-| **Approach**            | Heuristic (keyword/phrase)       | Neural embeddings (FAISS)             | Explicit → rules → affinity → heuristic → embeddings |
-| **Accuracy**            | Rule-based, limited context      | Semantic understanding of meaning     | Keyword precision, mode-level granularity            |
-| **Model Required**      | ❌ None                          | ✅ Bi-encoder embeddings              | Optional — layers 1–4 need no ML                     |
-| **Speed**               | Very fast (~0.1ms)               | Slower (~50-200ms, model dependent)   | Fast; embeddings only when facts are silent          |
-| **Config Complexity**   | JSON keywords/phrases/patterns   | JSON targets + examples               | JSON rules + modes + capabilities                    |
-| **Scalability**         | Linear keyword search            | FAISS index (efficient at scale)      | Linear keyword search; FAISS at scale                |
-| **Caller Control**      | None                             | None                                  | ✅ Pass `agent_mode`/`task`/`session_id`             |
-| **Persistence**         | N/A                              | ✅ FAISS index saved to disk          | ✅ FAISS index saved to disk                         |
-| **Use Case**            | Fast, lightweight routing        | High-quality semantic matching        | Agents that switch activities per step               |
+| Feature                   | Simple Semantic Routing            | Bi-Encoder Semantic Routing             | Agentic Routing                                        | Codex Routing                                             |
+| ------------------------- | ---------------------------------- | --------------------------------------- | ------------------------------------------------------ | --------------------------------------------------------- |
+| **Trigger**               | `model == "auto"`                  | `model == "auto"`                       | `model == "agentic"`                                   | `model == "auto_codex"`                                   |
+| **Decides from**          | Intent + token complexity          | Nearest embedding target                | Declared agent facts + work mode                       | Request class + collaboration block + latest message      |
+| **Approach**              | Heuristic (keyword/phrase)         | Neural embeddings (FAISS)               | Explicit → rules → affinity → heuristic → embeddings   | Explicit → class → collaboration → heuristic → embeddings |
+| **Accuracy**              | Rule-based, limited context        | Semantic understanding of meaning       | Keyword precision, mode-level granularity              | Wire-format aware: declared mode beats guessing           |
+| **Model Required**        | ❌ None                             | ✅ Bi-encoder embeddings                 | Optional — layers 1–4 need no ML                       | Optional — class/collaboration/keyword layers need no ML  |
+| **Speed**                 | Very fast (~0.1ms)                 | Slower (~50-200ms, model dependent)     | Fast; embeddings only when facts are silent            | Fast; at most one embedding lookup per request            |
+| **Config Complexity**     | JSON keywords/phrases/patterns     | JSON targets + examples                 | JSON rules + modes + capabilities                      | JSON modes with PL+EN keywords and examples               |
+| **Scalability**           | Linear keyword search              | FAISS index (efficient at scale)        | Linear keyword search; FAISS at scale                  | Linear keyword search; FAISS index at scale               |
+| **Caller Control**        | None                               | None                                    | ✅ Pass `agent_mode`/`task`/`session_id`                | ✅ Pass `agent_mode`; honours CLI `collaboration_mode`     |
+| **Persistence**           | N/A                                | ✅ FAISS index saved to disk             | ✅ FAISS index saved to disk                            | ✅ FAISS index saved to disk                               |
+| **Use Case**              | Fast, lightweight routing          | High-quality semantic matching          | Agents that switch activities per step                 | Codex CLI sessions (Responses API shape)                  |
 
 ### Recommendation
 
@@ -1023,6 +1282,12 @@ escalation, session affinity and the cascade order — and runs with no ML depen
     - A cheap mode must be escalated automatically when the step needs capabilities it does not declare.
     - You need per-mode model assignment without touching temperature, tokens or tools.
 
+- Use **Codex Routing** when:
+    - Requests come from the Codex CLI (OpenAI-Responses wire shape) and you want per-work-mode models.
+    - A session mixes real turns with auxiliary title-generation and compaction calls that must land on a cheap model.
+    - The CLI's declared `<collaboration_mode>` has to be authoritative over any keyword or embedding guess.
+    - Prompts are short and mixed Polish/English — the bundled keyword sets cover both.
+
 ---
 
 ## 5. File Locations
@@ -1042,12 +1307,20 @@ escalation, session affinity and the cascade order — and runs with no ML depen
 | `llm_router_plugins/utils/routing/agentic_routing/semantic.py` | Layer 4: optional FAISS fallback (`SemanticLayer`) |
 | `llm_router_plugins/utils/routing/agentic_routing/capabilities.py` | Capability checks and model escalation |
 | `llm_router_plugins/utils/routing/agentic_routing/config.py`   | Modes, rules and settings loading   |
+| `llm_router_plugins/utils/routing/agentic_routing/codex/`        | CodexRoutingPlugin code (Codex CLI requests)  |
+| `llm_router_plugins/utils/routing/agentic_routing/codex/payload.py`  | Codex request normalizer (`CodexRequest`, request class, `collaboration_mode`)  |
+| `llm_router_plugins/utils/routing/agentic_routing/codex/scoring.py`  | Deterministic keyword/phrase/pattern scoring for work modes  |
+| `llm_router_plugins/utils/routing/agentic_routing/codex/semantic.py`  | Cosine similarity layer (`CodexSemanticLayer`) on the shared embedding router  |
+| `llm_router_plugins/utils/routing/agentic_routing/codex/classifier.py`  | Mode resolution cascade (explicit → class → collaboration → heuristic → semantic)  |
+| `llm_router_plugins/utils/routing/agentic_routing/codex/plugin.py`  | Plugin entry point (`CodexRoutingPlugin`)  |
 | `llm_router_plugins/utils/text_extractor.py`                   | Shared payload text extraction      |
 | `llm_router_plugins/resources/routing/simple_semantic.json`    | Intent definitions & config         |
 | `llm_router_plugins/resources/routing/semantic_biencoder.json` | Embedding routing config            |
 | `llm_router_plugins/resources/routing/agentic_routing.json`    | Agent mode definitions & config     |
+| `llm_router_plugins/resources/routing/agentic_routing_codex.json`  | Codex mode definitions & config       |
 | `tests/test_routing_common.py`                                 | Unit tests (shared layer)           |
 | `tests/test_simple_semantic_routing.py`                        | Unit tests (Simple)                 |
 | `tests/test_semantic_biencoder_routing.py`                     | Unit tests (Bi-Encoder)             |
 | `tests/test_agentic_routing.py`                                | Unit tests (Agentic)                |
 | `tests/test_agentic_routing_deterministic.py`                    | Unit tests (Agentic deterministic layers: signals, rules, capabilities, affinity) |
+| `tests/test_agentic_routing_codex.py`                            | Unit tests (Codex)                    |
