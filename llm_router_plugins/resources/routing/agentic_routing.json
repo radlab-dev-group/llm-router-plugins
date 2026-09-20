@@ -1,6 +1,7 @@
 {
   "description": "Agentic routing configuration — selects the model based on the agent's current work mode (planning, coding, review, testing, debugging, research, summarizing).",
-  "embedding_model": "google/embeddinggemma-300m",
+  "embedding_model": "/mnt/data2/llms/models/community/google/embeddinggemma-300m",
+  "embedding_model_public": "google/embeddinggemma-300m",
   "settings": {
     "trigger": ["auto_agentic"],
     "fallback_mode": "fallback",

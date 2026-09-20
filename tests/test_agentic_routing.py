@@ -609,7 +609,7 @@ def test_router_is_built_when_dependencies_available(mock_sentence_transformer):
 
     plugin = AgenticRoutingPlugin()
 
-    assert plugin._router is not None
+    assert plugin._emb_router is not None
     result = plugin.apply({"model": _DEFAULT_TRIGGER, "prompt": _MODE_TEXTS["code"]})
     assert result["routing"]["source"] in {"semantic", "heuristic", "fallback"}
 
