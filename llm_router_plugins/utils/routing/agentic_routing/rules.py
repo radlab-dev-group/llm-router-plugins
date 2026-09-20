@@ -67,7 +67,7 @@ import logging
 import re
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from llm_router_plugins.utils.routing.agentic_routing.signals import (
     RequestSignals,
@@ -181,7 +181,7 @@ def parse_rules(
 
     available = list(known_modes)
     parsed: List[RoutingRule] = []
-    seen: set = set()
+    seen: Set[str] = set()
 
     for index, item in enumerate(raw):
         rule = _parse_rule(index, item, available)

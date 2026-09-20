@@ -16,12 +16,13 @@ The knobs of the layer live in
 as :class:`SessionAffinitySettings`; this module implements only the cache.
 """
 
+import logging
 import threading
 import time
 
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 __all__ = ["SessionAffinitySettings", "CachedDecision", "SessionAffinityCache"]
 
@@ -86,7 +87,7 @@ class SessionAffinityCache:
         self,
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
         max_entries: int = DEFAULT_MAX_ENTRIES,
-        logger: Optional[Any] = None,
+        logger: Optional[logging.Logger] = None,
     ) -> None:
         """
         Initialize an empty cache.
