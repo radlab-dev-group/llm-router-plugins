@@ -62,7 +62,10 @@ from llm_router_plugins.utils.routing.constants import AGENTIC_CODEX_ROUTING_PRE
 _PREFIX = AGENTIC_CODEX_ROUTING_PREFIX
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 _CONFIG_PATH = (
-    _REPO_ROOT / "llm_router_plugins" / "resources" / "routing"
+    _REPO_ROOT
+    / "llm_router_plugins"
+    / "resources"
+    / "routing"
     / "agentic_routing_codex.json"
 )
 _ROUTING_KEYS = {
@@ -185,22 +188,30 @@ def _user(text):
     }
 
 
-def main_payload(text="Zaimplementuj nowy moduł eksportu.",
-                 collaboration=DEFAULT_BLOCK, **metadata_overrides):
+def main_payload(
+    text="Zaimplementuj nowy moduł eksportu.",
+    collaboration=DEFAULT_BLOCK,
+    **metadata_overrides,
+):
     """Build a main agent turn in the flat Responses shape."""
     items = []
     if collaboration:
         items.append(_developer(INSTRUCTIONS + "\n\n" + collaboration))
-    items.append(_user("<environment_context>\n  <cwd>/repo</cwd>\n"
-                       "</environment_context>"))
+    items.append(
+        _user("<environment_context>\n  <cwd>/repo</cwd>\n" "</environment_context>")
+    )
     items.append(_user(text))
     return {
         "model": "auto_codex",
         "instructions": INSTRUCTIONS,
         "input": items,
         "tools": [
-            {"type": "function", "name": "exec_command", "description": "d",
-             "parameters": {}},
+            {
+                "type": "function",
+                "name": "exec_command",
+                "description": "d",
+                "parameters": {},
+            },
             {"type": "web_search", "external_web_access": True},
         ],
         "parallel_tool_calls": True,
@@ -224,8 +235,7 @@ def plan_payload(text="Zaplanuj migrację bazy danych."):
 
 def title_payload():
     """Build a system title-generation request (no tools, JSON schema)."""
-    payload = main_payload("Summarize this thread in one line.",
-                           collaboration=None)
+    payload = main_payload("Summarize this thread in one line.", collaboration=None)
     payload["tools"] = []
     payload["text"] = {
         "format": {
@@ -243,8 +253,9 @@ def title_payload():
 
 def compaction_payload(collaboration=DEFAULT_BLOCK):
     """Build a context-compaction request."""
-    return main_payload("Compact the conversation.", collaboration,
-                        request_kind="compaction")
+    return main_payload(
+        "Compact the conversation.", collaboration, request_kind="compaction"
+    )
 
 
 def _plugin(config=None):
@@ -437,14 +448,19 @@ class TestHeuristicClassification:
             ("run the tests", "test", 7.0),
             ("RUN THE TESTS", "test", 7.0),
             ("Dodaj testy jednostkowe do modułu płatności", "test", 12.0),
-            ("Przejrzyj ten katalog i zaproponuj poprawki do modułów", "review", 13.0),
+            (
+                "Przejrzyj ten katalog i zaproponuj poprawki do modułów",
+                "review",
+                13.0,
+            ),
             ("Napraw ten błąd w module auth.", "debug", 5.0),
             ("Czy możesz zdebugować ten błąd w parserze?", "debug", 3.0),
             ("zrób refactor i przejrzyj to", "review", 6.0),
         ],
     )
-    def test_prompts_select_a_specialised_mode(self, text, expected_mode,
-                                               expected_score):
+    def test_prompts_select_a_specialised_mode(
+        self, text, expected_mode, expected_score
+    ):
         payload = main_payload(text)
 
         decision = _decide(parse_codex_payload(payload), payload)
@@ -459,7 +475,7 @@ class TestHeuristicClassification:
     @pytest.mark.parametrize(
         "text",
         [
-            "przygotuj commit",
+            "wyrenderuj pusty stan w widoku",
             "Zaimplementuj nowy plugin routingowy i zarejestruj go.",
             "test",
             "",
@@ -475,8 +491,56 @@ class TestHeuristicClassification:
         assert decision.score == 0.0
         assert decision.similarity == 0.0
 
-    def test_only_the_three_specialised_modes_are_scored(self):
-        assert HEURISTIC_MODES == ("test", "review", "debug")
+    def test_only_the_four_specialised_modes_are_scored(self):
+        assert HEURISTIC_MODES == ("test", "git_review", "review", "debug")
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "przejrzyj zmiany na branczu i opisz co się zmieniło",
+            "porównaj ten branch z develop",
+            "review the diff before I merge",
+            "przejrzyj merge request w GitLabie",
+            "kto to zmienił — blame tego plika",
+            "zrób commit z tymi zmianami",
+            "resolve the merge conflicts",
+        ],
+    )
+    def test_git_review_prompts_select_git_review(self, text):
+        payload = main_payload(text)
+
+        decision = _decide(parse_codex_payload(payload), payload)
+
+        assert decision.mode == "git_review"
+        assert decision.source == SOURCE_HEURISTIC
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "użyj merge sorta do sortowania tabeli",
+            "dodaj push notifications do aplikacji",
+            "don't blame the user for this input",
+            "branchless thinking o projektowaniu",
+            "porównaj dwa podejścia architektoniczne",
+            "the prairie fire spread",
+        ],
+    )
+    def test_non_git_prompts_do_not_select_git_review(self, text):
+        payload = main_payload(text)
+
+        decision = _decide(parse_codex_payload(payload), payload)
+
+        assert decision.mode != "git_review"
+
+    def test_explicit_git_review_override_short_circuits_scoring(self):
+        payload = main_payload("przygotuj opis zmian")
+        payload["agent_mode"] = "git_review"
+
+        decision = _decide(parse_codex_payload(payload), payload)
+
+        assert decision.mode == "git_review"
+        assert decision.source == SOURCE_EXPLICIT
+        assert decision.similarity == 1.0
 
     def test_heuristic_can_be_disabled(self):
         payload = main_payload("napraw testy")
@@ -689,8 +753,7 @@ class TestPassthrough:
 
     def test_mode_without_a_model_is_a_no_op(self):
         modes = tuple(
-            dataclasses.replace(mode, model_name="") if mode.name == "plan"
-            else mode
+            dataclasses.replace(mode, model_name="") if mode.name == "plan" else mode
             for mode in _config().codex_modes
         )
         plugin = _plugin(_rebuild(_config(), codex_modes=modes))
@@ -706,7 +769,9 @@ class TestPassthrough:
 
     def test_unclassified_mode_is_a_no_op(self, monkeypatch):
         unknown = RoutingDecision("ghost", SOURCE_CLASS, 1.0, 1.0)
-        monkeypatch.setattr(plugin_module, "classify", lambda *args, **kwargs: unknown)
+        monkeypatch.setattr(
+            plugin_module, "classify", lambda *args, **kwargs: unknown
+        )
         payload = main_payload()
         before = copy.deepcopy(payload)
 
@@ -788,8 +853,11 @@ class TestScoring:
             ({"phrases": ("napraw testy:3",)}, "napraw testy", 3.0),
             ({"patterns": (r"\bnapraw\b",)}, "napraw testy", 3.0),
             (
-                {"keywords": ("testy",), "phrases": ("napraw",),
-                 "patterns": (r"\bmodu",)},
+                {
+                    "keywords": ("testy",),
+                    "phrases": ("napraw",),
+                    "patterns": (r"\bmodu",),
+                },
                 "napraw testy modu",
                 6.0,
             ),
@@ -857,7 +925,7 @@ class TestScoring:
         assert score == 0.0
 
     def test_heuristic_modes_are_the_sub_modes_only(self):
-        assert HEURISTIC_MODES == ("test", "review", "debug")
+        assert HEURISTIC_MODES == ("test", "git_review", "review", "debug")
 
 
 # --------------------------------------------------------------------------
@@ -878,8 +946,11 @@ class TestPayloadRobustness:
             {"client_metadata": {"x-codex-turn-metadata": "not json"}},
             {"text": "nope"},
             {"reasoning": "nope"},
-            {"input": [{"type": "message", "role": "user",
-                        "content": "plain string"}]},
+            {
+                "input": [
+                    {"type": "message", "role": "user", "content": "plain string"}
+                ]
+            },
         ],
     )
     def test_malformed_payloads_parse(self, payload):
@@ -893,8 +964,11 @@ class TestPayloadRobustness:
 
     def test_string_content_is_used_as_text(self):
         request = parse_codex_payload(
-            {"input": [{"type": "message", "role": "user",
-                        "content": "plain string"}]},
+            {
+                "input": [
+                    {"type": "message", "role": "user", "content": "plain string"}
+                ]
+            },
         )
 
         assert request.latest_user_text == "plain string"
@@ -976,8 +1050,14 @@ class TestConfig:
         config = _config()
 
         assert config.mode_names == [
-            "plan", "implement", "test", "review", "debug",
-            "aux_title", "compaction",
+            "plan",
+            "implement",
+            "test",
+            "git_review",
+            "review",
+            "debug",
+            "aux_title",
+            "compaction",
         ]
         assert list(config.mode_by_name.keys()) == config.mode_names
 
@@ -989,6 +1069,7 @@ class TestConfig:
             ("compaction", "qwen/Qwen3.8-Flash-Next"),
             ("implement", "qwen/Qwen3.8-27B"),
             ("test", "qwen/Qwen3.8-27B"),
+            ("git_review", "qwen/Qwen3.8-27B"),
             ("review", "qwen/Qwen3.8-27B"),
             ("debug", "qwen/Qwen3.8-27B"),
         ],
@@ -1008,7 +1089,14 @@ class TestConfig:
     def test_sub_modes_carry_polish_and_english_signals(self):
         config = _config()
 
-        for mode_name in ("plan", "implement", "test", "review", "debug"):
+        for mode_name in (
+            "plan",
+            "implement",
+            "test",
+            "git_review",
+            "review",
+            "debug",
+        ):
             mode = config.mode_by_name[mode_name]
             assert mode.keywords
             assert mode.phrases
@@ -1028,20 +1116,34 @@ class TestConfig:
     @pytest.mark.parametrize(
         "mutate,fragment",
         [
-            (lambda raw: raw.pop("settings"),
-             "Missing required top-level key 'settings' in config."),
-            (lambda raw: raw.pop("codex_modes"),
-             "Missing required top-level key 'codex_modes' in config."),
-            (lambda raw: raw["settings"].pop("trigger_model"),
-             "Missing required field 'trigger_model' in settings."),
-            (lambda raw: raw["settings"].pop("fallback_mode"),
-             "Missing required field 'fallback_mode' in settings."),
-            (lambda raw: raw["codex_modes"][0].pop("name"),
-             "Missing required field 'name' in codex_modes[0]."),
-            (lambda raw: raw["codex_modes"][0].pop("model_name"),
-             "Missing required field 'model_name' in codex_modes[0]."),
-            (lambda raw: raw["codex_modes"][0].pop("description"),
-             "Missing required field 'description' in codex_modes[0]."),
+            (
+                lambda raw: raw.pop("settings"),
+                "Missing required top-level key 'settings' in config.",
+            ),
+            (
+                lambda raw: raw.pop("codex_modes"),
+                "Missing required top-level key 'codex_modes' in config.",
+            ),
+            (
+                lambda raw: raw["settings"].pop("trigger_model"),
+                "Missing required field 'trigger_model' in settings.",
+            ),
+            (
+                lambda raw: raw["settings"].pop("fallback_mode"),
+                "Missing required field 'fallback_mode' in settings.",
+            ),
+            (
+                lambda raw: raw["codex_modes"][0].pop("name"),
+                "Missing required field 'name' in codex_modes[0].",
+            ),
+            (
+                lambda raw: raw["codex_modes"][0].pop("model_name"),
+                "Missing required field 'model_name' in codex_modes[0].",
+            ),
+            (
+                lambda raw: raw["codex_modes"][0].pop("description"),
+                "Missing required field 'description' in codex_modes[0].",
+            ),
         ],
     )
     def test_missing_required_keys_are_reported(self, mutate, fragment):
@@ -1056,10 +1158,14 @@ class TestConfig:
         [
             ({"trigger_model": ""}, "no trigger configured"),
             ({"codex_modes": ()}, "no Codex modes defined"),
-            ({"fallback_mode": "nope"},
-             "fallback_mode 'nope' is not a defined Codex mode"),
-            ({"semantic_enabled": True, "embedding_model": ""},
-             "no embedding_model configured"),
+            (
+                {"fallback_mode": "nope"},
+                "fallback_mode 'nope' is not a defined Codex mode",
+            ),
+            (
+                {"semantic_enabled": True, "embedding_model": ""},
+                "no embedding_model configured",
+            ),
             ({"chunk_size": 0}, "chunk_size must be > 0, got 0"),
             ({"chunk_overlap": -1}, "chunk_overlap must be >= 0, got -1"),
             ({"top_k": 0}, "top_k must be >= 1, got 0"),
@@ -1077,8 +1183,9 @@ class TestConfig:
             config, codex_modes=config.codex_modes + config.codex_modes[:1]
         )
 
-        with pytest.raises(ValueError,
-                           match=re.escape("duplicate Codex mode names ['plan']")):
+        with pytest.raises(
+            ValueError, match=re.escape("duplicate Codex mode names ['plan']")
+        ):
             config.validate_args()
 
     def test_embedding_model_is_only_required_when_semantic_is_enabled(self):
@@ -1088,8 +1195,7 @@ class TestConfig:
 
     def test_mode_without_a_model_is_valid(self):
         modes = tuple(
-            dataclasses.replace(mode, model_name="") if mode.name == "plan"
-            else mode
+            dataclasses.replace(mode, model_name="") if mode.name == "plan" else mode
             for mode in _config().codex_modes
         )
 
@@ -1114,7 +1220,9 @@ class TestEnvironmentOverrides:
     """Every documented env var reshapes the config without touching the file."""
 
     def test_trigger_is_overridden(self, monkeypatch):
-        assert _load_with_env(monkeypatch, TRIGGER="auto_x").trigger_model == "auto_x"
+        assert (
+            _load_with_env(monkeypatch, TRIGGER="auto_x").trigger_model == "auto_x"
+        )
 
     def test_single_mode_model_is_overridden(self, monkeypatch):
         config = _load_with_env(monkeypatch, MODEL_PLAN="m/plan")
@@ -1126,7 +1234,7 @@ class TestEnvironmentOverrides:
 
         assert config.mode_by_name["plan"].model_name == "x"
         assert config.mode_by_name["test"].model_name == "y"
-        assert len(config.codex_modes) == 7
+        assert len(config.codex_modes) == 8
 
     def test_mode_whitelist(self, monkeypatch):
         config = _load_with_env(monkeypatch, MODES="plan|implement")
@@ -1136,7 +1244,7 @@ class TestEnvironmentOverrides:
     def test_unknown_mode_whitelist_is_ignored(self, monkeypatch):
         config = _load_with_env(monkeypatch, MODES="nope|nada")
 
-        assert len(config.codex_modes) == 7
+        assert len(config.codex_modes) == 8
 
     def test_fallback_mode_is_overridden(self, monkeypatch):
         config = _load_with_env(monkeypatch, FALLBACK_MODE="review")
@@ -1258,7 +1366,9 @@ class TestDeterminism:
         similarities = set()
         for _ in range(4):
             payload = main_payload("Napraw testy jednostkowe.")
-            similarities.add(_decide(parse_codex_payload(payload), payload).similarity)
+            similarities.add(
+                _decide(parse_codex_payload(payload), payload).similarity
+            )
 
         assert len(similarities) == 1
 
@@ -1269,8 +1379,14 @@ class TestDeterminism:
 class _StubRouter:
     """Stand in for the BiEncoder + FAISS router, without any ML dependency."""
 
-    def __init__(self, target_name="test", similarity=0.9, all_scores=None,
-                 fail=False, raw_result=None):
+    def __init__(
+        self,
+        target_name="test",
+        similarity=0.9,
+        all_scores=None,
+        fail=False,
+        raw_result=None,
+    ):
         self.target_name = target_name
         self.similarity = similarity
         self.all_scores = all_scores
@@ -1464,7 +1580,10 @@ class TestSemanticSimilarity:
     def test_semantic_match_wins_when_keywords_are_silent(self):
         router = _StubRouter("debug", 0.81)
 
-        decision = _classify_semantic(main_payload("przygotuj commit"), router)
+        decision = _classify_semantic(
+            main_payload("wyrenderuj pusty stan w widoku"),
+            router,
+        )
 
         assert decision.mode == "debug"
         assert decision.source == SOURCE_SEMANTIC
@@ -1475,7 +1594,10 @@ class TestSemanticSimilarity:
             "debug", 0.2, all_scores=[{"target": "implement", "similarity": 0.31}]
         )
 
-        decision = _classify_semantic(main_payload("przygotuj commit"), router)
+        decision = _classify_semantic(
+            main_payload("wyrenderuj pusty stan w widoku"),
+            router,
+        )
 
         assert decision.mode == "implement"
         assert decision.source == SOURCE_FALLBACK
@@ -1486,7 +1608,9 @@ class TestSemanticSimilarity:
         logger = _CaptureLogger()
 
         decision = _classify_semantic(
-            main_payload("przygotuj commit"), _StubRouter(fail=True), logger=logger
+            main_payload("wyrenderuj pusty stan w widoku"),
+            _StubRouter(fail=True),
+            logger=logger,
         )
 
         assert decision.mode == "implement"
@@ -1506,7 +1630,7 @@ class TestSemanticSimilarity:
         logger = _CaptureLogger()
 
         _classify_semantic(
-            main_payload("przygotuj commit"),
+            main_payload("wyrenderuj pusty stan w widoku"),
             _StubRouter("debug", 0.2),
             threshold=0.5,
             logger=logger,
@@ -1515,8 +1639,9 @@ class TestSemanticSimilarity:
         assert "below threshold" in logger.joined()
 
     def test_the_text_is_embedded_at_most_once_per_request(self):
-        router = _StubRouter("test", 0.9, all_scores=[{"target": "test",
-                                                       "similarity": 0.9}])
+        router = _StubRouter(
+            "test", 0.9, all_scores=[{"target": "test", "similarity": 0.9}]
+        )
 
         _classify_semantic(main_payload("napraw testy"), router)
 
@@ -1535,7 +1660,7 @@ class TestSemanticSimilarity:
             logger=None, config=_config(), emb_router=_StubRouter("debug", 0.81)
         )
 
-        result = plugin.apply(main_payload("przygotuj commit"))
+        result = plugin.apply(main_payload("wyrenderuj pusty stan w widoku"))
 
         assert result["model"] == _expected_model("debug")
         assert result["routing"] == {
@@ -1560,15 +1685,13 @@ class TestSemanticSimilarity:
             semantic=_semantic_layer(strong),
         )
 
-        result = plugin.apply(main_payload("przygotuj commit"))
+        result = plugin.apply(main_payload("wyrenderuj pusty stan w widoku"))
 
         assert result["routing"]["agent_mode"] == "debug"
         assert weak.calls == []
-        assert strong.calls == ["przygotuj commit"]
+        assert strong.calls == ["wyrenderuj pusty stan w widoku"]
 
-    def test_semantic_routing_stays_off_when_disabled_by_env(
-        self, monkeypatch
-    ):
+    def test_semantic_routing_stays_off_when_disabled_by_env(self, monkeypatch):
         monkeypatch.setenv(f"{_PREFIX}SEMANTIC_ENABLED", "false")
 
         plugin = CodexRoutingPlugin(logger=None, emb_router=_StubRouter())
@@ -1595,10 +1718,14 @@ class TestSemanticSimilarity:
             captured.update(kwargs)
             return router
 
-        monkeypatch.setattr(plugin_module, "build_embedding_router",
-                            fake_build_router)
-        monkeypatch.setattr(plugin_module, "resolve_persist_dir",
-                            lambda *_args, **_kwargs: str(tmp_path))
+        monkeypatch.setattr(
+            plugin_module, "build_embedding_router", fake_build_router
+        )
+        monkeypatch.setattr(
+            plugin_module,
+            "resolve_persist_dir",
+            lambda *_args, **_kwargs: str(tmp_path),
+        )
         config = _config()
 
         plugin = CodexRoutingPlugin(logger=None, config=config)
@@ -1613,6 +1740,7 @@ class TestSemanticSimilarity:
             "plan",
             "implement",
             "test",
+            "git_review",
             "review",
             "debug",
         )
@@ -1628,6 +1756,7 @@ class TestSemanticSimilarity:
 
         assert plugin._semantic is None
         assert "semantic routing disabled" in logger.joined()
-        assert plugin.apply(main_payload("napraw testy"))["routing"][
-            "similarity"
-        ] == 0.9
+        assert (
+            plugin.apply(main_payload("napraw testy"))["routing"]["similarity"]
+            == 0.9
+        )
