@@ -12,6 +12,7 @@ Mode                    Routed by                                   Model
 ``plan``                ``<collaboration_mode>`` Plan Mode block    Flash-Next
 ``implement``           fallback for plain main turns               27B
 ``test``                keyword scoring of the latest message       27B
+``git_review``          keyword scoring of the latest message       27B
 ``review``              keyword scoring of the latest message       27B
 ``debug``               keyword scoring of the latest message       27B
 ``aux_title``           request class (system title generation)     Flash-Next

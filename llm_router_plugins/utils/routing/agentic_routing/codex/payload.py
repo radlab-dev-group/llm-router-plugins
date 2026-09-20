@@ -169,9 +169,9 @@ def parse_codex_payload(payload: Dict[str, Any]) -> "CodexRequest":
     turn_metadata = _decode_turn_metadata(client_metadata.get(_TURN_METADATA_KEY))
     items = _input_items(body)
 
-    context_chars = (
-        _serialized_length(body.get("instructions")) + _serialized_length(items)
-    )
+    context_chars = _serialized_length(
+        body.get("instructions")
+    ) + _serialized_length(items)
     tool_names = _tool_names(body.get("tools"))
 
     return CodexRequest(

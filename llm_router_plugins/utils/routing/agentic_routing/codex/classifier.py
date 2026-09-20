@@ -17,7 +17,7 @@ Cascade
 3. **collaboration_mode** — the ``<collaboration_mode>`` block injected by the
    Codex CLI declares Plan Mode.
 4. **heuristic** — keyword scoring of the latest user message against the
-   ``test`` / ``review`` / ``debug`` modes.
+   keyword-scored modes (``test``, ``git_review``, ``review``, ``debug``).
 5. **semantic** — embedding cosine similarity over the mode descriptions and
    examples, delegated to
    :class:`~llm_router_plugins.utils.routing.agentic_routing.codex.semantic.
@@ -92,8 +92,10 @@ SOURCE_FALLBACK = "fallback"
 
 #: Modes eligible for keyword scoring.  ``plan`` is decided by the
 #: collaboration block and ``implement`` is the fallback, so neither needs
-#: keywords; ``aux_title``/``compaction`` are class-routed.
-HEURISTIC_MODES: Tuple[str, ...] = ("test", "review", "debug")
+#: keywords; ``aux_title``/``compaction`` are class-routed.  ``git_review``
+#: precedes ``review`` so a message that is both a review and a version
+#: control question is routed to the git-aware mode on a tied score.
+HEURISTIC_MODES: Tuple[str, ...] = ("test", "git_review", "review", "debug")
 
 #: Name of the payload key holding an explicit mode override.
 _AGENT_MODE_KEY = "agent_mode"
@@ -191,7 +193,9 @@ def classify(
         if decision is not None:
             return decision
 
-    mode, similarity = semantic.accept(routed) if semantic is not None else (None, 0.0)
+    mode, similarity = (
+        semantic.accept(routed) if semantic is not None else (None, 0.0)
+    )
     if mode is not None:
         return RoutingDecision(mode.name, SOURCE_SEMANTIC, similarity, similarity)
 
@@ -304,7 +308,9 @@ def _heuristic_mode(
     if not text:
         return None
 
-    candidates = [mode for mode in config.codex_modes if mode.name in HEURISTIC_MODES]
+    candidates = [
+        mode for mode in config.codex_modes if mode.name in HEURISTIC_MODES
+    ]
     if not candidates:
         return None
 

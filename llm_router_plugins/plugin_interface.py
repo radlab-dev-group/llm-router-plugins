@@ -146,7 +146,9 @@ class HttpPluginInterface(PluginInterface, abc.ABC):
         return self.host_url.rstrip("/") + "/" + self.endpoint_path
 
     @abc.abstractmethod
-    def apply(self, payload: Any, **kwargs: Any) -> Tuple[bool | str, Dict[str, Any]]:
+    def apply(
+        self, payload: Any, **kwargs: Any
+    ) -> Tuple[bool | str, Dict[str, Any]]:
         """
         Process *payload* using the common HTTP request mechanism.
 

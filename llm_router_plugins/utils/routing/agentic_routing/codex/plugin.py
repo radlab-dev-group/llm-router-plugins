@@ -38,7 +38,9 @@ import logging
 from typing import Any, Optional
 
 from llm_router_plugins.plugin_interface import PluginInterface
-from llm_router_plugins.utils.routing.agentic_routing.codex.classifier import classify
+from llm_router_plugins.utils.routing.agentic_routing.codex.classifier import (
+    classify,
+)
 from llm_router_plugins.utils.routing.agentic_routing.codex.config import (
     CodexRoutingConfig,
 )
@@ -180,7 +182,6 @@ class CodexRoutingPlugin(PluginInterface):
         except Exception as exc:  # routing must never break a request
             self._warn("Codex routing failed, passing the request through: %s", exc)
             return payload
-
 
         mode = self._config.mode_by_name.get(decision.mode)
         if mode is None:
