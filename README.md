@@ -458,13 +458,13 @@ Modes ship in [agentic_routing_codex.json](llm_router_plugins/resources/routing/
 | Mode         | Model                     | Routed by                                      |
 | ------------ | ------------------------- | ---------------------------------------------- |
 | `plan`       | `qwen/Qwen3.8-Flash-Next` | `<collaboration_mode>` Plan Mode block         |
-| `implement`  | `qwen/Qwen3.8-27B`        | Fallback for a plain main turn                 |
+| `implement`  | `qwen/Qwen3.8-Flash-Next` | Fallback for a plain main turn                 |
 | `test`       | `qwen/Qwen3.8-27B`        | Keywords in the latest user message            |
 | `git_review` | `qwen/Qwen3.8-27B`        | Keywords in the latest user message            |
-| `review`     | `qwen/Qwen3.8-27B`        | Keywords in the latest user message            |
-| `debug`      | `qwen/Qwen3.8-27B`        | Keywords in the latest user message            |
-| `aux_title`  | `qwen/Qwen3.8-Flash-Next` | Request class — system-thread title generation |
-| `compaction` | `qwen/Qwen3.8-Flash-Next` | Request class — context compaction             |
+| `review`     | `qwen/Qwen3.8-Flash-Next` | Keywords in the latest user message            |
+| `debug`      | `qwen/Qwen3.8-Flash-Next` | Keywords in the latest user message            |
+| `aux_title`  | `qwen/Qwen3.8-27B`        | Request class — system-thread title generation |
+| `compaction` | `qwen/Qwen3.8-27B`        | Request class — context compaction             |
 
 **2. Request classes:**
 
@@ -555,7 +555,7 @@ payload = {
 
 The same payload with a `# Collaboration Mode: Default` block and `"napraw testy w tests/"` resolves to `test` /
 `qwen/Qwen3.8-27B` with `source: "heuristic"`; a title-generation request on a system thread resolves to `aux_title` /
-`qwen/Qwen3.8-Flash-Next` with `source: "class"`.
+`qwen/Qwen3.8-27B` with `source: "class"`.
 
 **Environment variable overrides** (prefix `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_`):
 

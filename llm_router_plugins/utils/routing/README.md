@@ -1123,7 +1123,7 @@ Notes:
     "vector_store_path": "",
     "semantic": {
       "enabled": true,
-      "threshold": 0.55,
+      "threshold": 0.51,
       "top_k": 3,
       "chunk_size": 256,
       "chunk_overlap": 64
@@ -1150,13 +1150,13 @@ precedence the cascade works through.
 | Mode         | Default model                | Decided by                                  |
 |--------------|------------------------------|-----------------------------------------------|
 | `plan`       | `qwen/Qwen3.8-Flash-Next`    | Collaboration block, then keywords/embeddings |
-| `implement`  | `qwen/Qwen3.8-27B`           | Fallback for main turns, then keywords        |
+| `implement`  | `qwen/Qwen3.8-Flash-Next`    | Fallback for main turns, then keywords        |
 | `test`       | `qwen/Qwen3.8-27B`           | Keywords / embeddings                         |
 | `git_review` | `qwen/Qwen3.8-27B`           | Keywords / embeddings                         |
-| `review`     | `qwen/Qwen3.8-27B`           | Keywords / embeddings                         |
-| `debug`      | `qwen/Qwen3.8-27B`           | Keywords / embeddings                         |
-| `aux_title`  | `qwen/Qwen3.8-Flash-Next`    | Request class only (no keywords)              |
-| `compaction` | `qwen/Qwen3.8-Flash-Next`    | Request class only (no keywords)              |
+| `review`     | `qwen/Qwen3.8-Flash-Next`    | Keywords / embeddings                         |
+| `debug`      | `qwen/Qwen3.8-Flash-Next`    | Keywords / embeddings                         |
+| `aux_title`  | `qwen/Qwen3.8-27B`           | Request class only (no keywords)              |
+| `compaction` | `qwen/Qwen3.8-27B`           | Request class only (no keywords)              |
 
 A mode whose `model_name` is empty is a deliberate **passthrough**: the payload is returned unchanged, so an
 operator can disable a single mode without removing it or touching the plugin.
@@ -1223,12 +1223,12 @@ With the same plugin and a Default-mode collaboration block, the latest user mes
 | Latest user message                                          | `model`                | `agent_mode` | `source`             | `similarity` |
 |----------------------------------------------------------------|------------------------|--------------|----------------------|--------------|
 | `"Zaplanuj migrację bazy danych."` + Plan Mode block           | `qwen/Qwen3.8-Flash-Next` | `plan`     | `collaboration_mode` | 1.0          |
-| `"Zaimplementuj nowy moduł eksportu."`                         | `qwen/Qwen3.8-27B`     | `implement`  | `fallback`           | 0.0          |
-| `"napraw testy w tests/"`                                      | `qwen/Qwen3.8-27B`     | `test`       | `heuristic`          | 0.9          |
-| `"Przejrzyj ten katalog i zaproponuj poprawki do modułów"`     | `qwen/Qwen3.8-27B`     | `review`     | `heuristic`          | 0.9285714285714286 |
-| `"hello world"`                                                | `qwen/Qwen3.8-27B`     | `implement`  | `fallback`           | 0.0          |
-| Title generation (`thread_source="system"`, `tools: []`)       | `qwen/Qwen3.8-Flash-Next` | `aux_title` | `class`             | 1.0          |
-| `request_kind="compaction"`                                    | `qwen/Qwen3.8-Flash-Next` | `compaction` | `class`            | 1.0          |
+| `"Zaimplementuj nowy moduł eksportu."`                         | `qwen/Qwen3.8-Flash-Next` | `implement`  | `heuristic`          | 0.9375       |
+| `"napraw testy w tests/"`                                      | `qwen/Qwen3.8-27B`     | `test`       | `heuristic`          | 0.9333333333333333 |
+| `"Przejrzyj ten katalog i zaproponuj poprawki do modułów"`     | `qwen/Qwen3.8-Flash-Next` | `review`     | `heuristic`          | 0.9333333333333333 |
+| `"hello world"`                                                | `qwen/Qwen3.8-Flash-Next` | `implement`  | `fallback`           | 0.0          |
+| Title generation (`thread_source="system"`, `tools: []`)       | `qwen/Qwen3.8-27B`     | `aux_title` | `class`             | 1.0          |
+| `request_kind="compaction"`                                    | `qwen/Qwen3.8-27B`     | `compaction` | `class`            | 1.0          |
 | Any payload with `model="gpt-4"`                               | the payload object itself (identity) | — | —            | —            |
 
 The table was captured with `..._SEMANTIC_ENABLED=false`, so heuristic rows still show `score / (score + 1)`. With

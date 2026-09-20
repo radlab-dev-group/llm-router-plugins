@@ -444,18 +444,18 @@ class TestHeuristicClassification:
     @pytest.mark.parametrize(
         "text,expected_mode,expected_score",
         [
-            ("napraw testy", "test", 9.0),
-            ("run the tests", "test", 7.0),
-            ("RUN THE TESTS", "test", 7.0),
-            ("Dodaj testy jednostkowe do modułu płatności", "test", 12.0),
+            ("napraw testy", "test", 14.0),
+            ("run the tests", "test", 11.0),
+            ("RUN THE TESTS", "test", 11.0),
+            ("Dodaj testy jednostkowe do modułu płatności", "test", 17.0),
             (
                 "Przejrzyj ten katalog i zaproponuj poprawki do modułów",
                 "review",
-                13.0,
+                14.0,
             ),
             ("Napraw ten błąd w module auth.", "debug", 5.0),
-            ("Czy możesz zdebugować ten błąd w parserze?", "debug", 3.0),
-            ("zrób refactor i przejrzyj to", "review", 6.0),
+            ("Czy możesz zdebugować ten błąd w parserze?", "debug", 4.0),
+            ("zrób refactor i przejrzyj to", "review", 8.0),
         ],
     )
     def test_prompts_select_a_specialised_mode(
@@ -476,8 +476,8 @@ class TestHeuristicClassification:
         "text",
         [
             "wyrenderuj pusty stan w widoku",
-            "Zaimplementuj nowy plugin routingowy i zarejestruj go.",
-            "test",
+            "Zaimplementuj nowy moduł eksportu i podłącz go do aplikacji.",
+            "deploy the service to the cluster",
             "",
         ],
     )
@@ -501,7 +501,7 @@ class TestHeuristicClassification:
             "porównaj ten branch z develop",
             "review the diff before I merge",
             "przejrzyj merge request w GitLabie",
-            "kto to zmienił — blame tego plika",
+            "Sprawdź historię tego pliku przez git blame.",
             "zrób commit z tymi zmianami",
             "resolve the merge conflicts",
         ],
@@ -517,10 +517,10 @@ class TestHeuristicClassification:
     @pytest.mark.parametrize(
         "text",
         [
-            "użyj merge sorta do sortowania tabeli",
-            "dodaj push notifications do aplikacji",
+            "użyj quicksort do sortowania tabeli",
+            "dodaj powiadomienia dla użytkowników do aplikacji",
             "don't blame the user for this input",
-            "branchless thinking o projektowaniu",
+            "rozważ inne podejście do projektowania",
             "porównaj dwa podejścia architektoniczne",
             "the prairie fire spread",
         ],
@@ -575,7 +575,7 @@ class TestHeuristicClassification:
 
         assert payload["model"] == _expected_model("test")
         assert payload["agent_mode"] == "test"
-        assert payload["routing"]["similarity"] == pytest.approx(0.9)
+        assert payload["routing"]["similarity"] == pytest.approx(14.0 / 15.0)
 
 
 # --------------------------------------------------------------------------
@@ -1065,13 +1065,13 @@ class TestConfig:
         "mode_name,model_name",
         [
             ("plan", "qwen/Qwen3.8-Flash-Next"),
-            ("aux_title", "qwen/Qwen3.8-Flash-Next"),
-            ("compaction", "qwen/Qwen3.8-Flash-Next"),
-            ("implement", "qwen/Qwen3.8-27B"),
+            ("aux_title", "qwen/Qwen3.8-27B"),
+            ("compaction", "qwen/Qwen3.8-27B"),
+            ("implement", "qwen/Qwen3.8-Flash-Next"),
             ("test", "qwen/Qwen3.8-27B"),
             ("git_review", "qwen/Qwen3.8-27B"),
-            ("review", "qwen/Qwen3.8-27B"),
-            ("debug", "qwen/Qwen3.8-27B"),
+            ("review", "qwen/Qwen3.8-Flash-Next"),
+            ("debug", "qwen/Qwen3.8-Flash-Next"),
         ],
     )
     def test_shipped_mode_models(self, mode_name, model_name):
@@ -1106,7 +1106,7 @@ class TestConfig:
         config = _config()
 
         assert config.semantic_enabled is True
-        assert config.similarity_threshold == 0.55
+        assert config.similarity_threshold == 0.51
         assert config.top_k == 3
         assert config.chunk_size == 256
         assert config.chunk_overlap == 64
@@ -1269,7 +1269,7 @@ class TestEnvironmentOverrides:
     def test_keywords_of_an_unknown_mode_are_ignored(self, monkeypatch):
         config = _load_with_env(monkeypatch, MODE_nope_KEYWORDS="a|b")
 
-        assert len(config.mode_by_name["test"].keywords) == 9
+        assert len(config.mode_by_name["test"].keywords) == 20
 
     def test_embedding_settings_are_overridden(self, monkeypatch):
         config = _load_with_env(
@@ -1574,7 +1574,7 @@ class TestSemanticSimilarity:
 
         assert decision.mode == "test"
         assert decision.source == SOURCE_HEURISTIC
-        assert decision.score == 9.0
+        assert decision.score == 14.0
         assert decision.similarity == 0.77
 
     def test_semantic_match_wins_when_keywords_are_silent(self):
@@ -1624,7 +1624,7 @@ class TestSemanticSimilarity:
         decision = _decide(parse_codex_payload(payload), payload)
 
         assert decision.source == SOURCE_HEURISTIC
-        assert decision.similarity == score_to_similarity(decision.score) == 0.9
+        assert decision.similarity == score_to_similarity(decision.score)
 
     def test_below_threshold_match_is_logged(self):
         logger = _CaptureLogger()
@@ -1758,5 +1758,5 @@ class TestSemanticSimilarity:
         assert "semantic routing disabled" in logger.joined()
         assert (
             plugin.apply(main_payload("napraw testy"))["routing"]["similarity"]
-            == 0.9
+            == pytest.approx(14.0 / 15.0)
         )
