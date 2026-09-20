@@ -460,6 +460,7 @@ Modes ship in [agentic_routing_codex.json](llm_router_plugins/resources/routing/
 | `plan`       | `qwen/Qwen3.8-Flash-Next` | `<collaboration_mode>` Plan Mode block         |
 | `implement`  | `qwen/Qwen3.8-27B`        | Fallback for a plain main turn                 |
 | `test`       | `qwen/Qwen3.8-27B`        | Keywords in the latest user message            |
+| `git_review` | `qwen/Qwen3.8-27B`        | Keywords in the latest user message            |
 | `review`     | `qwen/Qwen3.8-27B`        | Keywords in the latest user message            |
 | `debug`      | `qwen/Qwen3.8-27B`        | Keywords in the latest user message            |
 | `aux_title`  | `qwen/Qwen3.8-Flash-Next` | Request class — system-thread title generation |
@@ -488,16 +489,16 @@ read. `client_metadata` carries the ids (`session_id`, `thread_id`, `turn_id`, `
 | 5 | Embedding cosine similarity over the mode examples           | `semantic`           | cosine of the matched mode         |
 | 6 | Configured `fallback_mode` (`implement`)                     | `fallback`           | cosine of that mode, else `0.0`    |
 
-Only `test`, `review` and `debug` compete in the keyword layer: `plan` is declared by the CLI and `implement` is the
-fallback, so neither needs keywords. A keyword hit needs `heuristic_min_score` (default `2.0`) or the layer stays
-silent. The `<collaboration_mode>` block is re-read on every request and the **last** occurrence wins, so a
-Plan → Default switch mid-session reclassifies the next turn correctly. Keyword scoring is Polish + English because
-real prompts are short strings such as `"napraw testy"` or `"Przejrzyj ten katalog i zaproponuj poprawki"`.
+Only `test`, `git_review`, `review` and `debug` compete in the keyword layer: `plan` is declared by the CLI and
+`implement` is the fallback, so neither needs keywords. A keyword hit needs `heuristic_min_score` (default `2.0`) or the
+layer stays silent. The `<collaboration_mode>` block is re-read on every request and the **last** occurrence wins, so a
+Plan → Default switch mid-session reclassifies the next turn correctly. Keyword scoring is Polish + English because real
+prompts are short strings such as `"napraw testy"` or `"Przejrzyj ten katalog i zaproponuj poprawki"`.
 
 **4. Similarity is embedding cosine similarity, exactly like `agentic_routing`:**
 
 `routing.similarity` reports **embedding cosine similarity** produced by the same BiEncoder + FAISS stack
-(`build_embedding_router` in `utils/routing/common.py`, `google/embeddinggemma-300m` by default). The five work modes
+(`build_embedding_router` in `utils/routing/common.py`, `google/embeddinggemma-300m` by default). The six work modes
 are indexed once at startup — `aux_title` and `compaction` are excluded because the request class already decides
 them — and a request issues **at most one** `route(text)` lookup, whose result is reused by the heuristic, semantic
 and fallback layers so the text is never embedded twice. The layer is fail-open: without

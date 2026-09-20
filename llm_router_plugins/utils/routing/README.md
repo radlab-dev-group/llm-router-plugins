@@ -990,9 +990,9 @@ escalation, session affinity and the cascade order — and runs with no ML depen
 
 The **Codex Routing plugin** (`agentic_routing_codex`) routes OpenAI-Responses-style requests emitted by the
 **Codex CLI** coding agent. It activates when `payload["model"]` equals its own trigger value (`"auto_codex"` by
-default), resolves the agent's **work mode** (`plan`, `implement`, `test`, `review`, `debug`, `aux_title`,
-`compaction`) and rewrites `payload["model"]`. Exactly three keys change — `model`, `routing` and `agent_mode`;
-`tools`, `instructions`, `input`, `reasoning`, `text` and `stream` are forwarded byte-identical.
+default), resolves the agent's **work mode** (`plan`, `implement`, `test`, `git_review`, `review`, `debug`, `aux_title`,
+`compaction`) and rewrites `payload["model"]`. Exactly three keys change — `model`, `routing` and `agent_mode`; `tools`,
+`instructions`, `input`, `reasoning`, `text` and `stream` are forwarded byte-identical.
 
 The Codex CLI needs a plugin of its own for two reasons:
 
@@ -1067,9 +1067,9 @@ Details worth knowing:
 
 - **Compaction outranks everything except an explicit mode**, including a plan collaboration block — a compaction
   request still carries the mode text of the conversation it is compacting.
-- Only `test`, `review` and `debug` are keyword-scored. `plan` is decided by the declared collaboration block, and
-  a main turn never falls below `implement`: the probabilistic layers can specialise a decision but can never make
-  it weaker.
+- Only `test`, `git_review`, `review` and `debug` are keyword-scored. `plan` is decided by the declared
+  collaboration block, and a main turn never falls below `implement`: the probabilistic layers can specialise a
+  decision but can never make it weaker.
 - A heuristic hit needs `score >= heuristic_min_score` (`2.0` by default); below it the request stays on the
   fallback mode. Scores sum across keywords, phrases and patterns, and ties are won by the mode declared first in
   `codex_modes`.
@@ -1096,8 +1096,9 @@ plugins. The bundled embedding model is `google/embeddinggemma-300m`.
 
 Notes:
 
-- `aux_title` and `compaction` are **excluded from the index** — they are class-routed, so indexing them would only
-  add near-miss neighbours for real turns. The indexed targets are `plan`, `implement`, `test`, `review`, `debug`.
+- `aux_title` and `compaction` are **excluded from the index** — they are class-routed, so indexing them would
+  only add near-miss neighbours for real turns. The indexed targets are `plan`, `implement`, `test`,
+  `git_review`, `review`, `debug`.
 - A request queries the store **at most once**: the same lookup both accepts a semantic match and supplies the
   cosine reported for heuristic and fallback decisions, so the text is never embedded twice.
 - The layer is optional by construction. With `SEMANTIC_ENABLED=false`, with missing
@@ -1151,6 +1152,7 @@ precedence the cascade works through.
 | `plan`       | `qwen/Qwen3.8-Flash-Next`    | Collaboration block, then keywords/embeddings |
 | `implement`  | `qwen/Qwen3.8-27B`           | Fallback for main turns, then keywords        |
 | `test`       | `qwen/Qwen3.8-27B`           | Keywords / embeddings                         |
+| `git_review` | `qwen/Qwen3.8-27B`           | Keywords / embeddings                         |
 | `review`     | `qwen/Qwen3.8-27B`           | Keywords / embeddings                         |
 | `debug`      | `qwen/Qwen3.8-27B`           | Keywords / embeddings                         |
 | `aux_title`  | `qwen/Qwen3.8-Flash-Next`    | Request class only (no keywords)              |
