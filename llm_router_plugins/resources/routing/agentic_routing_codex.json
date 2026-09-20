@@ -543,7 +543,15 @@
         "Review the implementation and suggest concrete improvements.",
         "Check whether this code has hidden failure cases.",
         "Analyze this module without modifying it.",
-        "Review this change for potential regressions."
+        "Review this change for potential regressions.",
+        "Sprawdź aktualną konfigurację i porównaj ją z README.",
+        "Porównaj konfigurację z dokumentacją i wskaż niespójności.",
+        "Sprawdź, czy README odpowiada aktualnej konfiguracji.",
+        "Zweryfikuj, czy dokumentacja jest zgodna z aktualnymi ustawieniami.",
+        "Przejrzyj konfigurację i dokumentację pod kątem rozbieżności.",
+        "Check whether the README matches the current configuration.",
+        "Compare the current config with the documentation and identify inconsistencies.",
+        "Verify that the documented model assignments are still correct."
       ],
       "keywords": [
         "review",
@@ -593,7 +601,17 @@
         "review for maintainability:3",
         "review for correctness:3",
         "without modifying:3",
-        "bez wprowadzania zmian:3"
+        "bez wprowadzania zmian:3",
+        "porównaj konfigurację z README:3",
+        "sprawdź konfigurację i README:3",
+        "zgodna z README:3",
+        "zgodny z dokumentacją:3",
+        "zgodność z dokumentacją:3",
+        "sprawdź, czy README odpowiada:3",
+        "verify the README against the config:3",
+        "check whether the README matches:3",
+        "compare the config with the documentation:3",
+        "verify the documentation:3"
       ],
       "patterns": [
         "\\b(review|audit)\\b",
