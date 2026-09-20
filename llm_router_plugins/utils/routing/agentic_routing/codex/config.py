@@ -14,7 +14,7 @@ JSON structure::
         "vector_store_path": "",
         "semantic": {
           "enabled": true,
-          "threshold": 0.55,
+          "threshold": 0.51,
           "top_k": 3,
           "chunk_size": 256,
           "chunk_overlap": 64
@@ -206,7 +206,7 @@ class CodexRoutingConfig(RoutingConfigBase):
             vector_store_path=raw.get("vector_store_path")
             or settings.get("vector_store_path"),
             semantic_enabled=bool(semantic.get("enabled", True)),
-            similarity_threshold=float(semantic.get("threshold", 0.55)),
+            similarity_threshold=float(semantic.get("threshold", 0.51)),
             top_k=top_k,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
