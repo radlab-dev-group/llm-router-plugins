@@ -456,6 +456,7 @@ class TestHeuristicClassification:
             ("Napraw ten błąd w module auth.", "debug", 5.0),
             ("Czy możesz zdebugować ten błąd w parserze?", "debug", 4.0),
             ("zrób refactor i przejrzyj to", "review", 8.0),
+            ("zrób push na remote", "git_review", 4.0),
         ],
     )
     def test_prompts_select_a_specialised_mode(
@@ -556,6 +557,40 @@ class TestHeuristicClassification:
         config = dataclasses.replace(_config(), heuristic_min_score=100.0)
 
         decision = _decide(parse_codex_payload(payload), payload, config)
+
+        assert decision.mode == "implement"
+        assert decision.source == SOURCE_FALLBACK
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "jaki jest rozmiar tego pliku",
+            "to nie jest jeszcze gotowe",
+            "uruchom jest testy i powiedz wynik",
+        ],
+    )
+    def test_polish_copula_does_not_select_test_mode(self, text):
+        payload = main_payload(text)
+
+        decision = _decide(parse_codex_payload(payload), payload)
+
+        if "uruchom jest" in text:
+            assert decision.mode == "test"
+        else:
+            assert decision.mode == "implement"
+            assert decision.source == SOURCE_FALLBACK
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "protest przeciw tej zmianie",
+            "knowledge base update",
+        ],
+    )
+    def test_keywords_do_not_match_mid_word(self, text):
+        payload = main_payload(text)
+
+        decision = _decide(parse_codex_payload(payload), payload)
 
         assert decision.mode == "implement"
         assert decision.source == SOURCE_FALLBACK
@@ -877,6 +912,9 @@ class TestScoring:
                 1.0,
             ),
             ({"keywords": ("pytest",), "weights": "nope"}, "pytest x", 1.0),
+            ({"keywords": ("test",)}, "protest x", 0.0),
+            ({"keywords": ("testów",)}, "testów dla modułu", 1.0),
+            ({"keywords": ("testów",)}, "testu dla modułu", 0.0),
             ({"phrases": ("a:x",)}, "a:x", 2.0),
             ({"phrases": ("a:x",)}, "a", 0.0),
             ({"patterns": (r".*",)}, "", 0.0),
@@ -1044,7 +1082,7 @@ class TestConfig:
         assert config.trigger_model == "auto_codex"
         assert config.fallback_mode == "implement"
         assert config.heuristic_enabled is True
-        assert config.heuristic_min_score == 2.0
+        assert config.heuristic_min_score == 3.0
 
     def test_shipped_mode_order(self):
         config = _config()
@@ -1269,7 +1307,7 @@ class TestEnvironmentOverrides:
     def test_keywords_of_an_unknown_mode_are_ignored(self, monkeypatch):
         config = _load_with_env(monkeypatch, MODE_nope_KEYWORDS="a|b")
 
-        assert len(config.mode_by_name["test"].keywords) == 20
+        assert len(config.mode_by_name["test"].keywords) == 19
 
     def test_embedding_settings_are_overridden(self, monkeypatch):
         config = _load_with_env(
