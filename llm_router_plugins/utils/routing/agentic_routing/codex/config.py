@@ -10,7 +10,7 @@ JSON structure::
         "trigger_model": "auto_codex",
         "fallback_mode": "implement",
         "heuristic_enabled": true,
-        "heuristic_min_score": 2.0,
+        "heuristic_min_score": 3.0,
         "vector_store_path": "",
         "semantic": {
           "enabled": true,
@@ -202,7 +202,7 @@ class CodexRoutingConfig(RoutingConfigBase):
             trigger_model=str(settings["trigger_model"]),
             fallback_mode=str(settings["fallback_mode"]),
             heuristic_enabled=bool(settings.get("heuristic_enabled", True)),
-            heuristic_min_score=float(settings.get("heuristic_min_score", 2.0)),
+            heuristic_min_score=float(settings.get("heuristic_min_score", 3.0)),
             vector_store_path=raw.get("vector_store_path")
             or settings.get("vector_store_path"),
             semantic_enabled=bool(semantic.get("enabled", True)),
@@ -513,7 +513,7 @@ class CodexMode(RoutingTarget):
     examples : Tuple[str, ...]
         Example prompts representative of this mode.
     keywords : Tuple[str, ...]
-        Keywords for the scorer (substring matches, default weight 1.0).
+        Keywords for the scorer (word-start matches, default weight 1.0).
     phrases : Tuple[str, ...]
         Multi-word expressions for the scorer, optionally suffixed with
         ``":weight"`` (default weight 2.0).

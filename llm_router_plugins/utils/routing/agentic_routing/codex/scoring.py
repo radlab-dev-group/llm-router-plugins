@@ -4,8 +4,11 @@ Deterministic keyword scoring for the Codex routing plugin.
 Scoring model
 -------------
 A :class:`~llm_router_plugins.utils.routing.agentic_routing.codex.config.
-CodexMode` carries three kinds of signals, all matched case-insensitively as
-plain substrings (patterns being the exception, matching a compiled regex):
+CodexMode` carries three kinds of signals, all matched case-insensitively.
+Keywords and phrases must start at a word boundary, so Polish inflected
+forms still match (``testow`` matches ``testów``) while mid-word hits
+do not (``protest`` does not match ``test``); patterns are the exception,
+matching a compiled regex:
 
 ===========  ==========================================  ==============
 Signal       Weight                                      Source
@@ -28,6 +31,7 @@ produces the same score.
 """
 
 import re
+from functools import lru_cache
 
 from typing import Any, Dict, Iterable, Optional, Tuple
 
@@ -50,6 +54,30 @@ DEFAULT_PHRASE_WEIGHT = 2.0
 
 #: Weight of a regular-expression match.
 PATTERN_WEIGHT = 3.0
+
+
+@lru_cache(maxsize=512)
+def _word_start_pattern(needle: str) -> "re.Pattern[str]":
+    """
+    Compile a leading word-boundary match for *needle*.
+
+    Parameters
+    ----------
+    needle : str
+        A lower-cased keyword or phrase with surrounding whitespace removed.
+
+    Returns
+    -------
+    re.Pattern
+        A compiled regex that matches *needle* only at a word start, allowing
+        inflected suffixes (``testow`` matches ``testów``) while rejecting
+        mid-word hits (``protest`` does not match ``test``).
+
+    Raises
+    ------
+    None
+    """
+    return re.compile(r"(?<!\w)" + re.escape(needle))
 
 
 def _signal_weight(value: str, default: float) -> Tuple[str, float]:
@@ -128,7 +156,9 @@ def score_mode(mode: CodexMode, text_lower: str) -> float:
     -------
     float
         The sum of the weights of every matched signal (``0.0`` when the text
-        is empty or matches nothing).  Invalid regular expressions are skipped.
+        is empty or matches nothing).  Keywords and phrases match at a word
+        start (suffix inflection allowed), patterns as compiled regexes;
+        invalid regular expressions are skipped.
 
     Raises
     ------
@@ -141,11 +171,11 @@ def score_mode(mode: CodexMode, text_lower: str) -> float:
     score = 0.0
     for keyword in mode.keywords:
         needle = keyword.strip().lower()
-        if needle and needle in text_lower:
+        if needle and _word_start_pattern(needle).search(text_lower):
             score += _keyword_weight(keyword, weights)
     for phrase in mode.phrases:
         needle, weight = _signal_weight(phrase, DEFAULT_PHRASE_WEIGHT)
-        if needle and needle in text_lower:
+        if needle and _word_start_pattern(needle).search(text_lower):
             score += weight
     for pattern in mode.patterns:
         try:
