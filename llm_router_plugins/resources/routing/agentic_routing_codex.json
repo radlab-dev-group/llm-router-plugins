@@ -5,7 +5,7 @@
     "trigger_model": "auto_codex",
     "fallback_mode": "implement",
     "heuristic_enabled": true,
-    "heuristic_min_score": 2.0,
+    "heuristic_min_score": 3.0,
     "vector_store_path": "",
     "semantic": {
       "enabled": true,
@@ -262,6 +262,7 @@
       "keywords": [
         "test",
         "testy",
+        "testów",
         "testow",
         "pytest",
         "unittest",
@@ -274,7 +275,6 @@
         "mocks",
         "assertion",
         "assertions",
-        "jest",
         "vitest",
         "mocha",
         "junit",
@@ -307,11 +307,15 @@
         "missing test cases:3",
         "run pytest:3",
         "run jest:3",
-        "run vitest:3"
+        "run vitest:3",
+        "uruchom jest:3",
+        "wykonaj jest:3",
+        "jest tests:3",
+        "jest test:3"
       ],
       "patterns": [
         "\\b(test\\w*|pytest|unittest|coverage|fixture\\w*|assertion\\w*|mock\\w*|spec\\w*|suite)\\b",
-        "\\b(jest|vitest|mocha|junit|xunit|rspec)\\b",
+        "\\b(vitest|mocha|junit|xunit|rspec)\\b",
         "\\b(run|write|add|fix|execute|cover)\\b.{0,30}\\b(test\\w*|pytest|suite|coverage)\\b",
         "\\b(napisz|dodaj|przygotuj|uruchom|napraw)\\b.{0,30}\\b(test\\w*|fixture\\w*|coverage|spec\\w*)\\b"
       ],
@@ -322,7 +326,6 @@
         "fixture": 3,
         "testy": 3,
         "test": 2,
-        "jest": 3,
         "vitest": 3,
         "mocha": 3,
         "junit": 3,
@@ -730,7 +733,7 @@
         "throws an exception:3"
       ],
       "patterns": [
-        "\\b(debug|debuguj|traceback|stack\\s*trace)\\b",
+        "debug\\w*|\\btraceback\\b|\\bstack\\s+trace\\b",
         "\\b(exception|wyjątek|wyjatek|crash|crashuje|failure|failing|fails|hang|hanging|regres\\w*)\\b",
         "\\b(napraw|fix|zdiagnozuj|diagnose|investigate|trace)\\b.{0,45}\\b(błąd|blad|error|exception|wyjątek|wyjatek|bug|problem|failure|issue|crash|regres\\w*)\\b",
         "\\b(dlaczego|why)\\b.{0,50}\\b(nie działa|nie dziala|fails?|failing|crash\\w*|throw\\w*|wywala|wyjątek|wyjatek|error)\\b",
