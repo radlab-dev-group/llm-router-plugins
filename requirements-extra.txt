@@ -1,6 +1,12 @@
+# These are available as pip extras (see setup.py):
+#   pip install .[ml]       — CPU FAISS + sentence-transformers (semantic routing)
+#   pip install .[ml-gpu]   — CUDA FAISS + sentence-transformers (pick ONE faiss build!)
+#   pip install .[rag]      — langchain + Pillow (RAG utilities)
+#
+# Manual install:
 langchain
-faiss-gpu
 faiss-cpu
+# faiss-gpu    # use INSTEAD of faiss-cpu on CUDA machines — do not install both
 sentence-transformers
 numpy
 scipy

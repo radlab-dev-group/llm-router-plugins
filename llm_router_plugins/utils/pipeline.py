@@ -7,7 +7,9 @@ their ``apply`` methods are called sequentially on the payload.
 """
 
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+from llm_router_api.core.model_config import ApiModelConfig
 
 from llm_router_plugins.utils.plugin_registrator import UtilsRegistry
 
@@ -38,12 +40,15 @@ class UtilsPipeline:
         # Resolve concrete plugin instances.
         self._plugin_instances = [UtilsRegistry.get(name) for name in plugin_names]
 
-    def apply(self, payload: Dict) -> Dict:
+    def apply(
+        self, payload: Dict, model_config: Optional[ApiModelConfig] = None
+    ) -> Dict:
         """
         Execute the pipeline.
 
         Args:
             payload: Initial data passed to the first utility plugin.
+            model_config: Optional model config passed to each utility plugin.
 
         Returns:
             A tuple ``(is_successful, result)`` where ``is_successful`` is
@@ -52,5 +57,5 @@ class UtilsPipeline:
         """
         result = payload
         for plugin_instance in self._plugin_instances:
-            result = plugin_instance.apply(result)
+            result = plugin_instance.apply(payload=result, model_config=model_config)
         return result

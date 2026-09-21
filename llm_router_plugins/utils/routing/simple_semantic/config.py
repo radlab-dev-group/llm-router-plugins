@@ -47,11 +47,14 @@ class RoutingConfig:
     thresholds : dict
         Maximum token counts for complexity levels: ``{"simple": 25, "medium": 150}``.
     default_models : dict
-        Default model for each complexity level: ``{"simple": "gpt-oss:120b", "medium": "qwen3.6:35b"}``.
+        Default model for each complexity level:
+        ``{"simple": "gpt-oss:120b", "medium": "qwen3.6:35b"}``.
     intent_adjustment : dict
-        Mapping from intent name to complexity override: ``{"code": "medium", "creative": "simple"}``.
+        Mapping from intent name to complexity override:
+        ``{"code": "medium", "creative": "simple"}``.
     intents : dict
-        Intent category definitions — each key maps to ``{"keywords", "phrases", "patterns", "weights"}``.
+        Intent category definitions — each key maps to
+        ``{"keywords", "phrases", "patterns", "weights"}``.
     none_keywords : list
         Keywords that indicate "none" intent (greetings, thanks, etc.).
     """

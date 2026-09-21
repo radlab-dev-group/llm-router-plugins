@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 from llm_router_plugins.plugin_interface import PluginInterface
 from llm_router_plugins.utils.rag.engine.langchain import USE_LANGCHAIN_RAG
@@ -69,7 +69,7 @@ class LangchainRAGPlugin(PluginInterface):
             persist_dir=LANGCHAIN_RAG_PERSIST_DIR,
         )
 
-    def apply(self, payload: Dict) -> Dict:
+    def apply(self, payload: Dict, **kwargs: Any) -> Dict:
         """
         Dispatch the incoming payload to the appropriate handler.
 
