@@ -1794,7 +1794,6 @@ class TestSemanticSimilarity:
 
         assert plugin._semantic is None
         assert "semantic routing disabled" in logger.joined()
-        assert (
-            plugin.apply(main_payload("napraw testy"))["routing"]["similarity"]
-            == pytest.approx(14.0 / 15.0)
-        )
+        assert plugin.apply(main_payload("napraw testy"))["routing"][
+            "similarity"
+        ] == pytest.approx(14.0 / 15.0)

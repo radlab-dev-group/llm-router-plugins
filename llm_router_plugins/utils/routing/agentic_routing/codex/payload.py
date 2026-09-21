@@ -473,7 +473,9 @@ def _mode_heading(block: str) -> str:
     return ""
 
 
-def _latest_user_text(items: List[Any], payload: Dict[str, Any], only_first: bool = False) -> str:
+def _latest_user_text(
+    items: List[Any], payload: Dict[str, Any], only_first: bool = False
+) -> str:
     """
     Return the text of the user message.
 
