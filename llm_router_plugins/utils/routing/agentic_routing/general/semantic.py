@@ -18,7 +18,7 @@ import logging
 
 from typing import Any, Mapping, Optional, Tuple
 
-from llm_router_plugins.utils.routing.agentic_routing.config import AgentMode
+from llm_router_plugins.utils.routing.agentic_routing.general.config import AgentMode
 
 __all__ = ["SemanticLayer"]
 

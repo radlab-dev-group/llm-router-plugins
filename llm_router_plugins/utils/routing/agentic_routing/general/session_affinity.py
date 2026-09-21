@@ -12,7 +12,7 @@ refreshed on every hit (sliding expiration), so an active session keeps the
 same model while an idle one becomes eligible for re-routing.
 
 The knobs of the layer live in
-:class:`llm_router_plugins.utils.routing.agentic_routing.config.AgenticRoutingConfig`
+:class:`llm_router_plugins.utils.routing.agentic_routing.general.config.AgenticRoutingConfig`
 as :class:`SessionAffinitySettings`; this module implements only the cache.
 """
 

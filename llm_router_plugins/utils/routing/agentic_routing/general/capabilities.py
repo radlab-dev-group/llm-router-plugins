@@ -14,7 +14,7 @@ actually do (see the ``capabilities`` block of a mode in the JSON config)::
     }
 
 An incoming request declares what it *needs* through its
-:class:`~llm_router_plugins.utils.routing.agentic_routing.signals.RequestSignals`
+:class:`~llm_router_plugins.utils.routing.agentic_routing.general.signals.RequestSignals`
 (``tools: true``, ``context_tokens: 80000`` ...).  This module turns those
 signals into a requirement set and checks it against the capabilities of a
 mode.  It is a **gate**, not a scorer: it never decides *which* mode is the
@@ -41,8 +41,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-from llm_router_plugins.utils.routing.agentic_routing.config import AgentMode
-from llm_router_plugins.utils.routing.agentic_routing.signals import RequestSignals
+from llm_router_plugins.utils.routing.agentic_routing.general.config import AgentMode
+from llm_router_plugins.utils.routing.agentic_routing.general.signals import RequestSignals
 
 __all__ = [
     "REQUIREMENT_KEYS",

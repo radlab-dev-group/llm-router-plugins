@@ -69,7 +69,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
-from llm_router_plugins.utils.routing.agentic_routing.signals import (
+from llm_router_plugins.utils.routing.agentic_routing.general.signals import (
     RequestSignals,
     _normalize_token,
 )

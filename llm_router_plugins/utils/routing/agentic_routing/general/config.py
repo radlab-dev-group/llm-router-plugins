@@ -66,11 +66,11 @@ from llm_router_plugins.utils.routing.common import (
     resolve_persist_dir,
 )
 from llm_router_plugins.utils.routing.target import RoutingTarget
-from llm_router_plugins.utils.routing.agentic_routing.rules import (
+from llm_router_plugins.utils.routing.agentic_routing.general.rules import (
     RoutingRule,
     parse_rules,
 )
-from llm_router_plugins.utils.routing.agentic_routing.session_affinity import (
+from llm_router_plugins.utils.routing.agentic_routing.general.session_affinity import (
     SessionAffinitySettings,
 )
 
@@ -171,7 +171,7 @@ class AgenticRoutingConfig(RoutingConfigBase):
     # RoutingConfigBase hooks (ClassVar — not dataclass fields)
     _ENV_PREFIX: ClassVar[str] = AGENTIC_ROUTING_PREFIX
     _DEFAULT_CONFIG_PATH: ClassVar[Optional[pathlib.Path]] = (
-        pathlib.Path(__file__).resolve().parent.parent.parent.parent
+        pathlib.Path(__file__).resolve().parent.parent.parent.parent.parent
         / "resources"
         / "routing"
         / "agentic_routing.json"

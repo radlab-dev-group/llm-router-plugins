@@ -42,14 +42,14 @@ from llm_router_plugins.utils.routing.agentic_routing import (
     scored_modes,
 )
 from llm_router_plugins.utils.routing.agentic_routing import session_affinity
-from llm_router_plugins.utils.routing.agentic_routing.heuristics import (
+from llm_router_plugins.utils.routing.agentic_routing.general.heuristics import (
     PATTERN_WEIGHT,
     score_mode,
     score_to_similarity,
 )
-from llm_router_plugins.utils.routing.agentic_routing.config import AgentMode
-from llm_router_plugins.utils.routing.agentic_routing.rules import RoutingRule
-from llm_router_plugins.utils.routing.agentic_routing.signals import RequestSignals
+from llm_router_plugins.utils.routing.agentic_routing.general.config import AgentMode
+from llm_router_plugins.utils.routing.agentic_routing.general.rules import RoutingRule
+from llm_router_plugins.utils.routing.agentic_routing.general.signals import RequestSignals
 
 _PREFIX = "LLM_ROUTER_ROUTING_AGENTIC_"
 

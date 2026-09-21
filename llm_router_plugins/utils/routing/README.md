@@ -906,7 +906,7 @@ overrides naming an unknown mode are skipped with a warning, and a `SESSION_TTL_
 ### 3.9 Usage Example
 
 ```python
-from llm_router_plugins.utils.routing.agentic_routing import AgenticRoutingPlugin
+from llm_router_plugins.utils.routing.agentic_routing.general import AgenticRoutingPlugin
 
 plugin = AgenticRoutingPlugin()
 
@@ -1309,13 +1309,13 @@ loaded, and `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_SEMANTIC_ENABLED=false` k
 | `llm_router_plugins/utils/routing/simple_semantic/`            | SimpleSemanticRoutingPlugin code    |
 | `llm_router_plugins/utils/routing/semantic_biencoder/`         | SemanticBiEncoderRoutingPlugin code |
 | `llm_router_plugins/utils/routing/agentic_routing/`            | AgenticRoutingPlugin code           |
-| `llm_router_plugins/utils/routing/agentic_routing/signals.py`  | Layer 0: agent-aware request signals (`RequestSignals`) |
-| `llm_router_plugins/utils/routing/agentic_routing/rules.py`    | Layer 1: declarative `when`/`then` rules (`RoutingRule`, `match_rule`) |
-| `llm_router_plugins/utils/routing/agentic_routing/session_affinity.py` | Layer 2: TTL/LRU `session_id` → mode cache |
-| `llm_router_plugins/utils/routing/agentic_routing/heuristics.py` | Layer 3: deterministic keyword/phrase/pattern scoring |
-| `llm_router_plugins/utils/routing/agentic_routing/semantic.py` | Layer 4: optional FAISS fallback (`SemanticLayer`) |
-| `llm_router_plugins/utils/routing/agentic_routing/capabilities.py` | Capability checks and model escalation |
-| `llm_router_plugins/utils/routing/agentic_routing/config.py`   | Modes, rules and settings loading   |
+| `llm_router_plugins/utils/routing/agentic_routing/general/signals.py`  | Layer 0: agent-aware request signals (`RequestSignals`) |
+| `llm_router_plugins/utils/routing/agentic_routing/general/rules.py`    | Layer 1: declarative `when`/`then` rules (`RoutingRule`, `match_rule`) |
+| `llm_router_plugins/utils/routing/agentic_routing/general/session_affinity.py` | Layer 2: TTL/LRU `session_id` → mode cache |
+| `llm_router_plugins/utils/routing/agentic_routing/general/heuristics.py` | Layer 3: deterministic keyword/phrase/pattern scoring |
+| `llm_router_plugins/utils/routing/agentic_routing/general/semantic.py` | Layer 4: optional FAISS fallback (`SemanticLayer`) |
+| `llm_router_plugins/utils/routing/agentic_routing/general/capabilities.py` | Capability checks and model escalation |
+| `llm_router_plugins/utils/routing/agentic_routing/general/config.py`   | Modes, rules and settings loading   |
 | `llm_router_plugins/utils/routing/agentic_routing/codex/`        | CodexRoutingPlugin code (Codex CLI requests)  |
 | `llm_router_plugins/utils/routing/agentic_routing/codex/payload.py`  | Codex request normalizer (`CodexRequest`, request class, `collaboration_mode`)  |
 | `llm_router_plugins/utils/routing/agentic_routing/codex/scoring.py`  | Deterministic keyword/phrase/pattern scoring for work modes  |

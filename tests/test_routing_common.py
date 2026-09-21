@@ -310,7 +310,7 @@ class TestRouterContract:
 
 class TestTargetContractAndShims:
     def test_agent_mode_is_routing_target(self):
-        from llm_router_plugins.utils.routing.agentic_routing.config import (
+        from llm_router_plugins.utils.routing.agentic_routing.general.config import (
             AgentMode,
             AgenticRoutingConfig,
         )

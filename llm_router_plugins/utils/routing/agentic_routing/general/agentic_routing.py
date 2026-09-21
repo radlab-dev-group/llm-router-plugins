@@ -139,29 +139,29 @@ from llm_router_plugins.utils.routing.common import (
     resolve_persist_dir,
     should_route,
 )
-from llm_router_plugins.utils.routing.agentic_routing.capabilities import (
+from llm_router_plugins.utils.routing.agentic_routing.general.capabilities import (
     escalate,
     missing_capabilities,
     requirements_from_signals,
     satisfies,
 )
-from llm_router_plugins.utils.routing.agentic_routing.config import (
+from llm_router_plugins.utils.routing.agentic_routing.general.config import (
     AgentMode,
     AgenticRoutingConfig,
 )
-from llm_router_plugins.utils.routing.agentic_routing.heuristics import (
+from llm_router_plugins.utils.routing.agentic_routing.general.heuristics import (
     detect_heuristic,
     score_to_similarity,
 )
-from llm_router_plugins.utils.routing.agentic_routing.rules import (
+from llm_router_plugins.utils.routing.agentic_routing.general.rules import (
     describe_rule,
     match_rule,
 )
-from llm_router_plugins.utils.routing.agentic_routing.semantic import SemanticLayer
-from llm_router_plugins.utils.routing.agentic_routing.session_affinity import (
+from llm_router_plugins.utils.routing.agentic_routing.general.semantic import SemanticLayer
+from llm_router_plugins.utils.routing.agentic_routing.general.session_affinity import (
     SessionAffinityCache,
 )
-from llm_router_plugins.utils.routing.agentic_routing.signals import RequestSignals
+from llm_router_plugins.utils.routing.agentic_routing.general.signals import RequestSignals
 from llm_router_plugins.utils.routing.constants import AGENTIC_ROUTING_PREFIX
 
 _MISSING_DEPENDENCIES_MESSAGE = (

@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 import pytest
 
 from llm_router_plugins.utils.routing.agentic_routing import AgenticRoutingPlugin
-from llm_router_plugins.utils.routing.agentic_routing.config import (
+from llm_router_plugins.utils.routing.agentic_routing.general.config import (
     AgenticRoutingConfig,
 )
 
