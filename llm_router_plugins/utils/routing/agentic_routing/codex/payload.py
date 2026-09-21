@@ -473,9 +473,12 @@ def _mode_heading(block: str) -> str:
     return ""
 
 
-def _latest_user_text(items: List[Any], payload: Dict[str, Any]) -> str:
+def _latest_user_text(items: List[Any], payload: Dict[str, Any], only_first: bool = False) -> str:
     """
-    Return the text of the most recent genuine user message.
+    Return the text of the user message.
+
+    When only_first is set to `False`, then the text is concatenated from the
+    original user message and other LLM-generated messages (with the ` user ` role).
 
     Parameters
     ----------
@@ -494,15 +497,26 @@ def _latest_user_text(items: List[Any], payload: Dict[str, Any]) -> str:
     ------
     None
     """
+    _full_user_msg = ""
     for item in reversed(items):
         if not isinstance(item, dict):
             continue
         if item.get("type") != "message" or item.get("role") != "user":
             continue
+
         text = "\n".join(_input_texts(item)).strip()
         if not text or text.startswith("<environment_context>"):
             continue
-        return text
+
+        if not all_messages:
+            return text
+
+        _full_user_msg += text + "\n\n"
+
+    _full_user_msg = _full_user_msg.strip()
+    if len(_full_user_msg):
+        return _full_user_msg
+
     return _text(payload.get("prompt"))
 
 
