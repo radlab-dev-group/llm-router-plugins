@@ -510,7 +510,7 @@ def _latest_user_text(
         if not text or text.startswith("<environment_context>"):
             continue
 
-        if not all_messages:
+        if only_first:
             return text
 
         _full_user_msg += text + "\n\n"
