@@ -1070,11 +1070,13 @@ Details worth knowing:
 - Only `test`, `git_review`, `review` and `debug` are keyword-scored. `plan` is decided by the declared
   collaboration block, and a main turn never falls below `implement`: the probabilistic layers can specialise a
   decision but can never make it weaker.
-- A heuristic hit needs `score >= heuristic_min_score` (`2.0` by default); below it the request stays on the
+- A heuristic hit needs `score >= heuristic_min_score` (`3.0` by default); below it the request stays on the
   fallback mode. Scores sum across keywords, phrases and patterns, and ties are won by the mode declared first in
   `codex_modes`.
 - Keywords and phrases are Polish **and** English, because real prompts are short and mixed: `"napraw testy"` and
   `"run the tests"` both resolve to `test`, `"Przejrzyj ten katalog i zaproponuj poprawki"` to `review`.
+- Keywords and phrases match at a word start, so inflected Polish forms still match (`testów`) while mid-word
+  hits do not: `protest` never scores the `test` keyword.
 - An explicit mode is honoured even without usable text, and empty text never reaches the vector store.
 - Everything fails open. Any exception during parse or classify logs a warning and returns the payload untouched,
   so a routing bug can never turn into a failed request; an unknown mode name or a mode with an empty `model_name`
@@ -1119,7 +1121,7 @@ Notes:
     "trigger_model": "auto_codex",
     "fallback_mode": "implement",
     "heuristic_enabled": true,
-    "heuristic_min_score": 2.0,
+    "heuristic_min_score": 3.0,
     "vector_store_path": "",
     "semantic": {
       "enabled": true,

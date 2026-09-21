@@ -490,8 +490,9 @@ read. `client_metadata` carries the ids (`session_id`, `thread_id`, `turn_id`, `
 | 6 | Configured `fallback_mode` (`implement`)                     | `fallback`           | cosine of that mode, else `0.0`    |
 
 Only `test`, `git_review`, `review` and `debug` compete in the keyword layer: `plan` is declared by the CLI and
-`implement` is the fallback, so neither needs keywords. A keyword hit needs `heuristic_min_score` (default `2.0`) or the
-layer stays silent. The `<collaboration_mode>` block is re-read on every request and the **last** occurrence wins, so a
+`implement` is the fallback, so neither needs keywords. A keyword hit needs `heuristic_min_score` (default `3.0`) or the
+layer stays silent. Keywords and phrases match at a word start, so inflected forms still match (`testów`) while mid-word hits do
+not: `protest` never scores the `test` keyword. The `<collaboration_mode>` block is re-read on every request and the **last** occurrence wins, so a
 Plan → Default switch mid-session reclassifies the next turn correctly. Keyword scoring is Polish + English because real
 prompts are short strings such as `"napraw testy"` or `"Przejrzyj ten katalog i zaproponuj poprawki"`.
 
@@ -569,7 +570,7 @@ The same payload with a `# Collaboration Mode: Default` block and `"napraw testy
 | `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_MODES`                | Whitelist of mode names to keep                    |
 | `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_FALLBACK_MODE`        | Mode used when nothing matches                     |
 | `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_HEURISTIC_ENABLED`    | `true`/`false` — toggle the keyword layer          |
-| `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_HEURISTIC_MIN_SCORE`  | Minimum keyword score to accept a match (2.0)      |
+| `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_HEURISTIC_MIN_SCORE`  | Minimum keyword score to accept a match (3.0)      |
 | `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_MODE_<name>_KEYWORDS` | Pipe-separated keyword override for one mode       |
 | `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_SEMANTIC_ENABLED`     | `true`/`false` — toggle the embedding layer        |
 | `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_SIMILARITY_THRESHOLD` | Minimum cosine similarity for a semantic hit       |
