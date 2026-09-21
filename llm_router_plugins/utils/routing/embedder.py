@@ -5,7 +5,11 @@ For each routing target, the embedder pre-computes a set of embeddings from the
 target's description and examples using a sliding-window context.  At query time
 the user message is embedded and matched against all stored embeddings via FAISS
 (inner product on L2-normalized vectors = cosine similarity), returning the
-best-matching target.
+best-matching target.  A query longer than the model's ``max_seq_length`` is
+split into overlapping token windows (capped at the first
+:data:`MAX_QUERY_WINDOWS` windows from the head of the text); each window is
+embedded in a single batch and the final query vector is the L2-normalised mean
+of the per-window vectors, so the cosine scale of the lookup is unchanged.
 
 When *persist_dir* is provided the FAISS index and docstore are saved to disk
 (on ``{persist_dir}/index.faiss`` and ``{persist_dir}/docstore.pkl``) and
@@ -46,6 +50,13 @@ def _import_faiss() -> Any:
     import faiss  # type: ignore[import-untyped]
 
     return faiss
+
+
+#: Maximum number of token windows used to encode an over-length routing query.
+#: The windows are taken from the head of the text (the newest user messages
+#: when the query is a concatenated conversation), so a very long query costs
+#: at most this many embedding passes instead of growing with the token count.
+MAX_QUERY_WINDOWS = 4
 
 
 @dataclass(frozen=True)
@@ -180,6 +191,11 @@ class EmbeddingRouter:
         """
         Embed *user_message* and return the best-matching routing target.
 
+        A message that fits within the model's ``max_seq_length`` is embedded
+        as-is; a longer one is encoded as a sliding window of overlapping
+        token chunks (see :meth:`_encode_query`) and the window vectors are
+        combined into a single unit-norm query vector before the FAISS lookup.
+
         Parameters
         ----------
         user_message : str
@@ -203,17 +219,7 @@ class EmbeddingRouter:
         assert self._model is not None
         assert self._faiss_index is not None
 
-        user_embedding = self._model.encode(
-            [user_message], show_progress_bar=False, convert_to_numpy=True
-        )
-        user_embedding = self._to_numpy(user_embedding)
-        user_embedding = user_embedding.squeeze()  # (embed_dim,)
-
-        # L2-normalise the query
-        norm = float(np.linalg.norm(user_embedding))
-        if norm > 0:
-            user_embedding = user_embedding / norm
-        user_embedding = user_embedding.reshape(1, -1)  # (1, embed_dim)
+        user_embedding = self._encode_query(user_message)  # (1, embed_dim)
 
         # FAISS query
         k = min(self._config.top_k, self._faiss_index.ntotal)
@@ -248,6 +254,90 @@ class EmbeddingRouter:
             "similarity": best_sim,
             "all_scores": [{"target": n, "similarity": s} for n, s, _ in all_scores],
         }
+
+    def _encode_query(self, text: str) -> np.ndarray[Any, Any]:
+        """
+        Embed the query text as a single L2-normalised row.
+
+        When the text fits within the model context it is encoded verbatim,
+        which reproduces the single-encode path exactly.  A longer text is
+        split into overlapping token windows of ``max_seq_length`` tokens
+        (overlap taken from the configured ``chunk_overlap``, clamped to
+        ``max_seq_length // 4``), the windows are encoded in one batch and
+        the result is the L2-normalised mean of the per-window unit vectors.
+        Re-normalising keeps the cosine scale of the FAISS lookup identical
+        to the single-window case.  Without a usable tokenizer or
+        ``max_seq_length`` (e.g. mocked models) the single-encode fallback
+        is used.
+
+        Parameters
+        ----------
+        text : str
+            The user's input text to embed.
+
+        Returns
+        -------
+        np.ndarray
+            A ``(1, embed_dim)`` array holding the L2-normalised query
+            vector, ready for ``IndexFlatIP.search``.
+
+        Raises
+        ------
+        RuntimeError
+            If the embedding model is not loaded.
+        """
+        assert self._model is not None
+
+        tokenizer = getattr(self._model, "tokenizer", None)
+        max_seq = getattr(self._model, "max_seq_length", None)
+        if tokenizer is None or not isinstance(max_seq, int) or max_seq <= 0:
+            embedding = self._model.encode(
+                [text], show_progress_bar=False, convert_to_numpy=True
+            )
+            embedding = self._to_numpy(embedding).squeeze()
+            norm = float(np.linalg.norm(embedding))
+            if norm > 0:
+                embedding = embedding / norm
+            return embedding.reshape(1, -1)  # type: ignore[no-any-return]
+
+        ids = tokenizer.encode(text, return_tensors="pt")[0].tolist()
+        if len(ids) <= max_seq:
+            windows = [text]
+        else:
+            overlap = min(
+                max(int(getattr(self._config, "chunk_overlap", 0) or 0), 0),
+                max_seq // 4,
+            )
+            windows = self._split_into_chunks(text, max_seq, overlap, tokenizer)[
+                :MAX_QUERY_WINDOWS
+            ]
+            if self._logger:
+                self._logger.info(
+                    "Query of %d tokens exceeds max_seq_length %d — "
+                    "encoding %d of the first %d sliding windows",
+                    len(ids),
+                    max_seq,
+                    len(windows),
+                    MAX_QUERY_WINDOWS,
+                )
+
+        embeddings = self._model.encode(
+            windows, show_progress_bar=False, convert_to_numpy=True
+        )
+        embeddings = self._to_numpy(embeddings)
+        if embeddings.ndim == 1:
+            embeddings = embeddings.reshape(1, -1)
+
+        # Combine the window vectors: L2-normalised mean of unit vectors,
+        # re-normalised so the cosine scale of the lookup is unchanged.
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms[norms == 0] = 1e-10
+        aggregated = embeddings / norms
+        mean_vector = aggregated.mean(axis=0)
+        norm = float(np.linalg.norm(mean_vector))
+        if norm > 0:
+            mean_vector = mean_vector / norm
+        return mean_vector.reshape(1, -1)  # type: ignore[no-any-return]
 
     def _load_model(self) -> None:
         """

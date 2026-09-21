@@ -234,6 +234,11 @@ At query time the user message is embedded and matched against all stored target
 **2. Routing (query):**
 
 - The user message is embedded and L2-normalised.
+- A message longer than the model's `max_seq_length` is first split into overlapping token windows (window =
+  `max_seq_length`, overlap = `chunk_overlap` clamped to `max_seq_length // 4`), capped at the first 4 windows from
+  the head of the text (`MAX_QUERY_WINDOWS`). The windows are encoded in a single batch and combined into one unit-norm
+  query vector — the L2-normalised mean of the per-window unit vectors — so the cosine scale of the lookup is
+  unchanged. Each extra window costs roughly ~1.2 s of CPU latency.
 - FAISS performs a nearest-neighbor search returning the `top_k` closest chunks.
 - Scores are **aggregated per target**: the mean cosine similarity of all chunks belonging to the same target is
   computed.
@@ -502,7 +507,9 @@ prompts are short strings such as `"napraw testy"` or `"Przejrzyj ten katalog i 
 (`build_embedding_router` in `utils/routing/common.py`, `google/embeddinggemma-300m` by default). The six work modes
 are indexed once at startup — `aux_title` and `compaction` are excluded because the request class already decides
 them — and a request issues **at most one** `route(text)` lookup, whose result is reused by the heuristic, semantic
-and fallback layers so the text is never embedded twice. The layer is fail-open: without
+and fallback layers so the text is never embedded twice. Requests longer than the model's `max_seq_length` are
+encoded with the same sliding-window aggregation as the semantic router (at most 4 windows from the head of the
+text) before the lookup. The layer is fail-open: without
 `sentence-transformers` / `faiss`, with an unloadable model, or with `SEMANTIC_ENABLED=false` it steps aside, the
 cascade stays purely deterministic and the plugin remains constructible.
 

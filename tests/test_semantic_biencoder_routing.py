@@ -164,6 +164,180 @@ class TestEmbedder:
         assert sims[0] == pytest.approx(-1.0, abs=1e-6)
 
 
+# --------------- query sliding-window encoding (mocked model)
+
+
+class _FakeTokenizer:
+    """A minimal stand-in for a HuggingFace tokenizer used by the mock model."""
+
+    def __init__(self, vocab: int = 512):
+        self.vocab = vocab
+
+    def _to_ids(self, text: str) -> list:
+        words = text.split()
+        return [i % self.vocab for i, _ in enumerate(words)]
+
+    def _to_words(self, ids: list) -> list:
+        return [str(i) for i in ids]
+
+    def encode(self, text, return_tensors=None):
+        ids = self._to_ids(text)
+        if return_tensors == "pt":
+            import torch
+
+            return torch.tensor([ids])
+        return ids
+
+    def decode(self, ids, skip_special_tokens=False):
+        return " ".join(self._to_words(ids))
+
+
+def _install_tokenizer(mock_model, max_seq_length, vocab=512):
+    """Attach a fake tokenizer and a ``max_seq_length`` to the shared mock model."""
+    tokenizer = _FakeTokenizer(vocab)
+    mock_model.tokenizer = tokenizer
+    mock_model.max_seq_length = max_seq_length
+    return tokenizer
+
+
+def _counting_encode(mock_model, calls):
+    """Replace ``encode`` on *mock_model* with a spy that records every batch."""
+    original_encode = mock_model.encode
+
+    def counting_encode(self, texts, **kwargs):
+        calls.append(list(texts))
+        return original_encode(self, texts, **kwargs)
+
+    mock_model.encode = counting_encode
+    return counting_encode
+
+
+class TestEncodeQuery:
+    """Tests for :meth:`EmbeddingRouter._encode_query` sliding-window behaviour."""
+
+    @pytest.fixture(autouse=True)
+    def patch_sentence_transformer(self, mock_sentence_transformer):
+        """Activate the shared deterministic SentenceTransformer mock (conftest)."""
+
+    @staticmethod
+    def _make_router(cfg_overrides=None):
+        cfg = SemanticBiEncoderConfig.from_file(_CONFIG_PATH)
+        for key, value in (cfg_overrides or {}).items():
+            setattr(cfg, key, value)
+        router = EmbeddingRouter(cfg)
+        router.initialize()
+        return router
+
+    def test_fast_path_without_tokenizer(self, mock_sentence_transformer):
+        """Default mock (no tokenizer/max_seq_length) keeps the single-encode path."""
+        mock_sentence_transformer.tokenizer = None
+        mock_sentence_transformer.max_seq_length = None
+        router = self._make_router()
+        result = router.route("Write a Python function to sort a list")
+        assert result["target_name"]
+        assert -1e-6 <= result["similarity"] <= 1.0 + 1e-6
+
+    def test_short_text_single_encode(self, mock_sentence_transformer):
+        """Text within max_seq_length issues exactly one encode call."""
+        _install_tokenizer(mock_sentence_transformer, max_seq_length=128)
+        router = self._make_router()
+
+        calls = []
+        _counting_encode(mock_sentence_transformer, calls)
+
+        text = " ".join(["alpha"] * 10)
+        vector = router._encode_query(text)
+        assert vector.shape == (1, mock_sentence_transformer.embed_dim)
+        assert len(calls) == 1
+        assert calls[0] == [text]
+        assert float(np.linalg.norm(vector[0])) == pytest.approx(1.0, abs=1e-6)
+
+    def test_long_text_windows_capped_at_head(self, mock_sentence_transformer):
+        """5000-token text with max_seq=128/overlap=32 uses exactly 4 head windows."""
+        _install_tokenizer(mock_sentence_transformer, max_seq_length=128)
+        router = self._make_router({"chunk_overlap": 32})
+
+        calls = []
+        _counting_encode(mock_sentence_transformer, calls)
+
+        text = " ".join(["beta"] * 5000)
+        router._encode_query(text)
+        assert len(calls) == 1
+        batch = calls[0]
+        assert len(batch) == 4
+        assert batch[0].split() == " ".join(str(i) for i in range(128)).split()
+        for window in batch:
+            assert len(window.split()) == 128
+
+    def test_zero_overlap_full_stride(self, mock_sentence_transformer):
+        """chunk_overlap=0 strides by the full window and stays within the cap."""
+        _install_tokenizer(mock_sentence_transformer, max_seq_length=64)
+        router = self._make_router({"chunk_overlap": 0})
+
+        calls = []
+        _counting_encode(mock_sentence_transformer, calls)
+
+        text = " ".join(["gamma"] * 1000)
+        vector = router._encode_query(text)
+        assert len(calls[0]) == 4
+        assert vector.shape == (1, mock_sentence_transformer.embed_dim)
+        assert float(np.linalg.norm(vector)) == pytest.approx(1.0, abs=1e-6)
+
+    def test_large_overlap_clamped(self, mock_sentence_transformer):
+        """chunk_overlap > max_seq // 4 is clamped instead of raising ValueError."""
+        _install_tokenizer(mock_sentence_transformer, max_seq_length=128)
+        cfg = SemanticBiEncoderConfig.from_file(_CONFIG_PATH)
+        cfg.chunk_overlap = 1000
+        router = EmbeddingRouter(cfg)
+        router._model = mock_sentence_transformer()
+
+        calls = []
+        _counting_encode(mock_sentence_transformer, calls)
+
+        text = " ".join(["delta"] * 1000)
+        vector = router._encode_query(text)
+        assert len(calls[0]) == 4
+        for window in calls[0]:
+            assert len(window.split()) == 128
+        assert float(np.linalg.norm(vector)) == pytest.approx(1.0, abs=1e-6)
+
+    def test_aggregation_unit_mean_of_windows(self, mock_sentence_transformer):
+        """Aggregated vector equals the re-normalised mean of the window vectors."""
+        _install_tokenizer(mock_sentence_transformer, max_seq_length=128)
+        router = self._make_router({"chunk_overlap": 32})
+        text = " ".join(["epsilon"] * 2000)
+
+        vector = router._encode_query(text)
+
+        windows = EmbeddingRouter._split_into_chunks(
+            text, 128, 32, router._model.tokenizer
+        )[:4]
+        raw = np.asarray(
+            router._model.encode(
+                windows, show_progress_bar=False, convert_to_numpy=True
+            )
+        )
+        norms = np.linalg.norm(raw, axis=1, keepdims=True)
+        norms[norms == 0] = 1e-10
+        expected = (raw / norms).mean(axis=0)
+        expected = expected / float(np.linalg.norm(expected))
+        assert float(np.linalg.norm(vector)) == pytest.approx(1.0, abs=1e-6)
+        assert np.allclose(vector[0], expected)
+
+    def test_route_similarity_in_range(self, mock_sentence_transformer):
+        """route() on an over-length query returns a similarity within [0, 1]."""
+        _install_tokenizer(mock_sentence_transformer, max_seq_length=128)
+        router = self._make_router({"chunk_overlap": 32})
+        text = " ".join(["zeta"] * 3000)
+        result = router.route(text)
+        assert result["target_name"]
+        assert -1e-6 <= result["similarity"] <= 1.0 + 1e-6
+        assert all(
+            -1e-6 <= entry["similarity"] <= 1.0 + 1e-6
+            for entry in result["all_scores"]
+        )
+
+
 # --------------- routing integration (mocked model)
 
 
