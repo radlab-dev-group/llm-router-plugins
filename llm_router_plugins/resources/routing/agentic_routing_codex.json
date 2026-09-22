@@ -7,6 +7,7 @@
     "fallback_mode": "implement",
     "heuristic_enabled": true,
     "heuristic_min_score": 3.0,
+    "classify_max_chars": 4000,
     "vector_store_path": "",
     "semantic": {
       "enabled": true,
