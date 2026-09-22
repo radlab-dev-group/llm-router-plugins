@@ -464,10 +464,10 @@ Modes ship in [agentic_routing_codex.json](llm_router_plugins/resources/routing/
 | ------------ | ------------------------- | ---------------------------------------------- |
 | `plan`       | `qwen/Qwen3.8-Flash-Next` | `<collaboration_mode>` Plan Mode block         |
 | `implement`  | `qwen/Qwen3.8-Flash-Next` | Fallback for a plain main turn                 |
-| `test`       | `qwen/Qwen3.8-27B`        | Keywords in the latest user message            |
-| `git_review` | `qwen/Qwen3.8-27B`        | Keywords in the latest user message            |
-| `review`     | `qwen/Qwen3.8-Flash-Next` | Keywords in the latest user message            |
-| `debug`      | `qwen/Qwen3.8-Flash-Next` | Keywords in the latest user message            |
+| `test`       | `qwen/Qwen3.8-27B`        | Keywords in the classified user text           |
+| `git_review` | `qwen/Qwen3.8-27B`        | Keywords in the classified user text           |
+| `review`     | `qwen/Qwen3.8-Flash-Next` | Keywords in the classified user text           |
+| `debug`      | `qwen/Qwen3.8-Flash-Next` | Keywords in the classified user text           |
 | `aux_title`  | `qwen/Qwen3.8-27B`        | Request class — system-thread title generation |
 | `compaction` | `qwen/Qwen3.8-27B`        | Request class — context compaction             |
 
@@ -490,24 +490,30 @@ read. `client_metadata` carries the ids (`session_id`, `thread_id`, `turn_id`, `
 | 1 | Explicit `agent_mode`, `codex_mode` or `metadata.agent_mode` | `explicit`           | `1.0`                              |
 | 2 | Request class — `compaction`, then `aux_title`               | `class`              | `1.0`                              |
 | 3 | `<collaboration_mode>` Plan block declared by the CLI        | `collaboration_mode` | `1.0`                              |
-| 4 | PL+EN keyword scoring of the latest message                  | `heuristic`          | cosine, else `score / (score + 1)` |
+| 4 | PL+EN keyword scoring of the user text, newest first         | `heuristic`          | `score / (score + 1)`              |
 | 5 | Embedding cosine similarity over the mode examples           | `semantic`           | cosine of the matched mode         |
 | 6 | Configured `fallback_mode` (`implement`)                     | `fallback`           | cosine of that mode, else `0.0`    |
 
-Only `test`, `git_review`, `review` and `debug` compete in the keyword layer: `plan` is declared by the CLI and
-`implement` is the fallback, so neither needs keywords. A keyword hit needs `heuristic_min_score` (default `3.0`) or the
+Only `test`, `git_review`, `review` and `debug` compete in the keyword layer, scanned in that order so a tie between
+`git_review` and `review` goes to the git-aware mode: `plan` is declared by the CLI and `implement` is the fallback, so
+the `keywords`, `phrases` and `patterns` of those two modes are never scored — only their `description` and `examples`
+feed the embedding index. A keyword hit needs `heuristic_min_score` (default `3.0`) or the
 layer stays silent. Keywords and phrases match at a word start, so inflected forms still match (`testów`) while mid-word hits do
 not: `protest` never scores the `test` keyword. The `<collaboration_mode>` block is re-read on every request and the **last** occurrence wins, so a
 Plan → Default switch mid-session reclassifies the next turn correctly. Keyword scoring is Polish + English because real
 prompts are short strings such as `"napraw testy"` or `"Przejrzyj ten katalog i zaproponuj poprawki"`.
+The keyword and semantic layers see every `role == "user"` message, assembled newest first: the newest message is always
+kept whole and an older one is appended only while the text stays within `classify_max_chars` (default `4000`, env
+`..._CLASSIFY_MAX_CHARS`), which keeps the classification cost bounded as the session grows.
 
 **4. Similarity is embedding cosine similarity, exactly like `agentic_routing`:**
 
 `routing.similarity` reports **embedding cosine similarity** produced by the same BiEncoder + FAISS stack
 (`build_embedding_router` in `utils/routing/common.py`, `google/embeddinggemma-300m` by default). The six work modes
 are indexed once at startup — `aux_title` and `compaction` are excluded because the request class already decides
-them — and a request issues **at most one** `route(text)` lookup, whose result is reused by the heuristic, semantic
-and fallback layers so the text is never embedded twice. Requests longer than the model's `max_seq_length` are
+them — and a request issues **at most one** `route(text)` lookup, and only when the four deterministic layers stay
+silent: an explicit mode, a request class, a collaboration block or a keyword hit is decided without touching the
+embedding stack at all, and the text is never embedded twice. Requests longer than the model's `max_seq_length` are
 encoded with the same sliding-window aggregation as the semantic router (at most 4 windows from the head of the
 text) before the lookup. The layer is fail-open: without
 `sentence-transformers` / `faiss`, with an unloadable model, or with `SEMANTIC_ENABLED=false` it steps aside, the
@@ -578,6 +584,7 @@ The same payload with a `# Collaboration Mode: Default` block and `"napraw testy
 | `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_FALLBACK_MODE`        | Mode used when nothing matches                     |
 | `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_HEURISTIC_ENABLED`    | `true`/`false` — toggle the keyword layer          |
 | `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_HEURISTIC_MIN_SCORE`  | Minimum keyword score to accept a match (3.0)      |
+| `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_CLASSIFY_MAX_CHARS`     | Character budget of the classified user text (4000)|
 | `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_MODE_<name>_KEYWORDS` | Pipe-separated keyword override for one mode       |
 | `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_SEMANTIC_ENABLED`     | `true`/`false` — toggle the embedding layer        |
 | `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_SIMILARITY_THRESHOLD` | Minimum cosine similarity for a semantic hit       |

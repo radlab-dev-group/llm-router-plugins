@@ -1048,8 +1048,10 @@ Notes on the wire format:
   `input_text` part of a `role == "developer"` message. The **last** block wins and its first non-empty line
   decides: `# Plan Mode` → `plan`, `# Collaboration Mode: Default` → `default`, anything else → `""`. Taking the
   latest occurrence is what makes a mid-session Plan → Default switch reclassify correctly.
-- `latest_user_text` is the last `role == "user"` message item; `<environment_context>` messages are skipped, and
-  `payload["prompt"]` is the final fallback. `instructions` is deliberately **not** classified — in captured
+- `latest_user_text` is every `role == "user"` message assembled from the newest to the oldest; `<environment_context>`
+  messages are skipped and `payload["prompt"]` is the final fallback. The newest message is always kept whole, an older
+  one is appended only while the text stays within `classify_max_chars` (default `4000`), and assembly stops at the first
+  message that would overflow, so the text the classifier sees is bounded as the session grows. `instructions` is deliberately **not** classified — in captured
   sessions it is one constant 16 979-character preamble that would drown the signal.
 - Parsing never mutates the payload and never raises: a missing or non-list `input`, `tools=None`, an absent
   `client_metadata` or a missing `text` all yield a well-formed `CodexRequest` with empty defaults.
@@ -1065,19 +1067,20 @@ Mode resolution is strictly ordered — the first layer that answers wins:
 | 3 | **Class: aux title**   | `class`              | Auxiliary title generation on a system thread — never keyword-scored                           | no    |
 | 4 | **Collaboration mode** | `collaboration_mode` | The CLI declared Plan Mode in the latest `<collaboration_mode>` block                          | no    |
 | 5 | **Heuristic**          | `heuristic`          | Keywords (default 1.0), `text:weight` phrases (default 2.0), regex patterns (default 3.0)      | no    |
-| 6 | **Semantic**           | `semantic`           | Embedding cosine similarity over mode descriptions/examples, accepted at `similarity >= threshold` | yes   |
+| 6 | **Semantic**           | `semantic`           | Embedding cosine similarity over mode descriptions/examples, accepted at `similarity >= threshold`; reached only when 1-5 stay silent | yes   |
 | 7 | **Fallback**           | `fallback`           | The configured `fallback_mode` (`implement`)                                                    | no    |
 
 Details worth knowing:
 
 - **Compaction outranks everything except an explicit mode**, including a plan collaboration block — a compaction
   request still carries the mode text of the conversation it is compacting.
-- Only `test`, `git_review`, `review` and `debug` are keyword-scored. `plan` is decided by the declared
-  collaboration block, and a main turn never falls below `implement`: the probabilistic layers can specialise a
-  decision but can never make it weaker.
+- Only `test`, `git_review`, `review` and `debug` are keyword-scored, scanned in that order. The `keywords`, `phrases`
+  and `patterns` of `plan` and `implement` are therefore never scored — only their `description` and `examples` reach the
+  embedding index. A main turn never falls below `implement`: the probabilistic layers can specialise a decision but can
+  never make it weaker.
 - A heuristic hit needs `score >= heuristic_min_score` (`3.0` by default); below it the request stays on the
-  fallback mode. Scores sum across keywords, phrases and patterns, and ties are won by the mode declared first in
-  `codex_modes`.
+  fallback mode. Scores sum across keywords, phrases and patterns, and ties are won by the mode that comes first in
+  `HEURISTIC_MODES` (`test` → `git_review` → `review` → `debug`), independently of the order the JSON lists its modes.
 - Keywords and phrases are Polish **and** English, because real prompts are short and mixed: `"napraw testy"` and
   `"run the tests"` both resolve to `test`, `"Przejrzyj ten katalog i zaproponuj poprawki"` to `review`.
 - Keywords and phrases match at a word start, so inflected Polish forms still match (`testów`) while mid-word
@@ -1097,7 +1100,7 @@ plugins. The bundled embedding model is `google/embeddinggemma-300m`.
 | `source`                                       | Reported `similarity`                                                              |
 |--------------------------------------------------|--------------------------------------------------------------------------------------|
 | `explicit` / `class` / `collaboration_mode`      | `1.0` — the mode was declared, not inferred                                          |
-| `heuristic`                                      | Cosine of the winning mode; falls back to `score / (score + 1)` when no layer exists  |
+| `heuristic`                                      | `score / (score + 1)` — the keyword layer answers before any embedding is computed     |
 | `semantic`                                       | The accepted cosine similarity                                                       |
 | `fallback`                                       | Cosine of the fallback mode, else `0.0`                                              |
 
@@ -1106,12 +1109,13 @@ Notes:
 - `aux_title` and `compaction` are **excluded from the index** — they are class-routed, so indexing them would
   only add near-miss neighbours for real turns. The indexed targets are `plan`, `implement`, `test`,
   `git_review`, `review`, `debug`.
-- A request queries the store **at most once**: the same lookup both accepts a semantic match and supplies the
-  cosine reported for heuristic and fallback decisions, so the text is never embedded twice.
+- A request queries the store **at most once, and only when layers 1–5 stay silent**: an explicit mode, a request
+  class, a collaboration block or a keyword hit never touches the embedding stack. The single lookup serves both the
+  semantic decision and the cosine reported for the fallback, so a text is never embedded twice.
 - The layer is optional by construction. With `SEMANTIC_ENABLED=false`, with missing
   `faiss` / `sentence-transformers`, or with an unloadable embedding model, no router is built, every lookup
-  returns nothing, and routing stays purely deterministic. The chosen mode and `agent_mode` are unchanged — only
-  the heuristic similarity reverts to `score / (score + 1)`.
+  returns nothing, and routing stays purely deterministic. Modes that a deterministic layer already decided are
+  unaffected; only the semantic and fallback similarities drop out.
 - The index persists to disk through the shared `resolve_persist_dir()` helper (`PERSIST_DIR`,
   `settings.vector_store_path`).
 
@@ -1127,6 +1131,7 @@ Notes:
     "fallback_mode": "implement",
     "heuristic_enabled": true,
     "heuristic_min_score": 3.0,
+    "classify_max_chars": 4000,
     "vector_store_path": "",
     "semantic": {
       "enabled": true,
@@ -1151,8 +1156,8 @@ Notes:
 }
 ```
 
-`codex_modes` is a **list**, so declaration order is meaningful: it breaks heuristic score ties and fixes the
-precedence the cascade works through.
+`codex_modes` is a **list**, so declaration order fixes which mode a duplicated signal reaches first; heuristic score
+ties are broken by `HEURISTIC_MODES`, not by this list.
 
 | Mode         | Default model                | Decided by                                  |
 |--------------|------------------------------|-----------------------------------------------|
@@ -1182,6 +1187,7 @@ All variables use the `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_` prefix:
 | `..._FALLBACK_MODE`                   | Override the fallback mode name                                 |
 | `..._HEURISTIC_ENABLED`               | Turn the keyword layer on/off (`1/0`, `true/false`, `on/off`)   |
 | `..._HEURISTIC_MIN_SCORE`             | Override the heuristic acceptance threshold                     |
+| `..._CLASSIFY_MAX_CHARS`              | Character budget of the classified user text (default 4000)     |
 | `..._MODE_<name>_KEYWORDS`            | Pipe-separated keyword list for one mode                        |
 | `..._MODEL`                           | Embedding model used by the similarity layer                    |
 | `..._SEMANTIC_ENABLED`                | Turn the embedding similarity layer on/off                      |
