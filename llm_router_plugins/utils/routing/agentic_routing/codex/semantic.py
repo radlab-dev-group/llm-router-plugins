@@ -175,14 +175,21 @@ class CodexSemanticLayer:
         if mode is not None and similarity >= self._threshold:
             return mode, similarity
 
-        if self._logger:
-            self._logger.info(
-                "CodexRouting: semantic match '%s' similarity=%.4f is "
-                "below threshold %.4f, ignoring it",
-                target or "unknown",
-                similarity,
-                self._threshold,
-            )
+        if self._logger is not None:
+            if mode is None:
+                self._logger.info(
+                    "CodexRouting: semantic target '%s' is not a configured "
+                    "mode, ignoring it",
+                    target or "unknown",
+                )
+            else:
+                self._logger.info(
+                    "CodexRouting: semantic match '%s' similarity=%.4f is "
+                    "below threshold %.4f, ignoring it",
+                    target,
+                    similarity,
+                    self._threshold,
+                )
         return None, similarity
 
     def resolve(self, text: str) -> Tuple[Optional[CodexMode], float]:

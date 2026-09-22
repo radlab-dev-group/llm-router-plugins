@@ -38,6 +38,7 @@ JSON structure::
 
 import logging
 import os
+import re
 import pathlib
 
 from dataclasses import dataclass, field, replace
@@ -63,6 +64,9 @@ __all__ = [
     "CodexRoutingConfig",
     "CodexMode",
 ]
+
+#: Upper-case letters, which a pattern keeps but the scored text does not.
+_UPPERCASE_RE = re.compile("[A-Z]")
 
 
 @dataclass
@@ -522,6 +526,68 @@ class CodexRoutingConfig(RoutingConfigBase):
 
         if self.top_k < 1:
             raise ValueError(f"CodexRouting: top_k must be >= 1, got {self.top_k}")
+
+    def lint_signals(self, logger: Optional[logging.Logger] = None) -> None:
+        """
+        Report configured signals that can never score, as warnings.
+
+        Keyword scoring stays silent about unusable settings: a pattern that
+        does not compile is dropped and a pattern with upper-case letters
+        never matches, because the text is lower-cased before scoring.  This
+        lint surfaces both, along with a ``chunk_overlap`` that is not below
+        ``chunk_size`` and a mode without a ``model_name`` (requests resolved
+        to it are passed through untouched).  Nothing is changed and nothing
+        is raised: the routing decision stays exactly what :meth:`validate_args`
+        accepts.
+
+        Parameters
+        ----------
+        logger : logging.Logger, optional
+            Logger instance used to report the findings.  When ``None`` the
+            lint does nothing.
+
+        Returns
+        -------
+        None
+        """
+        if logger is None:
+            return
+
+        if self.chunk_size > 0 and self.chunk_overlap >= self.chunk_size:
+            logger.warning(
+                "CodexRouting: chunk_overlap (%d) is not below chunk_size "
+                "(%d) — the embedding router clamps it, check "
+                "'settings.semantic' in the JSON config",
+                self.chunk_overlap,
+                self.chunk_size,
+            )
+
+        for mode in self.codex_modes:
+            if not mode.model_name:
+                logger.warning(
+                    "CodexRouting: mode '%s' has no model_name — requests "
+                    "resolved to it are passed through with the trigger model",
+                    mode.name,
+                )
+            for pattern in mode.patterns:
+                try:
+                    re.compile(pattern)
+                except (re.error, TypeError):
+                    logger.warning(
+                        "CodexRouting: mode '%s' declares the unusable pattern "
+                        "%r — keyword scoring ignores it",
+                        mode.name,
+                        pattern,
+                    )
+                    continue
+                if isinstance(pattern, str) and _UPPERCASE_RE.search(pattern):
+                    logger.warning(
+                        "CodexRouting: mode '%s' pattern %r contains "
+                        "upper-case letters — the text is lower-cased before "
+                        "scoring, so it can never match",
+                        mode.name,
+                        pattern,
+                    )
 
 
 @dataclass(frozen=True)

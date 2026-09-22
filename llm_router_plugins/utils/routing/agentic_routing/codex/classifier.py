@@ -198,7 +198,7 @@ def classify(
         return RoutingDecision("plan", SOURCE_COLLABORATION_MODE, 1.0, 1.0)
 
     if config.heuristic_enabled:
-        decision = _heuristic_mode(request.latest_user_text, config)
+        decision = _heuristic_mode(request.latest_user_text, config, modes)
         if decision is not None:
             return decision
 
@@ -289,6 +289,7 @@ def _metadata_mode(body: Dict[str, Any]) -> Any:
 def _heuristic_mode(
     text: str,
     config: CodexRoutingConfig,
+    modes: Dict[str, Any],
 ) -> Optional[RoutingDecision]:
     """
     Score the latest user text against the heuristic candidate modes.
@@ -300,6 +301,9 @@ def _heuristic_mode(
     config : CodexRoutingConfig
         Routing configuration providing the candidate modes and the minimum
         score required to accept a match.
+    modes : Dict[str, Any]
+        Configured modes by name, normally ``config.mode_by_name``, reused
+        from the cascade so the lookup is built once per request.
 
     Returns
     -------
@@ -316,7 +320,6 @@ def _heuristic_mode(
     if not text:
         return None
 
-    modes = config.mode_by_name
     candidates = [modes[name] for name in HEURISTIC_MODES if name in modes]
     if not candidates:
         return None

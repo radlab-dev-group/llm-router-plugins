@@ -89,11 +89,12 @@ class CodexRoutingPlugin(PluginInterface):
         """
         Initialize the plugin, loading and validating configuration.
 
-        The semantic layer is optional and fail-open: a missing embedding
-        model or an absent ``faiss`` / ``sentence_transformers`` dependency
-        disables it and nothing else, so the plugin is always constructible.
-        Configuration stays authoritative: with ``semantic.enabled`` ``false``
-        no layer is built and an injected *emb_router* is ignored.
+        The semantic layer is optional and fail-open: an absent ``faiss`` /
+        ``sentence_transformers`` dependency or an unloadable model disables
+        it and nothing else.  Configuration stays authoritative: with
+        ``semantic.enabled`` ``false`` no layer is built and an injected
+        *emb_router* is ignored.  An unusable configuration is not fail-open —
+        ``validate_args`` rejects it before the layer is ever built.
 
         Parameters
         ----------
@@ -111,7 +112,10 @@ class CodexRoutingPlugin(PluginInterface):
 
         Raises
         ------
-        None
+        ValueError
+            If the configuration is inconsistent, for instance an empty
+            ``trigger_model`` or an empty ``embedding_model`` while
+            ``semantic.enabled`` is ``true``.
         """
         super().__init__(logger=logger)
         self._config: CodexRoutingConfig = (
@@ -119,6 +123,9 @@ class CodexRoutingPlugin(PluginInterface):
         )
         self._config.override_from_env(self._logger)
         self._config.validate_args()
+        self._config.lint_signals(self._logger)
+
+        self._triggers = frozenset({self._config.trigger_model})
 
         self._semantic: Optional[CodexSemanticLayer] = semantic
         if self._semantic is None and self._config.semantic_enabled:
@@ -171,7 +178,7 @@ class CodexRoutingPlugin(PluginInterface):
         if not isinstance(payload, dict):
             return payload
 
-        if not should_route(payload, {self._config.trigger_model}):
+        if not should_route(payload, self._triggers):
             return payload
 
         try:

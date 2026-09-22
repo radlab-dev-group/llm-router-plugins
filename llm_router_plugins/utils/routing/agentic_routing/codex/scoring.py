@@ -38,7 +38,6 @@ produces the same score.
 """
 
 import re
-import unicodedata
 
 from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
@@ -142,10 +141,6 @@ class _ModePlan(NamedTuple):
     patterns: Tuple["re.Pattern[str]", ...] = ()
 
 
-#: Memoised character → word-character verdicts, keyed by the character.
-_WORD_CHAR_CACHE: Dict[str, bool] = {}
-
-
 def _is_word_char(char: str) -> bool:
     """
     Return whether *char* is a ``\\w`` character.
@@ -158,18 +153,14 @@ def _is_word_char(char: str) -> bool:
     Returns
     -------
     bool
-        ``True`` for Unicode letters, marks, numbers and ``"_"`` — the set
-        ``re`` treats as word characters.
+        ``True`` for exactly the characters ``re`` treats as word characters:
+        alphanumerics (letters and numbers of any script) and ``"_"``.
 
     Raises
     ------
     None
     """
-    cached = _WORD_CHAR_CACHE.get(char)
-    if cached is None:
-        cached = unicodedata.category(char)[0] in ("L", "M", "N") or char == "_"
-        _WORD_CHAR_CACHE[char] = cached
-    return cached
+    return char.isalnum() or char == "_"
 
 
 def _literal_matches(text_lower: str, needle: str) -> bool:
