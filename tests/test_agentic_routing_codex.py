@@ -60,6 +60,9 @@ from llm_router_plugins.utils.routing.agentic_routing.codex import (
     plugin as plugin_module,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex import (
+    payload as payload_module,
+)
+from llm_router_plugins.utils.routing.agentic_routing.codex import (
     scoring as scoring_module,
 )
 from llm_router_plugins.utils.routing.constants import AGENTIC_CODEX_ROUTING_PREFIX
@@ -1061,6 +1064,33 @@ class TestScoring:
         assert score_mode(mode, "8test") == 0.0
         assert score_mode(mode, "a_test") == 0.0
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "test",
+            "testów",
+            "protest",
+            "_test",
+            "8test",
+            "a_test",
+            "CODE review now",
+            "code-review",
+            "\u2019code review",
+            "kolor\u0301test",
+            "te\u0301st",
+            "  test  ",
+            "test\ncode review",
+            "",
+        ],
+    )
+    def test_literal_scan_is_equivalent_to_a_word_start_regex(self, text):
+        lowered = text.lower()
+
+        for needle in ("test", "testow", "code review", "code", "x"):
+            expected = bool(re.search(r"(?<!\w)" + re.escape(needle), lowered))
+
+            assert scoring_module._literal_matches(lowered, needle) is expected
+
     def test_invalid_patterns_are_skipped_and_valid_ones_count(self):
         mode = _mode("probe", keywords=("test",), patterns=("(", r"test\w*"))
 
@@ -1222,11 +1252,52 @@ class TestPayloadRobustness:
         assert request.request_class == REQUEST_CLASS_MAIN
         assert request.collaboration_mode == COLLABORATION_MODE_DEFAULT
 
-    def test_context_size_is_derived_from_the_serialized_body(self):
+    def test_context_size_counts_the_content_characters(self):
         request = parse_codex_payload(main_payload())
 
-        assert request.context_chars == 553
+        assert request.context_chars == 421
         assert request.context_tokens == request.context_chars // 4
+
+    def test_context_size_grows_with_the_transcript(self):
+        payload = main_payload()
+        before = parse_codex_payload(payload).context_chars
+
+        payload["input"].append(_user("Dodaj jeszcze jeden komunikat."))
+
+        assert parse_codex_payload(payload).context_chars > before
+
+    def test_parsing_never_serializes_the_payload(self, monkeypatch):
+        payload = main_payload()
+        serialized = []
+        real_dumps = json.dumps
+
+        def spy(value, *args, **kwargs):
+            serialized.append(value)
+            return real_dumps(value, *args, **kwargs)
+
+        monkeypatch.setattr(payload_module.json, "dumps", spy)
+
+        request = parse_codex_payload(payload)
+
+        assert serialized == []
+        assert request.context_chars > 0
+
+    def test_content_length_of_the_plain_fragments(self):
+        assert payload_module._content_length(None) == 0
+        assert payload_module._content_length("abc") == 3
+        assert payload_module._content_length(12345) == 5
+        assert payload_module._content_length(True) == 4
+
+    def test_content_length_counts_nested_values_and_keys(self):
+        assert payload_module._content_length({"ab": ["cde", 99]}) == 7
+        assert payload_module._content_length(("ab", "cd")) == 4
+        assert payload_module._content_length({1: "abc"}) == 3
+
+    def test_content_length_survives_a_self_referencing_payload(self):
+        node = {"text": "abc"}
+        node["self"] = node
+
+        assert payload_module._content_length(node) == 11
 
     def test_environment_context_is_not_the_user_text(self):
         request = parse_codex_payload(main_payload())
@@ -1430,6 +1501,78 @@ class TestConfig:
         )
 
         _rebuild(_config(), codex_modes=modes).validate_args()
+
+
+# --------------------------------------------------------------------------
+# startup lint of the configured signals
+# --------------------------------------------------------------------------
+class TestSignalLint:
+    """Signals that can never score are reported instead of silently dropped."""
+
+    @staticmethod
+    def _with_patterns(patterns):
+        """Return the bundled config with *patterns* added to the ``plan`` mode."""
+        modes = tuple(
+            dataclasses.replace(mode, patterns=mode.patterns + patterns)
+            if mode.name == "plan"
+            else mode
+            for mode in _config().codex_modes
+        )
+        return _rebuild(_config(), codex_modes=modes)
+
+    def test_the_shipped_config_lints_clean(self):
+        logger = _CaptureLogger()
+
+        _config().lint_signals(logger)
+
+        assert logger.records["warning"] == []
+
+    def test_an_uncompilable_pattern_is_reported(self):
+        logger = _CaptureLogger()
+
+        self._with_patterns(("(",)).lint_signals(logger)
+
+        assert "unusable pattern" in logger.joined()
+
+    def test_an_uppercase_pattern_is_reported(self):
+        logger = _CaptureLogger()
+
+        self._with_patterns((r"\bREADME\b",)).lint_signals(logger)
+
+        assert "can never match" in logger.joined()
+
+    def test_usable_signals_are_not_reported(self):
+        logger = _CaptureLogger()
+
+        self._with_patterns((r"readme\w*",)).lint_signals(logger)
+
+        assert logger.records["warning"] == []
+
+    def test_a_mode_without_a_model_is_reported(self):
+        logger = _CaptureLogger()
+        config = _rebuild(_config(), codex_modes=(_mode("probe", model_name=""),))
+
+        config.lint_signals(logger)
+
+        assert "no model_name" in logger.joined()
+
+    def test_an_overlap_not_below_chunk_size_is_reported(self):
+        logger = _CaptureLogger()
+
+        _rebuild(_config(), chunk_size=128, chunk_overlap=128).lint_signals(logger)
+
+        assert "chunk_overlap" in logger.joined()
+
+    def test_the_lint_needs_no_logger_and_never_raises(self):
+        self._with_patterns(("(",)).lint_signals()
+
+    def test_the_plugin_lints_when_constructed(self):
+        logger = _CaptureLogger()
+        config = _rebuild(self._with_patterns(("(",)), semantic_enabled=False)
+
+        CodexRoutingPlugin(logger=logger, config=config)
+
+        assert "unusable pattern" in logger.joined()
 
 
 # --------------------------------------------------------------------------

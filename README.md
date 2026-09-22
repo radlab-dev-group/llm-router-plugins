@@ -471,6 +471,11 @@ Modes ship in [agentic_routing_codex.json](llm_router_plugins/resources/routing/
 | `aux_title`  | `qwen/Qwen3.8-27B`        | Request class — system-thread title generation |
 | `compaction` | `qwen/Qwen3.8-27B`        | Request class — context compaction             |
 
+At construction the plugin lints the configured signals and warns about the ones that can never score: a pattern
+that does not compile, a pattern with upper-case letters (the text is lower-cased before scoring), a mode without a
+`model_name`, and a `chunk_overlap` that is not below `chunk_size`. Warnings only — no signal is rewritten and no
+request is rejected.
+
 **2. Request classes:**
 
 Codex mixes three kinds of request on one endpoint, and the structural ones are recognised before any prompt text is
