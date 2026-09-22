@@ -11,6 +11,7 @@ JSON structure::
         "fallback_mode": "implement",
         "heuristic_enabled": true,
         "heuristic_min_score": 3.0,
+        "classify_max_chars": 4000,
         "vector_store_path": "",
         "semantic": {
           "enabled": true,
@@ -42,6 +43,9 @@ import pathlib
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
+from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
+    DEFAULT_CLASSIFY_MAX_CHARS,
+)
 from llm_router_plugins.utils.routing.constants import AGENTIC_CODEX_ROUTING_PREFIX
 from llm_router_plugins.utils.routing.common import (
     RoutingConfigBase,
@@ -98,12 +102,16 @@ class CodexRoutingConfig(RoutingConfigBase):
         The HuggingFace model identifier used to compute embeddings.
     codex_modes : Tuple[CodexMode, ...]
         Immutable sequence of :class:`CodexMode` dataclasses, one per work mode.
+    classify_max_chars : int
+        Character budget of the text the keyword and semantic layers see: the
+        newest user message is always kept whole, older ones are appended while
+        the budget holds.
     """
 
     # RoutingConfigBase hooks (ClassVar — not dataclass fields)
     _ENV_PREFIX: ClassVar[str] = AGENTIC_CODEX_ROUTING_PREFIX
     _DEFAULT_CONFIG_PATH: ClassVar[Optional[pathlib.Path]] = (
-        pathlib.Path(__file__).resolve().parent.parent.parent.parent.parent
+        pathlib.Path(__file__).resolve().parents[4]
         / "resources"
         / "routing"
         / "agentic_routing_codex.json"
@@ -121,6 +129,7 @@ class CodexRoutingConfig(RoutingConfigBase):
     chunk_overlap: int
     embedding_model: str
     codex_modes: Tuple["CodexMode", ...]
+    classify_max_chars: int = DEFAULT_CLASSIFY_MAX_CHARS
 
     @property
     def mode_names(self) -> List[str]:
@@ -212,6 +221,9 @@ class CodexRoutingConfig(RoutingConfigBase):
             chunk_overlap=chunk_overlap,
             embedding_model=str(raw.get("embedding_model", "") or ""),
             codex_modes=codex_modes,
+            classify_max_chars=int(
+                settings.get("classify_max_chars", DEFAULT_CLASSIFY_MAX_CHARS)
+            ),
         )
 
     def _override_from_env(self, logger: Optional[logging.Logger] = None) -> None:
@@ -229,6 +241,7 @@ class CodexRoutingConfig(RoutingConfigBase):
         - ``FALLBACK_MODE`` — override the fallback mode name
         - ``HEURISTIC_ENABLED`` — ``1/0``, ``true/false``, ``yes/no``, ``on/off``
         - ``HEURISTIC_MIN_SCORE`` — override the heuristic acceptance threshold
+        - ``CLASSIFY_MAX_CHARS`` — character budget of the classified user text
         - ``MODEL`` — embedding model used by the semantic similarity layer
         - ``SEMANTIC_ENABLED`` — turn the semantic similarity layer on/off
         - ``SIMILARITY_THRESHOLD`` — minimum cosine similarity to accept a match
@@ -263,9 +276,9 @@ class CodexRoutingConfig(RoutingConfigBase):
             if model_env and model_env.strip():
                 self._replace_mode(
                     mode.name,
+                    logger,
+                    "model",
                     model_name=model_env.strip(),
-                    logger=logger,
-                    message="Overriding model for mode '%s': %s",
                 )
 
         models_env = os.getenv(f"{AGENTIC_CODEX_ROUTING_PREFIX}MODELS")
@@ -289,9 +302,9 @@ class CodexRoutingConfig(RoutingConfigBase):
                     continue
                 self._replace_mode(
                     mode_name,
+                    logger,
+                    "model",
                     model_name=model_name,
-                    logger=logger,
-                    message="Overriding model for mode '%s': %s",
                 )
 
         modes_env = os.getenv(f"{AGENTIC_CODEX_ROUTING_PREFIX}MODES")
@@ -330,6 +343,12 @@ class CodexRoutingConfig(RoutingConfigBase):
         min_score = env_float(AGENTIC_CODEX_ROUTING_PREFIX, "HEURISTIC_MIN_SCORE")
         if min_score is not None:
             self.heuristic_min_score = min_score
+
+        classify_max_chars = env_int(
+            AGENTIC_CODEX_ROUTING_PREFIX, "CLASSIFY_MAX_CHARS"
+        )
+        if classify_max_chars is not None:
+            self.classify_max_chars = classify_max_chars
 
         model_env = os.getenv(f"{AGENTIC_CODEX_ROUTING_PREFIX}MODEL")
         if model_env and model_env.strip():
@@ -383,16 +402,16 @@ class CodexRoutingConfig(RoutingConfigBase):
             keywords = tuple(k.strip() for k in env_keywords.split("|") if k.strip())
             self._replace_mode(
                 mode_name,
+                logger,
+                "keywords",
                 keywords=keywords,
-                logger=logger,
-                message="Overriding keywords for mode '%s': %s",
             )
 
     def _replace_mode(
         self,
         mode_name: str,
         logger: Optional[logging.Logger],
-        message: str,
+        label: str,
         **changes: Any,
     ) -> None:
         """
@@ -404,9 +423,9 @@ class CodexRoutingConfig(RoutingConfigBase):
             Name of the mode to rebuild; must already be configured.
         logger : logging.Logger, optional
             Logger instance used to report the applied override.
-        message : str
-            ``logging``-style format string taking the mode name and the
-            first value of *changes*.
+        label : str
+            What was overridden, e.g. ``"model"`` or ``"keywords"``; reported
+            with the mode name and the new value.
         **changes : Any
             Fields to overwrite on the mode (a single field per call).
 
@@ -423,7 +442,12 @@ class CodexRoutingConfig(RoutingConfigBase):
             for mode in self.codex_modes
         )
         if logger:
-            logger.info(message, mode_name, next(iter(changes.values())))
+            logger.info(
+                "Overriding %s for mode '%s': %s",
+                label,
+                mode_name,
+                next(iter(changes.values())),
+            )
 
     def _validate_args(self) -> None:
         """
@@ -438,8 +462,9 @@ class CodexRoutingConfig(RoutingConfigBase):
         ValueError
             If the trigger is missing, no mode is defined, a mode name is
             duplicated, ``fallback_mode`` does not name a configured mode,
-            semantic similarity is enabled without an embedding model, or the
-            embedding router parameters are out of range.
+            semantic similarity is enabled without an embedding model, the
+            embedding router parameters are out of range, or the classified
+            text budget is not positive.
         """
         if not self.trigger_model:
             raise ValueError(
@@ -481,6 +506,12 @@ class CodexRoutingConfig(RoutingConfigBase):
         if self.chunk_size <= 0:
             raise ValueError(
                 f"CodexRouting: chunk_size must be > 0, got {self.chunk_size}"
+            )
+
+        if self.classify_max_chars <= 0:
+            raise ValueError(
+                "CodexRouting: classify_max_chars must be > 0, got "
+                f"{self.classify_max_chars}"
             )
 
         if self.chunk_overlap < 0:
