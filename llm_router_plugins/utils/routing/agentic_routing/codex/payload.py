@@ -44,12 +44,19 @@ __all__ = [
     "REQUEST_CLASS_COMPACTION",
     "COLLABORATION_MODE_PLAN",
     "COLLABORATION_MODE_DEFAULT",
+    "DEFAULT_CLASSIFY_MAX_CHARS",
     "CodexRequest",
     "parse_codex_payload",
 ]
 
 #: Rough character-to-token ratio used when only a character count is known.
 _CHARS_PER_TOKEN = 4
+
+#: Default character budget for the text assembled for classification.
+DEFAULT_CLASSIFY_MAX_CHARS = 4000
+
+#: Characters :func:`_latest_user_text` puts between two assembled messages.
+_MESSAGE_SEPARATOR_CHARS = 2
 
 #: The turn-metadata header of the Codex CLI is a JSON-encoded string.
 _TURN_METADATA_KEY = "x-codex-turn-metadata"
@@ -118,7 +125,8 @@ class CodexRequest:
     collaboration_mode : str
         ``plan``, ``default`` or ``""`` when no block is present.
     latest_user_text : str
-        Text of the most recent genuine user message.
+        The genuine user messages assembled newest first, within the character
+        budget given to :func:`parse_codex_payload`.
     request_class : str
         One of ``main``, ``aux_title``, ``compaction``.
     """
@@ -145,7 +153,11 @@ class CodexRequest:
     request_class: str = REQUEST_CLASS_MAIN
 
 
-def parse_codex_payload(payload: Dict[str, Any]) -> "CodexRequest":
+def parse_codex_payload(
+    payload: Dict[str, Any],
+    *,
+    max_chars: int = DEFAULT_CLASSIFY_MAX_CHARS,
+) -> "CodexRequest":
     """
     Normalize an OpenAI-Responses-style Codex payload.
 
@@ -153,6 +165,10 @@ def parse_codex_payload(payload: Dict[str, Any]) -> "CodexRequest":
     ----------
     payload : dict
         The incoming payload.  It is only read, never modified.
+    max_chars : int
+        Character budget for :attr:`CodexRequest.latest_user_text`.  The
+        newest user message is always kept whole; older ones are appended
+        while the assembled text stays within the budget.
 
     Returns
     -------
@@ -168,6 +184,8 @@ def parse_codex_payload(payload: Dict[str, Any]) -> "CodexRequest":
     client_metadata = _as_mapping(body.get("client_metadata"))
     turn_metadata = _decode_turn_metadata(client_metadata.get(_TURN_METADATA_KEY))
     items = _input_items(body)
+    request_kind = _text(turn_metadata.get("request_kind"))
+    thread_source = _text(turn_metadata.get("thread_source"))
 
     context_chars = _serialized_length(
         body.get("instructions")
@@ -186,9 +204,9 @@ def parse_codex_payload(payload: Dict[str, Any]) -> "CodexRequest":
         window_id=_text(client_metadata.get("x-codex-window-id"))
         or _text(turn_metadata.get("window_id")),
         agent_name=_text(turn_metadata.get("agent_name")),
-        thread_source=_text(turn_metadata.get("thread_source")),
+        thread_source=thread_source,
         sandbox_mode=_text(turn_metadata.get("sandbox_mode")),
-        request_kind=_text(turn_metadata.get("request_kind")),
+        request_kind=request_kind,
         context_window_id=_text(turn_metadata.get("context_window_id")),
         tool_names=tool_names,
         has_tools=bool(tool_names),
@@ -198,11 +216,8 @@ def parse_codex_payload(payload: Dict[str, Any]) -> "CodexRequest":
         context_chars=context_chars,
         context_tokens=context_chars // _CHARS_PER_TOKEN,
         collaboration_mode=_collaboration_mode(items),
-        latest_user_text=_latest_user_text(items, body),
-        request_class=_request_class(
-            _text(turn_metadata.get("request_kind")),
-            _text(turn_metadata.get("thread_source")),
-        ),
+        latest_user_text=_latest_user_text(items, body, max_chars),
+        request_class=_request_class(request_kind, thread_source),
     )
 
 
@@ -474,13 +489,18 @@ def _mode_heading(block: str) -> str:
 
 
 def _latest_user_text(
-    items: List[Any], payload: Dict[str, Any], only_first: bool = False
+    items: List[Any],
+    payload: Dict[str, Any],
+    max_chars: int,
 ) -> str:
     """
-    Return the text of the user message.
+    Return the user text, newest message first, within *max_chars*.
 
-    When only_first is set to `False`, then the text is concatenated from the
-    original user message and other LLM-generated messages (with the ` user ` role).
+    Every ``role == "user"`` message counts, including the ones the CLI adds
+    on top of the original prompt.  They are assembled from the newest to the
+    oldest: the newest message is always kept whole, and an older message is
+    appended only while the assembled text stays within *max_chars* — the
+    first message that would overflow ends the assembly.
 
     Parameters
     ----------
@@ -488,6 +508,9 @@ def _latest_user_text(
         The ``input`` items of the payload, scanned in reverse order.
     payload : dict
         The payload body, consulted for a legacy ``prompt`` fallback.
+    max_chars : int
+        Character budget for the assembled text.  A non-positive value leaves
+        the assembly unbounded.
 
     Returns
     -------
@@ -499,7 +522,8 @@ def _latest_user_text(
     ------
     None
     """
-    _full_user_msg = ""
+    messages: List[str] = []
+    total_chars = 0
     for item in reversed(items):
         if not isinstance(item, dict):
             continue
@@ -510,14 +534,14 @@ def _latest_user_text(
         if not text or text.startswith("<environment_context>"):
             continue
 
-        if only_first:
-            return text
+        if max_chars > 0 and messages:
+            if total_chars + len(text) + _MESSAGE_SEPARATOR_CHARS > max_chars:
+                break
+        total_chars += len(text) + (_MESSAGE_SEPARATOR_CHARS if messages else 0)
+        messages.append(text)
 
-        _full_user_msg += text + "\n\n"
-
-    _full_user_msg = _full_user_msg.strip()
-    if len(_full_user_msg):
-        return _full_user_msg
+    if messages:
+        return "\n\n".join(messages)
 
     return _text(payload.get("prompt"))
 

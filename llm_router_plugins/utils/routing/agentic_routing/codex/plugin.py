@@ -39,6 +39,7 @@ from typing import Any, Optional
 
 from llm_router_plugins.plugin_interface import PluginInterface
 from llm_router_plugins.utils.routing.agentic_routing.codex.classifier import (
+    CLASS_ROUTED_MODES,
     classify,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.config import (
@@ -53,7 +54,6 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.semantic import (
 from llm_router_plugins.utils.routing.common import (
     annotate_routing,
     build_embedding_router,
-    resolve_persist_dir,
     should_route,
 )
 from llm_router_plugins.utils.routing.constants import AGENTIC_CODEX_ROUTING_PREFIX
@@ -175,7 +175,9 @@ class CodexRoutingPlugin(PluginInterface):
             return payload
 
         try:
-            request = parse_codex_payload(payload)
+            request = parse_codex_payload(
+                payload, max_chars=self._config.classify_max_chars
+            )
             decision = classify(
                 payload, request, self._config, semantic=self._semantic
             )
@@ -239,12 +241,6 @@ class CodexRoutingPlugin(PluginInterface):
             If ``faiss`` / ``sentence_transformers`` are not importable, or if
             the resulting index contains no vectors.
         """
-        persist_dir = resolve_persist_dir(
-            AGENTIC_CODEX_ROUTING_PREFIX,
-            self._config.vector_store_path,
-            logger=self._logger,
-        )
-
         return build_embedding_router(
             embedding_model=self._config.embedding_model,
             chunk_size=self._config.chunk_size,
@@ -253,10 +249,10 @@ class CodexRoutingPlugin(PluginInterface):
             routing_targets=tuple(
                 mode
                 for mode in self._config.codex_modes
-                if mode.name not in ("aux_title", "compaction")
+                if mode.name not in CLASS_ROUTED_MODES
             ),
             logger=self._logger,
-            persist_dir=persist_dir,
+            persist_dir=self._config.vector_store_path,
             missing_deps_hint=_MISSING_DEPENDENCIES_MESSAGE,
         )
 
@@ -295,21 +291,3 @@ class CodexRoutingPlugin(PluginInterface):
         """
         if self._logger is not None:
             self._logger.warning(message, *args)
-
-    def _debug(self, message: str, *args: Any) -> None:
-        """
-        Log a debug message when a logger is available.
-
-        Parameters
-        ----------
-        message : str
-            The log message, optionally with ``%`` placeholders.
-        *args : Any
-            Arguments for the ``%`` placeholders.
-
-        Returns
-        -------
-        None
-        """
-        if self._logger is not None:
-            self._logger.debug(message, *args)
