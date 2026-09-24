@@ -2,7 +2,7 @@
 Shared helper for extracting user text from routing payloads.
 
 The routing plugins (``SemanticBiEncoderRoutingPlugin``,
-``AgenticRoutingPlugin`` and ``SimpleSemanticRoutingPlugin``) all need to
+``CodexRoutingPlugin`` and ``SimpleSemanticRoutingPlugin``) all need to
 locate the user's message inside an incoming payload dict.  They use the same
 priority list, so this module centralises that logic in one place.
 

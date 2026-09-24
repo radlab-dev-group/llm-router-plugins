@@ -3,7 +3,7 @@ Shared plumbing for the routing plugins.
 
 This module centralises the parts of the routing plugins that are pure
 boilerplate today — duplicated across ``semantic_biencoder`` and
-``agentic_routing``:
+``agentic_routing_codex``:
 
 - :class:`RoutingConfigBase` — the ``from_file`` / ``from_json`` loading
   protocol (``..._CONFIG`` env var holding a raw JSON string *or* a file
@@ -46,7 +46,7 @@ class RoutingConfigBase:
     the :meth:`_from_raw` classmethod:
 
     - ``_ENV_PREFIX`` — the environment-variable prefix of the plugin
-      (e.g. ``"LLM_ROUTER_ROUTING_AGENTIC_"``);
+      (e.g. ``"LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_"``);
     - ``_DEFAULT_CONFIG_PATH`` — the bundled default JSON config, or
       ``None`` when the plugin has no default location;
     - ``_from_raw(raw) -> config`` — parse and validate the decoded JSON dict.
@@ -238,7 +238,8 @@ def env_int(prefix: str, suffix: str) -> Optional[int]:
     Parameters
     ----------
     prefix : str
-        The environment-variable prefix (e.g. ``"LLM_ROUTER_ROUTING_AGENTIC_"``).
+        The environment-variable prefix (e.g.
+        ``"LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_"``).
     suffix : str
         The env var suffix (e.g. ``"TOP_K"``).
 
@@ -474,8 +475,7 @@ def should_route(payload: Dict[str, Any], triggers: Collection[str]) -> bool:
     payload : dict
         The incoming message payload.
     triggers : Collection[str]
-        The configured trigger values (e.g. ``("auto",)`` or the agentic
-        ``trigger`` list).
+        The configured trigger values (e.g. ``("auto",)`` or ``("auto_codex",)``).
 
     Returns
     -------
@@ -501,7 +501,7 @@ def annotate_routing(
     Sets ``payload["model"]`` to the selected *model_name* and adds
     ``payload["routing"]`` with the base keys ``"plugin"`` and
     ``"similarity"`` plus any *extra* fields (e.g. ``target_name`` for the
-    biencoder plugin, ``agent_mode`` / ``source`` for the agentic plugin).
+    biencoder plugin, ``agent_mode`` / ``source`` for the Codex plugin).
 
     Parameters
     ----------

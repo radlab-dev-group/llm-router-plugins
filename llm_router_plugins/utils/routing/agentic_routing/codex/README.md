@@ -545,12 +545,12 @@ export LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_MODELS="implement=qwen/A|debug=
 - **Missing ML extras are silent by intent.** `semantic.enabled: true` without `faiss`/`sentence-transformers` logs
   `Codex semantic routing disabled: …` and continues deterministically. If you expect layer 5 to work, grep startup
   logs for that line.
-- **One trigger per plugin.** `agentic_routing_codex` answers `auto_codex`; the sibling `agentic_routing` answers
-  `auto_agentic` (Chat/agent traffic). Both can be enabled in `LLM_ROUTER_UTILS_PLUGINS_PIPELINE` at once — they do not
-  interfere as long as the aliases stay distinct.
+- **One trigger per plugin.** `agentic_routing_codex` answers `auto_codex`; the semantic plugins answer `auto`. All of
+  them can be enabled in `LLM_ROUTER_UTILS_PLUGINS_PIPELINE` at once — they do not interfere as long as the aliases
+  stay distinct.
 - **Trigger matching is exact after `strip()`** and case-sensitive: `" Auto_codex"` is not routed.
 - **Routing is per request, not per session.** Two turns of one conversation may legitimately land on different
-  models. If you need stickiness, that belongs in `agentic_routing` (session affinity), not here.
+  models. If you need per-session stickiness, implement it in the caller — this plugin never caches a decision.
 
 ---
 
@@ -709,10 +709,7 @@ the 256 000-token providers so that even a compaction request stays inside what 
 
 ### See also
 
-- [Semantic Routing Plugins reference](../../README.md#312-codex-routing-codex-cli-requests) — §3.12 of the shared
+- [Semantic Routing Plugins reference](../../README.md#3-codex-routing-codex-cli-requests) — §3 of the shared
   routing README, plus its [plugin comparison](../../README.md#4-comparison-which-plugin-to-use).
-- Sibling plugin `agentic_routing` (`auto_agentic`): capability filtering, declarative rules and session affinity for
-  generic agent traffic — described in
-  [root README §2.7.3](../../../../../README.md#273-agentic-routing-agent-work-mode).
 - `llm_router_plugins/utils/routing/embedder.py`: the shared BiEncoder + FAISS router used by both plugins.
 - `llm_router_plugins/resources/routing/agentic_routing_codex.json`: the shipped mode definitions and signal lists.

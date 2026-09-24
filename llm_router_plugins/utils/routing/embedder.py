@@ -20,7 +20,7 @@ The router is deliberately duck-typed on its configuration: it only needs the
 ``routing_targets`` attributes (each target must expose ``name``,
 ``model_name``, ``description`` and ``examples``).  :class:`EmbeddingRouterConfig`
 is a ready-made dataclass for that contract, and the per-plugin config dataclasses
-(``SemanticBiEncoderConfig``, ``AgenticRoutingConfig``) satisfy it as well.
+(``SemanticBiEncoderConfig``, ``CodexRoutingConfig``) satisfy it as well.
 """
 
 import functools
