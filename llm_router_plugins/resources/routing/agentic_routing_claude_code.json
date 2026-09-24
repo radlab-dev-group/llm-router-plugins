@@ -1,0 +1,77 @@
+{
+  "description": "Claude Code model swap configuration — rewrites the model IDs the Claude Code CLI asks for into the models this router serves, per Claude Code tier (fable/opus/plan/sonnet/haiku), so the tier mapping lives here instead of in ANTHROPIC_DEFAULT_*_MODEL environment variables on every host.",
+  "settings": {
+    "enabled": true,
+    "match_families": true,
+    "model_fields": [
+      "model",
+      "model_name"
+    ],
+    "provider_prefixes": [
+      "us.anthropic.",
+      "eu.anthropic.",
+      "apac.anthropic.",
+      "global.anthropic.",
+      "anthropic.",
+      "anthropic/"
+    ]
+  },
+  "claude_code_modes": [
+    {
+      "name": "fable",
+      "model_name": "qwen/Qwen3.8-Flash-Next",
+      "description": "Fable tier: the most capable model, selected for the hardest and longest-running tasks, and what the 'best' alias resolves to. Replace model_name with the strongest model this router serves.",
+      "models": [
+        "claude-fable-5-1",
+        "claude-fable-5",
+        "claude-fable-*",
+        "best"
+      ]
+    },
+    {
+      "name": "opus",
+      "model_name": "qwen/Qwen3.8-Flash-Next",
+      "description": "Opus tier: complex reasoning and architecture work, selected with /model opus or the ANTHROPIC_MODEL environment variable.",
+      "models": [
+        "claude-opus-5-5",
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-opus-*",
+        "opus"
+      ]
+    },
+    {
+      "name": "plan",
+      "model_name": "qwen/Qwen3.8-Flash-Next",
+      "description": "Plan tier: the opusplan alias, which runs Plan Mode on the reasoning model. Only reached when the CLI sends the alias unresolved; normally opusplan arrives as an Opus model ID and is served by the opus mode.",
+      "models": [
+        "opusplan"
+      ]
+    },
+    {
+      "name": "sonnet",
+      "model_name": "qwen/Qwen3.8-Flash-Next",
+      "description": "Sonnet tier: daily coding work, the model a default Claude Code session runs on.",
+      "models": [
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5",
+        "claude-sonnet-*",
+        "sonnet"
+      ]
+    },
+    {
+      "name": "haiku",
+      "model_name": "qwen/Qwen3.8-27B",
+      "description": "Haiku tier: simple requests and the background calls Claude Code runs on the small fast model (topic naming, summaries), formerly configured with ANTHROPIC_SMALL_FAST_MODEL.",
+      "models": [
+        "claude-haiku-4-5",
+        "claude-haiku-*",
+        "claude-3-5-haiku-*",
+        "haiku"
+      ]
+    }
+  ]
+}

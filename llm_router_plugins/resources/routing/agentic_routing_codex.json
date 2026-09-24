@@ -1,7 +1,6 @@
 {
   "description": "Codex agentic routing configuration — selects the model for OpenAI-Responses-style requests emitted by the Codex CLI agent, based on the request class (main turn, auxiliary title generation, context compaction) and on the work mode of the turn (planning, implementing, testing, reviewing, debugging).",
-  "embedding_model": "google/embeddinggemma-300m",
-  "embedding_model_priv": "/mnt/data2/llms/models/community/google/embeddinggemma-300m",
+  "embedding_model": "/mnt/data2/llms/models/community/google/embeddinggemma-300m",
   "settings": {
     "trigger_model": "auto_codex",
     "fallback_mode": "implement",
