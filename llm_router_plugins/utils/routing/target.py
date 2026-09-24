@@ -7,7 +7,7 @@ a named routing destination (``name`` → ``model_name``) described by a
 build the FAISS index.
 
 Concrete plugins extend this contract as needed (for example
-``AgenticRouting`` adds heuristic detection fields on top of it).
+``CodexMode`` adds heuristic detection fields on top of it).
 """
 
 from dataclasses import dataclass

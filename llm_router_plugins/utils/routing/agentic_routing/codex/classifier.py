@@ -16,7 +16,8 @@ Cascade
    compaction and auxiliary title generation.
 3. **collaboration_mode** — the ``<collaboration_mode>`` block injected by the
    Codex CLI declares Plan Mode.
-4. **heuristic** — keyword scoring of the latest user message against the
+4. **heuristic** — keyword scoring of the user text (newest message first,
+   capped by ``classify_max_chars``) against the
    keyword-scored modes (``test``, ``git_review``, ``review``, ``debug``).
 5. **semantic** — embedding cosine similarity over the mode descriptions and
    examples, delegated to
@@ -26,8 +27,10 @@ Cascade
 
 A main turn therefore never falls below the fallback mode: the keyword and
 semantic layers can specialise the decision but can never make it weaker.
-A single request queries the vector store at most once; the same lookup also
-supplies the cosine similarity reported for keyword and fallback decisions.
+The deterministic layers answer without ever touching the embedding stack: a
+request queries the vector store at most once, and only when they stay silent.
+A decision taken by a deterministic layer reports the confidence derived from
+its own signal — ``score / (score + 1)`` for a keyword hit, ``1.0`` above it.
 
 Example
 -------
@@ -68,6 +71,7 @@ __all__ = [
     "SOURCE_SEMANTIC",
     "SOURCE_FALLBACK",
     "HEURISTIC_MODES",
+    "CLASS_ROUTED_MODES",
     "RoutingDecision",
     "classify",
 ]
@@ -94,8 +98,18 @@ SOURCE_FALLBACK = "fallback"
 #: collaboration block and ``implement`` is the fallback, so neither needs
 #: keywords; ``aux_title``/``compaction`` are class-routed.  ``git_review``
 #: precedes ``review`` so a message that is both a review and a version
-#: control question is routed to the git-aware mode on a tied score.
+#: control question is routed to the git-aware mode on a tied score.  Candidates
+#: are built in **this** order, not in config order, so the tie-break does not
+#: depend on how the JSON lists its modes.
 HEURISTIC_MODES: Tuple[str, ...] = ("test", "git_review", "review", "debug")
+
+#: Modes the request-class layer decides on its own.  The names match the
+#: ``REQUEST_CLASS_*`` values of :mod:`~codex.payload`, and the plugin leaves
+#: them out of the semantic index.
+CLASS_ROUTED_MODES: Tuple[str, ...] = (
+    REQUEST_CLASS_COMPACTION,
+    REQUEST_CLASS_AUX_TITLE,
+)
 
 #: Name of the payload key holding an explicit mode override.
 _AGENT_MODE_KEY = "agent_mode"
@@ -153,8 +167,9 @@ def classify(
         Routing configuration providing the modes, the fallback and the
         heuristic settings.
     semantic : CodexSemanticLayer, optional
-        Embedding similarity layer consulted after the deterministic layers.
-        When omitted or unavailable the cascade stays fully deterministic.
+        Embedding similarity layer, consulted only after every deterministic
+        layer has stayed silent.  When omitted or unavailable the cascade stays
+        fully deterministic.
 
     Returns
     -------
@@ -173,26 +188,25 @@ def classify(
     if explicit is not None:
         return RoutingDecision(explicit, SOURCE_EXPLICIT, 1.0, 1.0)
 
-    if request.request_class == REQUEST_CLASS_COMPACTION and "compaction" in modes:
-        return RoutingDecision("compaction", SOURCE_CLASS, 1.0, 1.0)
-
-    if request.request_class == REQUEST_CLASS_AUX_TITLE and "aux_title" in modes:
-        return RoutingDecision("aux_title", SOURCE_CLASS, 1.0, 1.0)
+    if (
+        request.request_class in CLASS_ROUTED_MODES
+        and request.request_class in modes
+    ):
+        return RoutingDecision(request.request_class, SOURCE_CLASS, 1.0, 1.0)
 
     if request.collaboration_mode == COLLABORATION_MODE_PLAN and "plan" in modes:
         return RoutingDecision("plan", SOURCE_COLLABORATION_MODE, 1.0, 1.0)
 
-    routed = None
-    if semantic is not None and semantic.available:
-        routed = semantic.route(request.latest_user_text)
-
     if config.heuristic_enabled:
-        decision = _heuristic_mode(
-            request.latest_user_text, config, semantic=semantic, routed=routed
-        )
+        decision = _heuristic_mode(request.latest_user_text, config, modes)
         if decision is not None:
             return decision
 
+    routed = (
+        semantic.route(request.latest_user_text)
+        if semantic is not None and semantic.available
+        else None
+    )
     mode, similarity = (
         semantic.accept(routed) if semantic is not None else (None, 0.0)
     )
@@ -275,8 +289,7 @@ def _metadata_mode(body: Dict[str, Any]) -> Any:
 def _heuristic_mode(
     text: str,
     config: CodexRoutingConfig,
-    semantic: Optional[CodexSemanticLayer] = None,
-    routed: Optional[Dict[str, Any]] = None,
+    modes: Dict[str, Any],
 ) -> Optional[RoutingDecision]:
     """
     Score the latest user text against the heuristic candidate modes.
@@ -288,18 +301,17 @@ def _heuristic_mode(
     config : CodexRoutingConfig
         Routing configuration providing the candidate modes and the minimum
         score required to accept a match.
-    semantic : CodexSemanticLayer, optional
-        Embedding layer used to replace the derived keyword confidence with the
-        cosine similarity of the winning mode.
-    routed : Optional[Dict[str, Any]]
-        The router lookup already performed for this request, reused here so
-        the text is never embedded twice.
+    modes : Dict[str, Any]
+        Configured modes by name, normally ``config.mode_by_name``, reused
+        from the cascade so the lookup is built once per request.
 
     Returns
     -------
     Optional[RoutingDecision]
         A :data:`SOURCE_HEURISTIC` decision when a candidate scores at least
-        ``config.heuristic_min_score``, otherwise ``None``.
+        ``config.heuristic_min_score``, otherwise ``None``.  Candidates are
+        scanned in :data:`HEURISTIC_MODES` order, so ties go to the mode that
+        comes first there; the confidence is ``score / (score + 1)``.
 
     Raises
     ------
@@ -308,9 +320,7 @@ def _heuristic_mode(
     if not text:
         return None
 
-    candidates = [
-        mode for mode in config.codex_modes if mode.name in HEURISTIC_MODES
-    ]
+    candidates = [modes[name] for name in HEURISTIC_MODES if name in modes]
     if not candidates:
         return None
 
@@ -318,15 +328,9 @@ def _heuristic_mode(
     if best_mode is None or score < config.heuristic_min_score:
         return None
 
-    similarity = score_to_similarity(score)
-    if semantic is not None:
-        cosine = semantic.similarity_for(best_mode.name, routed)
-        if cosine is not None:
-            similarity = cosine
-
     return RoutingDecision(
         mode=best_mode.name,
         source=SOURCE_HEURISTIC,
         score=score,
-        similarity=similarity,
+        similarity=score_to_similarity(score),
     )

@@ -309,23 +309,23 @@ class TestRouterContract:
 
 
 class TestTargetContractAndShims:
-    def test_agent_mode_is_routing_target(self):
-        from llm_router_plugins.utils.routing.agentic_routing.general.config import (
-            AgentMode,
-            AgenticRoutingConfig,
+    def test_codex_mode_is_routing_target(self):
+        from llm_router_plugins.utils.routing.agentic_routing.codex.config import (
+            CodexMode,
+            CodexRoutingConfig,
         )
 
-        assert issubclass(AgentMode, RoutingTarget)
-        assert issubclass(AgenticRoutingConfig, RoutingConfigBase)
+        assert issubclass(CodexMode, RoutingTarget)
+        assert issubclass(CodexRoutingConfig, RoutingConfigBase)
 
-        mode = AgentMode(
+        mode = CodexMode(
             name="plan",
             model_name="model_a",
             description="Planning mode",
             examples=("e1",),
-            keywords=["plan"],
-            phrases=[],
-            patterns=[],
+            keywords=("plan",),
+            phrases=(),
+            patterns=(),
             weights={},
         )
         # Base fields are accessible through the subclass contract

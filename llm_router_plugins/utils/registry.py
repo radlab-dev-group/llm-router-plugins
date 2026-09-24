@@ -3,9 +3,6 @@ Central registry for util plugins.
 """
 
 from llm_router_plugins.utils.rag.langchain_plugin import LangchainRAGPlugin
-from llm_router_plugins.utils.routing.agentic_routing.general.agentic_routing import (
-    AgenticRoutingPlugin,
-)
 from llm_router_plugins.utils.routing.agentic_routing.codex.plugin import (
     CodexRoutingPlugin,
 )
@@ -18,7 +15,6 @@ from llm_router_plugins.utils.routing.simple_semantic.simple_semantic_routing im
 
 MAIN_UTILS_REGISTRY = {
     LangchainRAGPlugin.name: LangchainRAGPlugin,
-    AgenticRoutingPlugin.name: AgenticRoutingPlugin,
     CodexRoutingPlugin.name: CodexRoutingPlugin,
     SimpleSemanticRoutingPlugin.name: SimpleSemanticRoutingPlugin,
     SemanticBiEncoderRoutingPlugin.name: SemanticBiEncoderRoutingPlugin,

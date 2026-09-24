@@ -44,16 +44,17 @@ Example
 The cascade is deterministic first, so a request is routed identically, offline
 and for free whenever a cheap layer can answer.  The optional semantic layer
 contributes embedding cosine similarity over the mode descriptions and
-examples through the same BiEncoder + FAISS router used by the
-``agentic_routing`` plugin; without it — or without ``faiss`` installed — the
-layer steps aside and nothing else changes.
+examples through the shared BiEncoder + FAISS router
+(``llm_router_plugins.utils.routing.embedder``); without it — or without
+``faiss`` installed — the layer steps aside and nothing else changes.
 
-The plugin is registered as ``"agentic_routing_codex"`` and coexists with the
-``"agentic_routing"`` plugin, which handles the ``"auto_agentic"`` trigger.
+The plugin is registered as ``"agentic_routing_codex"`` and answers only its own
+trigger; ``"auto"`` traffic stays with the semantic routing plugins.
 """
 
 from llm_router_plugins.utils.routing.agentic_routing.codex.classifier import (
     HEURISTIC_MODES,
+    CLASS_ROUTED_MODES,
     SOURCE_CLASS,
     SOURCE_COLLABORATION_MODE,
     SOURCE_EXPLICIT,
@@ -70,6 +71,7 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.config import (
 from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
     COLLABORATION_MODE_DEFAULT,
     COLLABORATION_MODE_PLAN,
+    DEFAULT_CLASSIFY_MAX_CHARS,
     REQUEST_CLASS_AUX_TITLE,
     REQUEST_CLASS_COMPACTION,
     REQUEST_CLASS_MAIN,
@@ -101,6 +103,8 @@ __all__ = [
     "SOURCE_HEURISTIC",
     "SOURCE_SEMANTIC",
     "HEURISTIC_MODES",
+    "CLASS_ROUTED_MODES",
+    "DEFAULT_CLASSIFY_MAX_CHARS",
     "CodexMode",
     "CodexRequest",
     "CodexRoutingConfig",

@@ -30,8 +30,10 @@ import pytest
 
 from llm_router_plugins.utils.registry import MAIN_UTILS_REGISTRY
 from llm_router_plugins.utils.routing.agentic_routing.codex import (
+    CLASS_ROUTED_MODES,
     COLLABORATION_MODE_DEFAULT,
     COLLABORATION_MODE_PLAN,
+    DEFAULT_CLASSIFY_MAX_CHARS,
     HEURISTIC_MODES,
     REQUEST_CLASS_AUX_TITLE,
     REQUEST_CLASS_COMPACTION,
@@ -56,6 +58,12 @@ from llm_router_plugins.utils.routing.agentic_routing.codex import (
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex import (
     plugin as plugin_module,
+)
+from llm_router_plugins.utils.routing.agentic_routing.codex import (
+    payload as payload_module,
+)
+from llm_router_plugins.utils.routing.agentic_routing.codex import (
+    scoring as scoring_module,
 )
 from llm_router_plugins.utils.routing.constants import AGENTIC_CODEX_ROUTING_PREFIX
 
@@ -275,7 +283,7 @@ class TestTriggerMatching:
             None,
             123,
             "   ",
-            "auto_agentic",
+            "agentic",
             "auto_codex_extra",
             "",
         ],
@@ -611,6 +619,31 @@ class TestHeuristicClassification:
         assert payload["model"] == _expected_model("test")
         assert payload["agent_mode"] == "test"
         assert payload["routing"]["similarity"] == pytest.approx(14.0 / 15.0)
+
+    def test_candidates_follow_the_heuristic_mode_order(self):
+        config = _config()
+        swapped = tuple(
+            (
+                _mode("review", keywords=("alpha",), weights={"alpha": 5})
+                if mode.name == "review"
+                else (
+                    _mode("git_review", keywords=("alpha",), weights={"alpha": 5})
+                    if mode.name == "git_review"
+                    else mode
+                )
+            )
+            for mode in config.codex_modes
+        )
+        payload = main_payload("alpha")
+
+        decision = _decide(
+            parse_codex_payload(payload),
+            payload,
+            _rebuild(config, codex_modes=swapped),
+        )
+
+        assert decision.mode == "git_review"
+        assert decision.source == SOURCE_HEURISTIC
 
 
 # --------------------------------------------------------------------------
@@ -965,6 +998,189 @@ class TestScoring:
     def test_heuristic_modes_are_the_sub_modes_only(self):
         assert HEURISTIC_MODES == ("test", "git_review", "review", "debug")
 
+    @staticmethod
+    def _regex_score(mode, text_lower):
+        """Reference scorer: one ``(?<!\\w)`` regex search per signal."""
+        if not text_lower:
+            return 0.0
+
+        weights = mode.weights if isinstance(mode.weights, dict) else {}
+        score = 0.0
+        for keyword in mode.keywords:
+            needle = keyword.strip().lower()
+            if not needle:
+                continue
+            if re.search(r"(?<!\w)" + re.escape(needle), text_lower):
+                score += scoring_module._keyword_weight(keyword, weights)
+        for phrase in mode.phrases:
+            needle, weight = scoring_module._signal_weight(phrase, 2.0)
+            if needle and re.search(r"(?<!\w)" + re.escape(needle), text_lower):
+                score += weight
+        for pattern in mode.patterns:
+            try:
+                if re.search(pattern, text_lower):
+                    score += scoring_module.PATTERN_WEIGHT
+            except re.error:
+                continue
+        return score
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "",
+            "   ",
+            "test",
+            "protest",
+            "testów",
+            "testow",
+            "  test   testy ",
+            "napraw testy i zrób review diffa przed commitem",
+            "RUN THE TESTS",
+            "root cause",
+            "  nie  działa  ",
+            "plan działania na jutro",
+            "_test",
+            "8test",
+            "test\u0301y",
+            "slowo " * 900 + " pytest",
+            "nic ciekawego " * 900,
+        ],
+    )
+    def test_fast_path_matches_the_regex_reference(self, text):
+        """The substring fast path reports exactly the regex matches."""
+        text_lower = text.lower()
+
+        for mode in _config().codex_modes:
+            assert score_mode(mode, text_lower) == self._regex_score(
+                mode, text_lower
+            )
+
+    def test_word_boundary_rules_are_preserved(self):
+        mode = _mode("probe", keywords=("test",))
+
+        assert score_mode(mode, "testów") == 1.0
+        assert score_mode(mode, "protest") == 0.0
+        assert score_mode(mode, "_test") == 0.0
+        assert score_mode(mode, "8test") == 0.0
+        assert score_mode(mode, "a_test") == 0.0
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "test",
+            "testów",
+            "protest",
+            "_test",
+            "8test",
+            "a_test",
+            "CODE review now",
+            "code-review",
+            "\u2019code review",
+            "kolor\u0301test",
+            "te\u0301st",
+            "  test  ",
+            "test\ncode review",
+            "",
+        ],
+    )
+    def test_literal_scan_is_equivalent_to_a_word_start_regex(self, text):
+        lowered = text.lower()
+
+        for needle in ("test", "testow", "code review", "code", "x"):
+            expected = bool(re.search(r"(?<!\w)" + re.escape(needle), lowered))
+
+            assert scoring_module._literal_matches(lowered, needle) is expected
+
+    def test_invalid_patterns_are_skipped_and_valid_ones_count(self):
+        mode = _mode("probe", keywords=("test",), patterns=("(", r"test\w*"))
+
+        assert score_mode(mode, "testy") == 1.0 + scoring_module.PATTERN_WEIGHT
+
+    def test_plans_are_cached_per_signal_signature(self):
+        scoring_module._PLAN_CACHE.clear()
+        mode = _mode("cache", keywords=("alpha",), weights={"alpha": 2})
+        same = _mode("cache", keywords=("alpha",), weights={"alpha": 2})
+        changed = _mode("cache", keywords=("alpha", "beta"), weights={"alpha": 2})
+
+        plan = scoring_module._mode_plan(mode)
+
+        assert scoring_module._mode_plan(same) is plan
+        assert scoring_module._mode_plan(changed) is not plan
+
+
+# --------------------------------------------------------------------------
+# classified-text budget
+# --------------------------------------------------------------------------
+class TestClassifyTextBudget:
+    """The classified text is the user history, newest first, capped."""
+
+    @staticmethod
+    def _history(*texts):
+        """Build a payload carrying one user message per entry of *texts*."""
+        payload = main_payload(collaboration=None)
+        payload["input"] = [_user(text) for text in texts]
+        return payload
+
+    def test_messages_are_assembled_newest_first(self):
+        payload = self._history("pierwsza sprawa", "druga sprawa", "ostatnia")
+
+        request = parse_codex_payload(payload)
+
+        assert request.latest_user_text == (
+            "ostatnia\n\ndruga sprawa\n\npierwsza sprawa"
+        )
+
+    def test_the_newest_message_always_survives_the_budget(self):
+        payload = self._history("stara sprawa", "N" * 50)
+
+        assert (
+            parse_codex_payload(payload, max_chars=10).latest_user_text == "N" * 50
+        )
+
+    def test_older_messages_stop_at_the_budget(self):
+        payload = self._history("M1", "M2", "M3")
+
+        assert (
+            parse_codex_payload(payload, max_chars=6).latest_user_text == "M3\n\nM2"
+        )
+        assert (
+            parse_codex_payload(payload, max_chars=10).latest_user_text
+            == "M3\n\nM2\n\nM1"
+        )
+
+    def test_environment_context_messages_stay_out(self):
+        request = parse_codex_payload(main_payload("krótka odpowiedź"))
+
+        assert request.latest_user_text == "krótka odpowiedź"
+        assert "<environment_context>" not in request.latest_user_text
+
+    def test_budget_defaults_and_comes_from_the_env(self, monkeypatch):
+        assert _config().classify_max_chars == DEFAULT_CLASSIFY_MAX_CHARS
+        assert (
+            _load_with_env(monkeypatch, CLASSIFY_MAX_CHARS="1234").classify_max_chars
+            == 1234
+        )
+
+    def test_a_non_positive_budget_is_rejected(self):
+        with pytest.raises(ValueError, match="classify_max_chars"):
+            _rebuild(_config(), classify_max_chars=0).validate_args()
+
+    def test_the_plugin_passes_the_budget_to_the_parser(self, monkeypatch):
+        captured = {}
+        parse = plugin_module.parse_codex_payload
+
+        def spy(payload, **kwargs):
+            captured.update(kwargs)
+            return parse(payload, **kwargs)
+
+        monkeypatch.setattr(plugin_module, "parse_codex_payload", spy)
+        config = _config()
+        config.classify_max_chars = 321
+
+        _plugin(config).apply(main_payload("napraw testy"))
+
+        assert captured == {"max_chars": 321}
+
 
 # --------------------------------------------------------------------------
 # payload normalization robustness
@@ -1036,11 +1252,52 @@ class TestPayloadRobustness:
         assert request.request_class == REQUEST_CLASS_MAIN
         assert request.collaboration_mode == COLLABORATION_MODE_DEFAULT
 
-    def test_context_size_is_derived_from_the_serialized_body(self):
+    def test_context_size_counts_the_content_characters(self):
         request = parse_codex_payload(main_payload())
 
-        assert request.context_chars == 553
+        assert request.context_chars == 421
         assert request.context_tokens == request.context_chars // 4
+
+    def test_context_size_grows_with_the_transcript(self):
+        payload = main_payload()
+        before = parse_codex_payload(payload).context_chars
+
+        payload["input"].append(_user("Dodaj jeszcze jeden komunikat."))
+
+        assert parse_codex_payload(payload).context_chars > before
+
+    def test_parsing_never_serializes_the_payload(self, monkeypatch):
+        payload = main_payload()
+        serialized = []
+        real_dumps = json.dumps
+
+        def spy(value, *args, **kwargs):
+            serialized.append(value)
+            return real_dumps(value, *args, **kwargs)
+
+        monkeypatch.setattr(payload_module.json, "dumps", spy)
+
+        request = parse_codex_payload(payload)
+
+        assert serialized == []
+        assert request.context_chars > 0
+
+    def test_content_length_of_the_plain_fragments(self):
+        assert payload_module._content_length(None) == 0
+        assert payload_module._content_length("abc") == 3
+        assert payload_module._content_length(12345) == 5
+        assert payload_module._content_length(True) == 4
+
+    def test_content_length_counts_nested_values_and_keys(self):
+        assert payload_module._content_length({"ab": ["cde", 99]}) == 7
+        assert payload_module._content_length(("ab", "cd")) == 4
+        assert payload_module._content_length({1: "abc"}) == 3
+
+    def test_content_length_survives_a_self_referencing_payload(self):
+        node = {"text": "abc"}
+        node["self"] = node
+
+        assert payload_module._content_length(node) == 11
 
     def test_environment_context_is_not_the_user_text(self):
         request = parse_codex_payload(main_payload())
@@ -1123,6 +1380,12 @@ class TestConfig:
             assert mode.keywords == ()
             assert mode.phrases == ()
             assert mode.patterns == ()
+
+    def test_class_routed_modes_are_the_non_conversation_classes(self):
+        assert CLASS_ROUTED_MODES == (
+            REQUEST_CLASS_COMPACTION,
+            REQUEST_CLASS_AUX_TITLE,
+        )
 
     def test_sub_modes_carry_polish_and_english_signals(self):
         config = _config()
@@ -1241,6 +1504,78 @@ class TestConfig:
 
 
 # --------------------------------------------------------------------------
+# startup lint of the configured signals
+# --------------------------------------------------------------------------
+class TestSignalLint:
+    """Signals that can never score are reported instead of silently dropped."""
+
+    @staticmethod
+    def _with_patterns(patterns):
+        """Return the bundled config with *patterns* added to the ``plan`` mode."""
+        modes = tuple(
+            dataclasses.replace(mode, patterns=mode.patterns + patterns)
+            if mode.name == "plan"
+            else mode
+            for mode in _config().codex_modes
+        )
+        return _rebuild(_config(), codex_modes=modes)
+
+    def test_the_shipped_config_lints_clean(self):
+        logger = _CaptureLogger()
+
+        _config().lint_signals(logger)
+
+        assert logger.records["warning"] == []
+
+    def test_an_uncompilable_pattern_is_reported(self):
+        logger = _CaptureLogger()
+
+        self._with_patterns(("(",)).lint_signals(logger)
+
+        assert "unusable pattern" in logger.joined()
+
+    def test_an_uppercase_pattern_is_reported(self):
+        logger = _CaptureLogger()
+
+        self._with_patterns((r"\bREADME\b",)).lint_signals(logger)
+
+        assert "can never match" in logger.joined()
+
+    def test_usable_signals_are_not_reported(self):
+        logger = _CaptureLogger()
+
+        self._with_patterns((r"readme\w*",)).lint_signals(logger)
+
+        assert logger.records["warning"] == []
+
+    def test_a_mode_without_a_model_is_reported(self):
+        logger = _CaptureLogger()
+        config = _rebuild(_config(), codex_modes=(_mode("probe", model_name=""),))
+
+        config.lint_signals(logger)
+
+        assert "no model_name" in logger.joined()
+
+    def test_an_overlap_not_below_chunk_size_is_reported(self):
+        logger = _CaptureLogger()
+
+        _rebuild(_config(), chunk_size=128, chunk_overlap=128).lint_signals(logger)
+
+        assert "chunk_overlap" in logger.joined()
+
+    def test_the_lint_needs_no_logger_and_never_raises(self):
+        self._with_patterns(("(",)).lint_signals()
+
+    def test_the_plugin_lints_when_constructed(self):
+        logger = _CaptureLogger()
+        config = _rebuild(self._with_patterns(("(",)), semantic_enabled=False)
+
+        CodexRoutingPlugin(logger=logger, config=config)
+
+        assert "unusable pattern" in logger.joined()
+
+
+# --------------------------------------------------------------------------
 # environment overrides
 # --------------------------------------------------------------------------
 def _load_with_env(monkeypatch, **overrides):
@@ -1305,9 +1640,12 @@ class TestEnvironmentOverrides:
         assert config.mode_by_name["test"].keywords == ("a", "b")
 
     def test_keywords_of_an_unknown_mode_are_ignored(self, monkeypatch):
+        untouched = _config().mode_by_name["test"].keywords
+
         config = _load_with_env(monkeypatch, MODE_nope_KEYWORDS="a|b")
 
-        assert len(config.mode_by_name["test"].keywords) == 19
+        assert config.mode_by_name["test"].keywords == untouched
+        assert "nope" not in config.mode_by_name
 
     def test_embedding_settings_are_overridden(self, monkeypatch):
         config = _load_with_env(
@@ -1359,13 +1697,13 @@ class TestEnvironmentOverrides:
 # registry wiring
 # --------------------------------------------------------------------------
 class TestRegistry:
-    """The plugin is discoverable next to the untouched agentic plugin."""
+    """The plugin is discoverable in the shared utils registry."""
 
     def test_codex_plugin_is_registered(self):
         assert MAIN_UTILS_REGISTRY["agentic_routing_codex"] is CodexRoutingPlugin
 
-    def test_agentic_plugin_is_still_registered(self):
-        assert "agentic_routing" in MAIN_UTILS_REGISTRY
+    def test_removed_agentic_plugin_is_not_registered(self):
+        assert "agentic_routing" not in MAIN_UTILS_REGISTRY
 
     def test_registered_name_matches_the_class(self):
         assert CodexRoutingPlugin.name == "agentic_routing_codex"
@@ -1603,7 +1941,7 @@ class TestSemanticSimilarity:
         assert decision.score == decision.similarity == 0.9
         assert router.calls == ["x"]
 
-    def test_cosine_replaces_the_keyword_derived_similarity(self):
+    def test_a_keyword_win_never_asks_the_vector_store(self):
         router = _StubRouter(
             "test", 0.9, all_scores=[{"target": "test", "similarity": 0.77}]
         )
@@ -1613,7 +1951,8 @@ class TestSemanticSimilarity:
         assert decision.mode == "test"
         assert decision.source == SOURCE_HEURISTIC
         assert decision.score == 14.0
-        assert decision.similarity == 0.77
+        assert decision.similarity == score_to_similarity(14.0)
+        assert router.calls == []
 
     def test_semantic_match_wins_when_keywords_are_silent(self):
         router = _StubRouter("debug", 0.81)
@@ -1681,7 +2020,7 @@ class TestSemanticSimilarity:
             "test", 0.9, all_scores=[{"target": "test", "similarity": 0.9}]
         )
 
-        _classify_semantic(main_payload("napraw testy"), router)
+        _classify_semantic(main_payload("wyrenderuj pusty stan w widoku"), router)
 
         assert len(router.calls) == 1
 
@@ -1759,12 +2098,8 @@ class TestSemanticSimilarity:
         monkeypatch.setattr(
             plugin_module, "build_embedding_router", fake_build_router
         )
-        monkeypatch.setattr(
-            plugin_module,
-            "resolve_persist_dir",
-            lambda *_args, **_kwargs: str(tmp_path),
-        )
         config = _config()
+        config.vector_store_path = str(tmp_path)
 
         plugin = CodexRoutingPlugin(logger=None, config=config)
 
