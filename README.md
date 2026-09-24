@@ -152,116 +152,48 @@ requests emitted by the Codex CLI agent by request class and work mode.
 
 ### 2.7.1 Simple Semantic Routing (Heuristic)
 
-The **Simple Semantic Routing plugin** (`simple_semantic_routing`) performs
-two-stage heuristic model selection: it classifies the user's intent
-(code, math, creative, general) via weighted keywords, multi-word phrases, and
-regex patterns, then estimates input complexity (token count) to pick the most
-appropriate model from a configured pool.
+The **Simple Semantic Routing plugin** (`simple_semantic_routing`, `utils/routing/simple_semantic/`) activates on
+`payload["model"] == "auto"` and rewrites it in three dependency-free stages: **intent** scoring over the last user
+message — weighted keywords (case-insensitive substrings), phrases with a `:weight` suffix and regex patterns (+3.0
+each) — giving `code` / `math` / `creative` / `general`, or `none` when nothing scores; **complexity** from a word-count
+estimate (`int(words * 1.25)`) against the `simple` / `medium` thresholds; and **model selection** from an ordered pool
+where index 0 is the cheapest and index `n-1` the strongest. `intent_adjustment` only ever escalates the intents that
+declare one; an intent with an empty adjustment is demoted a single pool step. Only `payload["model"]` is written, so
+the decision lives in the log:
+`SimpleSemanticRouting: intent=code, complexity=simple (10 tokens) -> qwen3.6:35b`.
 
-No embedding model is required — routing is a fast, pure-text classification.
+Configuration ships in
+[simple_semantic.json](llm_router_plugins/resources/routing/simple_semantic.json). Overrides:
+`LLM_ROUTER_ROUTING_COMPLEXITY_THRESHOLDS` (`simple|medium`), `LLM_ROUTER_ROUTING_MODELS` (the pool),
+`LLM_ROUTER_ROUTING_DEFAULT_MODEL` and `LLM_ROUTER_ROUTING_INTENT_<name>` — that last one **replaces** an intent and
+clears its patterns and weights, and there is no `..._CONFIG` variable for this plugin.
 
-**1. Intent scoring — each intent accumulates a score from three sources:**
-
-| Source       | How it works                                                                                                                                             |
-|--------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Keywords** | Each keyword from the JSON has an optional weight. If the keyword is found in the lower-cased input text the score increases by that weight (default 1). |
-| **Phrases**  | Multi-word expressions like `"write code:5"` or `"debug:2"`. If the phrase is found the score increases by the specified weight (default 2.0).           |
-| **Patterns** | Regex patterns — if a pattern matches the input each match adds **3.0** to the score.                                                                    |
-
-The intent with the **highest total score** wins. If no intent score exceeds zero, the intent is classified as `"none"`.
-
-**2. Complexity estimation — token count:**
-
-The plugin estimates the number of tokens using a simple word-count heuristic:
-
-```
-token_estimate = len(input_text.split()) × 1.25
-```
-
-This is compared against two thresholds from the config (`simple`, `medium`):
-
-| Tokens               | Complexity |
-|----------------------|------------|
-| ≤ `simple` threshold | `simple`   |
-| ≤ `medium` threshold | `medium`   |
-| > `medium` threshold | `complex`  |
-
-**3. Model selection:**
-
-The pool of models is a list defined in `default_models` (e.g. `["gpt-oss:120b", "qwen3.6:35b"]`). The complexity and
-intent together determine the index into this pool:
-
-- Complexity maps to a base index: `simple → 0` (first / smallest model), `medium → n // 2` (middle), `complex → n-1` (
-  last / largest).
-- Intent-adjustment from the config (e.g.
-  `{"code": "medium", "math": "medium", "creative": "simple", "general": "simple"}`) can **increase** the base index but
-  never decrease it.
-- The final index is clamped to `[0, n-1]` and the model at that index is selected.
-- If no text is found or the intent is `"none"` the `default_models["simple"]` model is used as fallback.
-
-Configuration is entirely JSON-driven in
-[simple_semantic.json](llm_router_plugins/resources/routing/simple_semantic.json)
-with intent definitions (keywords, phrases, patterns, weights) and two
-complexity thresholds (`simple` / `medium`).
-
-**Environment variable overrides:**
-
-| Env variable                               | Purpose                                        |
-|--------------------------------------------|------------------------------------------------|
-| `LLM_ROUTER_ROUTING_COMPLEXITY_THRESHOLDS` | Pipe-separated `simple                         |medium` token thresholds |
-| `LLM_ROUTER_ROUTING_MODELS`                | Pipe-separated model names for the pool        |
-| `LLM_ROUTER_ROUTING_DEFAULT_MODEL`         | Fallback model when no text or no intent match |
-| `LLM_ROUTER_ROUTING_INTENT_<name>`         | Override intent keywords (pipe-separated)      |
+**Full documentation** — stage-by-stage mechanics, measured intent × complexity → model matrices for two- and
+three-model pools, configuration reference, tuning, gotchas and a runnable verification snippet:
+[Simple Semantic Routing README](llm_router_plugins/utils/routing/simple_semantic/README.md).
 
 ### 2.7.2 Bi-Encoder Semantic Routing (Model Selection)
 
-The **Bi-Encoder routing plugin** (`semantic_biencoder_routing`) uses a neural embedding model
-(**radlab/semantic-euro-bert-encoder-v1**) to compute semantic embeddings for a set of pre-configured routing targets.
-Each target has a `name`, a `model_name` (the model to route to), a `description`, and a list of `examples`.
-At query time the user message is embedded and matched against all stored target embeddings using FAISS
-(`IndexFlatIP` on L2-normalised vectors = cosine similarity). The best-matching target determines the selected model.
+The **Bi-Encoder routing plugin** (`semantic_biencoder_routing`, `utils/routing/semantic_biencoder/`) also answers
+`payload["model"] == "auto"`, but decides by **embedding similarity**. Each routing target is indexed at startup as
+`"Target: {name}. {description}"` plus its `examples`, split into overlapping token chunks, embedded by a
+sentence-transformers BiEncoder (`google/embeddinggemma-300m` by default), L2-normalized and stored in a
+`faiss.IndexFlatIP`; a docstore maps doc IDs back to target names. At request time the last user message is embedded
+(text longer than the model's `max_seq_length` is windowed and averaged, capped at `MAX_QUERY_WINDOWS = 4`), the
+`top_k` hits are **averaged per target**, and the winning target's `model_name` is selected when its cosine reaches
+`similarity_threshold`; the payload gains `routing.target_name` and `routing.similarity`. The index is persisted as
+`index.faiss` + `docstore.pkl` and reloaded on the next start, rebuilt automatically when the embedding model outputs a
+different dimension. Needs the `[ml]` / `[ml-gpu]` extras — and it fails hard rather than passing traffic through.
 
-**1. Index building (on first load or when the persist directory is missing):**
+Configuration ships in [semantic_biencoder.json](llm_router_plugins/resources/routing/semantic_biencoder.json).
+Overrides: `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CONFIG` (inline JSON *or* a path), `_MODEL`, `_TARGETS`,
+`_CHUNK_SIZE`, `_CHUNK_OVERLAP`, `_PERSIST_DIR`; `similarity_threshold` and `top_k` are config-only. The shipped
+`similarity_threshold: 0.0` reroutes **every** request — measured on the shipped targets, real matches score 0.70–0.82
+while unrelated or nonsense text still scores ≈0.35–0.37, so `0.5`–`0.6` is the usual production band.
 
-- For each target, its `description` and `examples` are combined into text.
-- The text is split into overlapping **token chunks** using a sliding window (`chunk_size` tokens, `chunk_overlap`
-  tokens overlap).
-- Each chunk is embedded via the BiEncoder model (e.g. `radlab/semantic-euro-bert-encoder-v1`).
-- All embedding vectors are **L2-normalised** to unit length.
-- Vectors are inserted into a `faiss.IndexFlatIP` index (inner product).
-- A docstore maps each FAISS doc ID to its target name (for reverse lookup).
-
-**2. Routing (query):**
-
-- The user message is embedded and L2-normalised.
-- A message longer than the model's `max_seq_length` is first split into overlapping token windows (window =
-  `max_seq_length`, overlap = `chunk_overlap` clamped to `max_seq_length // 4`), capped at the first 4 windows from
-  the head of the text (`MAX_QUERY_WINDOWS`). The windows are encoded in a single batch and combined into one unit-norm
-  query vector — the L2-normalised mean of the per-window unit vectors — so the cosine scale of the lookup is
-  unchanged. Each extra window costs roughly ~1.2 s of CPU latency.
-- FAISS performs a nearest-neighbor search returning the `top_k` closest chunks.
-- Scores are **aggregated per target**: the mean cosine similarity of all chunks belonging to the same target is
-  computed.
-- The target with the **highest mean similarity** wins and its `model_name` is returned.
-
-**3. Persistence:**
-
-The FAISS index and docstore are saved to disk (files `index.faiss` and `docstore.pkl`) under the configured persist
-directory.
-On subsequent starts the index is loaded from disk — embeddings are **not recomputed**.
-If the embedding model changes (different output dimension) the index is automatically rebuilt.
-
-Configuration is loaded from
-[semantic_biencoder.json](llm_router_plugins/resources/routing/semantic_biencoder.json). The embedding model, chunk
-size, overlap, and persist directory can all be overridden via environment variables:
-
-| Env variable                                          | Purpose                               |
-|-------------------------------------------------------|---------------------------------------|
-| `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_MODEL`         | Override the embedding model name     |
-| `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_TARGETS`       | Pipe-separated list of target names   |
-| `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_SIZE`    | Override chunk size                   |
-| `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_CHUNK_OVERLAP` | Override chunk overlap                |
-| `LLM_ROUTER_ROUTING_SEMANTIC_BIENCODER_PERSIST_DIR`   | Directory for FAISS index persistence |
+**Full documentation** — startup and query mechanics, measured similarities per target, configuration reference, failure
+modes, tuning, gotchas (persisted-index staleness included) and a verification recipe:
+[Bi-Encoder Routing README](llm_router_plugins/utils/routing/semantic_biencoder/README.md).
 
 ### 2.7.3 Agentic Routing (Agent Work Mode)
 

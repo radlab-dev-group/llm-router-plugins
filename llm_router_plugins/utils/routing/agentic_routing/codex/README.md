@@ -709,6 +709,8 @@ the 256 000-token providers so that even a compaction request stays inside what 
 
 ### See also
 
+- [Semantic Routing Plugins reference](../../README.md#312-codex-routing-codex-cli-requests) — §3.12 of the shared
+  routing README, plus its [plugin comparison](../../README.md#4-comparison-which-plugin-to-use).
 - Sibling plugin `agentic_routing` (`auto_agentic`): capability filtering, declarative rules and session affinity for
   generic agent traffic — described in
   [root README §2.7.3](../../../../../README.md#273-agentic-routing-agent-work-mode).
