@@ -283,7 +283,7 @@ class TestTriggerMatching:
             None,
             123,
             "   ",
-            "auto_agentic",
+            "agentic",
             "auto_codex_extra",
             "",
         ],
@@ -1697,13 +1697,13 @@ class TestEnvironmentOverrides:
 # registry wiring
 # --------------------------------------------------------------------------
 class TestRegistry:
-    """The plugin is discoverable next to the untouched agentic plugin."""
+    """The plugin is discoverable in the shared utils registry."""
 
     def test_codex_plugin_is_registered(self):
         assert MAIN_UTILS_REGISTRY["agentic_routing_codex"] is CodexRoutingPlugin
 
-    def test_agentic_plugin_is_still_registered(self):
-        assert "agentic_routing" in MAIN_UTILS_REGISTRY
+    def test_removed_agentic_plugin_is_not_registered(self):
+        assert "agentic_routing" not in MAIN_UTILS_REGISTRY
 
     def test_registered_name_matches_the_class(self):
         assert CodexRoutingPlugin.name == "agentic_routing_codex"
