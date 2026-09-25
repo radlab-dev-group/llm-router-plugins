@@ -144,10 +144,11 @@ the [fast_masker README](llm_router_plugins/maskers/fast_masker/README.md).
 
 ## 2.7 Semantic Routing (Model Selection)
 
-Three routing plugins are available for model selection. The two semantic plugins
+Four routing plugins are available for model selection. The two semantic plugins
 (`simple_semantic_routing`, `semantic_biencoder_routing`) activate when `payload["model"] == "auto"`; the Codex plugin
 (`agentic_routing_codex`) activates on `"auto_codex"`, routing the OpenAI-Responses-style requests emitted by the Codex
-CLI agent by request class and work mode.
+CLI agent by request class and work mode. The Claude Code plugin (`agentic_routing_claude_code`) decides by model name
+alone, mapping the model IDs Claude Code asks for onto the models this router serves.
 
 ### 2.7.1 Simple Semantic Routing (Heuristic)
 
@@ -229,6 +230,39 @@ validation fails at startup.
 **Full documentation** — the cascade and scoring model, installation, loading the plugin into the router, model
 selection and its pitfalls, tuning, a verification recipe and a troubleshooting table — lives in the
 [Codex CLI Routing README](llm_router_plugins/utils/routing/agentic_routing/codex/README.md).
+
+### 2.7.4 Claude Code Model Swap (`claude-*` → configured models)
+
+The **Claude Code Model Swap plugin** (`agentic_routing_claude_code`, `utils/routing/agentic_routing/claude_code/`)
+rewrites the model Claude Code asks for into the model the operator serves. Claude Code resolves its `fable` / `opus` /
+`sonnet` / `haiku` aliases client-side and sends a versioned ID, so pointing it at your own backend means overriding one
+environment variable per tier (`ANTHROPIC_DEFAULT_FABLE_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`,
+`ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`) on every host. This
+plugin moves that mapping into one config file: a **tier** names the model IDs it answers and the model to serve them
+with, and a matching request gets the target written into `payload["model"]` (and `payload["model_name"]`, when the
+payload carries it) plus a `payload["routing"]` block.
+
+| Tier     | Model IDs Claude Code sends                        | Setting it replaces             |
+| -------- | -------------------------------------------------- | ------------------------------- |
+| `fable`  | `claude-fable-5-1`, `claude-fable-5`, `best`       | `ANTHROPIC_DEFAULT_FABLE_MODEL` |
+| `opus`   | `claude-opus-5-5` … `claude-opus-4-6`              | `ANTHROPIC_DEFAULT_OPUS_MODEL`  |
+| `plan`   | `opusplan`                                         | the `model: "opusplan"` phase   |
+| `sonnet` | `claude-sonnet-5`, `claude-sonnet-4-6`, `-4-5`     | `ANTHROPIC_DEFAULT_SONNET_MODEL`|
+| `haiku`  | `claude-haiku-4-5`, `claude-3-5-haiku-*`           | `ANTHROPIC_DEFAULT_HAIKU_MODEL` |
+
+Matching is content-free and deterministic: the requested name is normalized (window suffix `[1m]`, provider version
+`:0`, `@YYYYMMDD` revision, `us.anthropic.` / `anthropic/` prefix, `models/` path and `-YYYYMMDD` release date stripped)
+and resolved through four layers, most specific first — literal, normalized exact, longest wildcard prefix
+(`claude-opus-*`), then family token (`claude-3-5-haiku-20241022` → Haiku). Configuration ships in
+[agentic_routing_claude_code.json](llm_router_plugins/resources/routing/agentic_routing_claude_code.json) and is
+overridable with `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CLAUDE_CODE_*` (`…_CONFIG`, `…_ENABLED`, `…_MATCH_FAMILIES`,
+`…_FIELDS`, `…_MODEL_<TIER>`, `…_MODELS`, `…_MODES`, `…_MODE_<tier>_MODELS`). Routing **fails open and silent**: a model
+no tier claims comes back as the same object it arrived as, with no log line, while an inconsistent config (duplicate tier
+names, an embedded or bare wildcard, one exact name claimed twice) raises at startup. No ML dependencies.
+
+**Full documentation** — the normalization and match layers, installation, router and CLI wiring, tier configuration,
+linting, gotchas, a verification recipe and a troubleshooting table — lives in the
+[Claude Code Model Swap README](llm_router_plugins/utils/routing/agentic_routing/claude_code/README.md).
 
 ---
 
