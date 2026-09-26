@@ -52,7 +52,7 @@
     },
     {
       "name": "sonnet",
-      "model_name": "qwen/Qwen3.8-Flash-Next",
+      "model_name": "qwen/Qwen3.8-27B",
       "description": "Sonnet tier: daily coding work, the model a default Claude Code session runs on.",
       "models": [
         "claude-sonnet-5",
