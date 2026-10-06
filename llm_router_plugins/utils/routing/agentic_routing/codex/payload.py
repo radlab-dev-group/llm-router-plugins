@@ -607,8 +607,21 @@ class CodexPayloadParser:
         messages: List[Dict[str, Any]] = []
 
         for item in items:
+            _n_content = []
+
             if item.get("type") != "message" or item.get("role") != "assistant":
+                _content = item.get("content", [])
+                if not len(_content):
+                    continue
+
+                for _c_itm in _content:
+                    if _c_itm.get("type") == "output_text":
+                        _n_content.append(_c_itm)
+
+            if not len(_n_content):
                 continue
+
+            item["content"] = _n_content
             messages.append(item)
 
         return messages if messages else None
