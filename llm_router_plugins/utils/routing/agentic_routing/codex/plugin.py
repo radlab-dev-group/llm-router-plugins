@@ -46,7 +46,7 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.config import (
     CodexRoutingConfig,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
-    parse_codex_payload,
+    CodexPayloadParser,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.semantic import (
     CodexSemanticLayer,
@@ -126,6 +126,7 @@ class CodexRoutingPlugin(PluginInterface):
         self._config.lint_signals(self._logger)
 
         self._triggers = frozenset({self._config.trigger_model})
+        self._parser = CodexPayloadParser(max_chars=self._config.classify_max_chars)
 
         self._semantic: Optional[CodexSemanticLayer] = semantic
         if self._semantic is None and self._config.semantic_enabled:
@@ -182,9 +183,7 @@ class CodexRoutingPlugin(PluginInterface):
             return payload
 
         try:
-            request = parse_codex_payload(
-                payload, max_chars=self._config.classify_max_chars
-            )
+            request = self._parser.parse(payload)
             decision = classify(
                 payload, request, self._config, semantic=self._semantic
             )

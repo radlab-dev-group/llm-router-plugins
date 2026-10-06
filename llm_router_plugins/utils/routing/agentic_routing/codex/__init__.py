@@ -21,7 +21,8 @@ Mode                    Routed by                                   Model
 
 Modules
 -------
-- :mod:`~codex.payload` — payload → normalized :class:`CodexRequest`
+- :mod:`~codex.payload` — payload → normalized :class:`CodexRequest` via
++  :class:`CodexPayloadParser`
 - :mod:`~codex.scoring` — keyword, phrase and regex scoring
 - :mod:`~codex.classifier` — the deterministic mode cascade
 - :mod:`~codex.semantic` — embedding cosine similarity (optional, fail-open)
@@ -76,7 +77,7 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
     REQUEST_CLASS_COMPACTION,
     REQUEST_CLASS_MAIN,
     CodexRequest,
-    parse_codex_payload,
+    CodexPayloadParser,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.plugin import (
     CodexRoutingPlugin,
@@ -107,13 +108,13 @@ __all__ = [
     "DEFAULT_CLASSIFY_MAX_CHARS",
     "CodexMode",
     "CodexRequest",
+    "CodexPayloadParser",
     "CodexRoutingConfig",
     "CodexRoutingPlugin",
     "CodexSemanticLayer",
     "RoutingDecision",
     "classify",
     "detect_mode",
-    "parse_codex_payload",
     "score_mode",
     "score_to_similarity",
 ]

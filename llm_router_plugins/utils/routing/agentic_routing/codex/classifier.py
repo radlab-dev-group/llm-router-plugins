@@ -36,7 +36,7 @@ Example
 -------
 ::
 
-    request = parse_codex_payload(payload)
+    request = CodexPayloadParser().parse(payload)
     decision = classify(payload, request, config)
     decision.mode        # "plan"
     decision.source      # "collaboration_mode"

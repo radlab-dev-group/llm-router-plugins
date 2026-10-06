@@ -46,13 +46,13 @@ from llm_router_plugins.utils.routing.agentic_routing.codex import (
     SOURCE_SEMANTIC,
     CodexMode,
     CodexRequest,
+    CodexPayloadParser,
     CodexSemanticLayer,
     CodexRoutingConfig,
     CodexRoutingPlugin,
     RoutingDecision,
     classify,
     detect_mode,
-    parse_codex_payload,
     score_mode,
     score_to_similarity,
 )
@@ -118,6 +118,11 @@ def _config():
     config = CodexRoutingConfig.from_file()
     config.validate_args()
     return config
+
+
+def _parse(payload, max_chars=DEFAULT_CLASSIFY_MAX_CHARS):
+    """Normalize *payload* with a parser built for this test."""
+    return CodexPayloadParser(max_chars=max_chars).parse(payload)
 
 
 def _decide(request, payload=None, config=None):
@@ -376,19 +381,19 @@ class TestCollaborationMode:
     """The last ``<collaboration_mode>`` block of the request is authoritative."""
 
     def test_plan_block_selects_plan(self):
-        request = parse_codex_payload(plan_payload())
+        request = _parse(plan_payload())
 
         assert request.collaboration_mode == COLLABORATION_MODE_PLAN
         assert _decide(request, plan_payload()).mode == "plan"
 
     def test_default_block_selects_default(self):
-        request = parse_codex_payload(main_payload())
+        request = _parse(main_payload())
 
         assert request.collaboration_mode == COLLABORATION_MODE_DEFAULT
         assert _decide(request, main_payload()).mode == "implement"
 
     def test_no_block_yields_empty_collaboration_mode(self):
-        request = parse_codex_payload({"input": []})
+        request = _parse({"input": []})
 
         assert request.collaboration_mode == ""
 
@@ -404,7 +409,7 @@ class TestCollaborationMode:
     def test_latest_block_wins(self, blocks, expected):
         payload = {"input": [_developer(block) for block in blocks]}
 
-        assert parse_codex_payload(payload).collaboration_mode == expected
+        assert _parse(payload).collaboration_mode == expected
 
     def test_plan_to_default_switch_reclassifies_the_next_turn(self):
         plugin = _plugin()
@@ -426,7 +431,7 @@ class TestCollaborationMode:
             ],
         }
 
-        assert parse_codex_payload(payload).collaboration_mode == ""
+        assert _parse(payload).collaboration_mode == ""
 
     def test_unclosed_block_is_still_parsed(self):
         payload = {
@@ -435,12 +440,12 @@ class TestCollaborationMode:
             ],
         }
 
-        assert parse_codex_payload(payload).collaboration_mode == "plan"
+        assert _parse(payload).collaboration_mode == "plan"
 
     def test_blocks_outside_developer_messages_are_ignored(self):
         payload = {"input": [_user(PLAN_BLOCK)]}
 
-        assert parse_codex_payload(payload).collaboration_mode == ""
+        assert _parse(payload).collaboration_mode == ""
 
 
 # --------------------------------------------------------------------------
@@ -472,7 +477,7 @@ class TestHeuristicClassification:
     ):
         payload = main_payload(text)
 
-        decision = _decide(parse_codex_payload(payload), payload)
+        decision = _decide(_parse(payload), payload)
 
         assert decision.mode == expected_mode
         assert decision.source == SOURCE_HEURISTIC
@@ -493,7 +498,7 @@ class TestHeuristicClassification:
     def test_prompts_without_signals_fall_back_to_implement(self, text):
         payload = main_payload(text)
 
-        decision = _decide(parse_codex_payload(payload), payload)
+        decision = _decide(_parse(payload), payload)
 
         assert decision.mode == "implement"
         assert decision.source == SOURCE_FALLBACK
@@ -518,7 +523,7 @@ class TestHeuristicClassification:
     def test_git_review_prompts_select_git_review(self, text):
         payload = main_payload(text)
 
-        decision = _decide(parse_codex_payload(payload), payload)
+        decision = _decide(_parse(payload), payload)
 
         assert decision.mode == "git_review"
         assert decision.source == SOURCE_HEURISTIC
@@ -537,7 +542,7 @@ class TestHeuristicClassification:
     def test_non_git_prompts_do_not_select_git_review(self, text):
         payload = main_payload(text)
 
-        decision = _decide(parse_codex_payload(payload), payload)
+        decision = _decide(_parse(payload), payload)
 
         assert decision.mode != "git_review"
 
@@ -545,7 +550,7 @@ class TestHeuristicClassification:
         payload = main_payload("przygotuj opis zmian")
         payload["agent_mode"] = "git_review"
 
-        decision = _decide(parse_codex_payload(payload), payload)
+        decision = _decide(_parse(payload), payload)
 
         assert decision.mode == "git_review"
         assert decision.source == SOURCE_EXPLICIT
@@ -555,7 +560,7 @@ class TestHeuristicClassification:
         payload = main_payload("napraw testy")
         config = dataclasses.replace(_config(), heuristic_enabled=False)
 
-        decision = _decide(parse_codex_payload(payload), payload, config)
+        decision = _decide(_parse(payload), payload, config)
 
         assert decision.mode == "implement"
         assert decision.source == SOURCE_FALLBACK
@@ -564,7 +569,7 @@ class TestHeuristicClassification:
         payload = main_payload("napraw testy")
         config = dataclasses.replace(_config(), heuristic_min_score=100.0)
 
-        decision = _decide(parse_codex_payload(payload), payload, config)
+        decision = _decide(_parse(payload), payload, config)
 
         assert decision.mode == "implement"
         assert decision.source == SOURCE_FALLBACK
@@ -580,7 +585,7 @@ class TestHeuristicClassification:
     def test_polish_copula_does_not_select_test_mode(self, text):
         payload = main_payload(text)
 
-        decision = _decide(parse_codex_payload(payload), payload)
+        decision = _decide(_parse(payload), payload)
 
         if "uruchom jest" in text:
             assert decision.mode == "test"
@@ -598,7 +603,7 @@ class TestHeuristicClassification:
     def test_keywords_do_not_match_mid_word(self, text):
         payload = main_payload(text)
 
-        decision = _decide(parse_codex_payload(payload), payload)
+        decision = _decide(_parse(payload), payload)
 
         assert decision.mode == "implement"
         assert decision.source == SOURCE_FALLBACK
@@ -606,7 +611,7 @@ class TestHeuristicClassification:
     def test_collaboration_mode_outranks_the_keyword_layer(self):
         payload = plan_payload("napraw testy")
 
-        decision = _decide(parse_codex_payload(payload), payload)
+        decision = _decide(_parse(payload), payload)
 
         assert decision.mode == "plan"
         assert decision.source == SOURCE_COLLABORATION_MODE
@@ -637,7 +642,7 @@ class TestHeuristicClassification:
         payload = main_payload("alpha")
 
         decision = _decide(
-            parse_codex_payload(payload),
+            _parse(payload),
             payload,
             _rebuild(config, codex_modes=swapped),
         )
@@ -653,14 +658,14 @@ class TestRequestClassRouting:
     """Non-conversational requests are routed by class, never by keywords."""
 
     def test_main_turn_is_classified_as_main(self):
-        request = parse_codex_payload(main_payload())
+        request = _parse(main_payload())
 
         assert request.request_class == REQUEST_CLASS_MAIN
         assert _decide(request, main_payload()).mode == "implement"
 
     def test_title_request_routes_to_aux_title(self):
         payload = title_payload()
-        request = parse_codex_payload(payload)
+        request = _parse(payload)
 
         assert request.request_class == REQUEST_CLASS_AUX_TITLE
         decision = _decide(request, payload)
@@ -670,7 +675,7 @@ class TestRequestClassRouting:
 
     def test_compaction_routes_to_compaction(self):
         payload = compaction_payload()
-        request = parse_codex_payload(payload)
+        request = _parse(payload)
 
         assert request.request_class == REQUEST_CLASS_COMPACTION
         decision = _decide(request, payload)
@@ -680,7 +685,7 @@ class TestRequestClassRouting:
 
     def test_compaction_outranks_a_plan_collaboration_block(self):
         payload = compaction_payload(PLAN_BLOCK)
-        request = parse_codex_payload(payload)
+        request = _parse(payload)
 
         assert request.collaboration_mode == "plan"
         assert request.request_class == REQUEST_CLASS_COMPACTION
@@ -689,7 +694,7 @@ class TestRequestClassRouting:
     def test_compaction_outranks_the_keyword_layer(self):
         payload = main_payload("napraw testy", request_kind="compaction")
 
-        assert _decide(parse_codex_payload(payload), payload).mode == "compaction"
+        assert _decide(_parse(payload), payload).mode == "compaction"
 
     @pytest.mark.parametrize(
         "builder,removed",
@@ -703,7 +708,7 @@ class TestRequestClassRouting:
         payload = builder()
         config = _without_mode(_config(), removed)
 
-        decision = _decide(parse_codex_payload(payload), payload, config)
+        decision = _decide(_parse(payload), payload, config)
 
         assert decision.mode == "implement"
         assert decision.source == SOURCE_FALLBACK
@@ -712,7 +717,7 @@ class TestRequestClassRouting:
         payload = title_payload()
         payload["input"][-1]["content"][0]["text"] = "napraw testy"
 
-        decision = _decide(parse_codex_payload(payload), payload)
+        decision = _decide(_parse(payload), payload)
 
         assert decision.mode == "aux_title"
         assert decision.source == SOURCE_CLASS
@@ -753,7 +758,7 @@ class TestExplicitOverrides:
         payload = plan_payload()
         payload[key] = value
 
-        decision = _decide(parse_codex_payload(payload), payload)
+        decision = _decide(_parse(payload), payload)
 
         assert decision.mode == expected_mode
         assert decision.source == SOURCE_EXPLICIT
@@ -763,7 +768,7 @@ class TestExplicitOverrides:
         payload = plan_payload()
         payload["metadata"] = {"agent_mode": "debug"}
 
-        decision = _decide(parse_codex_payload(payload), payload)
+        decision = _decide(_parse(payload), payload)
 
         assert decision.mode == "debug"
         assert decision.source == SOURCE_EXPLICIT
@@ -774,7 +779,7 @@ class TestExplicitOverrides:
         payload["codex_mode"] = "debug"
         payload["metadata"] = {"agent_mode": "review"}
 
-        decision = _decide(parse_codex_payload(payload), payload)
+        decision = _decide(_parse(payload), payload)
 
         assert decision.mode == "test"
         assert decision.source == SOURCE_EXPLICIT
@@ -784,7 +789,7 @@ class TestExplicitOverrides:
         payload = plan_payload()
         payload["agent_mode"] = value
 
-        decision = _decide(parse_codex_payload(payload), payload)
+        decision = _decide(_parse(payload), payload)
 
         assert decision.mode == "plan"
         assert decision.source == SOURCE_COLLABORATION_MODE
@@ -797,7 +802,7 @@ class TestExplicitOverrides:
         payload = plan_payload()
         payload["metadata"] = metadata
 
-        decision = _decide(parse_codex_payload(payload), payload)
+        decision = _decide(_parse(payload), payload)
 
         assert decision.mode == "plan"
         assert decision.source == SOURCE_COLLABORATION_MODE
@@ -863,10 +868,14 @@ class TestPassthrough:
         assert payload == before
 
     def test_parser_failure_is_swallowed(self, monkeypatch):
-        def boom(*args, **kwargs):
-            raise RuntimeError("parser exploded")
+        class ExplodingParser:
+            def __init__(self, *args, **kwargs):
+                return None
 
-        monkeypatch.setattr(plugin_module, "parse_codex_payload", boom)
+            def parse(self, payload):
+                raise RuntimeError("parser exploded")
+
+        monkeypatch.setattr(plugin_module, "CodexPayloadParser", ExplodingParser)
         payload = main_payload()
 
         result = _plugin().apply(payload)
@@ -1124,7 +1133,7 @@ class TestClassifyTextBudget:
     def test_messages_are_assembled_newest_first(self):
         payload = self._history("pierwsza sprawa", "druga sprawa", "ostatnia")
 
-        request = parse_codex_payload(payload)
+        request = _parse(payload)
 
         assert request.latest_user_text == (
             "ostatnia\n\ndruga sprawa\n\npierwsza sprawa"
@@ -1134,22 +1143,22 @@ class TestClassifyTextBudget:
         payload = self._history("stara sprawa", "N" * 50)
 
         assert (
-            parse_codex_payload(payload, max_chars=10).latest_user_text == "N" * 50
+            _parse(payload, max_chars=10).latest_user_text == "N" * 50
         )
 
     def test_older_messages_stop_at_the_budget(self):
         payload = self._history("M1", "M2", "M3")
 
         assert (
-            parse_codex_payload(payload, max_chars=6).latest_user_text == "M3\n\nM2"
+            _parse(payload, max_chars=6).latest_user_text == "M3\n\nM2"
         )
         assert (
-            parse_codex_payload(payload, max_chars=10).latest_user_text
+            _parse(payload, max_chars=10).latest_user_text
             == "M3\n\nM2\n\nM1"
         )
 
     def test_environment_context_messages_stay_out(self):
-        request = parse_codex_payload(main_payload("krótka odpowiedź"))
+        request = _parse(main_payload("krótka odpowiedź"))
 
         assert request.latest_user_text == "krótka odpowiedź"
         assert "<environment_context>" not in request.latest_user_text
@@ -1167,13 +1176,14 @@ class TestClassifyTextBudget:
 
     def test_the_plugin_passes_the_budget_to_the_parser(self, monkeypatch):
         captured = {}
-        parse = plugin_module.parse_codex_payload
+        parser = plugin_module.CodexPayloadParser
 
-        def spy(payload, **kwargs):
-            captured.update(kwargs)
-            return parse(payload, **kwargs)
+        class SpyParser(parser):
+            def __init__(self, *args, **kwargs):
+                captured.update(kwargs)
+                super().__init__(*args, **kwargs)
 
-        monkeypatch.setattr(plugin_module, "parse_codex_payload", spy)
+        monkeypatch.setattr(plugin_module, "CodexPayloadParser", SpyParser)
         config = _config()
         config.classify_max_chars = 321
 
@@ -1208,16 +1218,16 @@ class TestPayloadRobustness:
         ],
     )
     def test_malformed_payloads_parse(self, payload):
-        assert isinstance(parse_codex_payload(payload), CodexRequest)
+        assert isinstance(_parse(payload), CodexRequest)
 
     def test_tool_without_a_name_falls_back_to_its_type(self):
-        request = parse_codex_payload({"tools": [{"type": "web_search"}]})
+        request = _parse({"tools": [{"type": "web_search"}]})
 
         assert request.tool_names == ("web_search",)
         assert request.has_tools is True
 
     def test_string_content_is_used_as_text(self):
-        request = parse_codex_payload(
+        request = _parse(
             {
                 "input": [
                     {"type": "message", "role": "user", "content": "plain string"}
@@ -1228,7 +1238,7 @@ class TestPayloadRobustness:
         assert request.latest_user_text == "plain string"
 
     def test_main_turn_exposes_the_decoded_identifiers(self):
-        request = parse_codex_payload(main_payload())
+        request = _parse(main_payload())
 
         assert request.session_id == "sess-1"
         assert request.thread_id == "thread-1"
@@ -1242,7 +1252,7 @@ class TestPayloadRobustness:
         assert request.context_window_id == "cw-1"
 
     def test_main_turn_exposes_the_request_shape(self):
-        request = parse_codex_payload(main_payload())
+        request = _parse(main_payload())
 
         assert request.tool_names == ("exec_command", "web_search")
         assert request.has_tools is True
@@ -1253,18 +1263,18 @@ class TestPayloadRobustness:
         assert request.collaboration_mode == COLLABORATION_MODE_DEFAULT
 
     def test_context_size_counts_the_content_characters(self):
-        request = parse_codex_payload(main_payload())
+        request = _parse(main_payload())
 
         assert request.context_chars == 421
         assert request.context_tokens == request.context_chars // 4
 
     def test_context_size_grows_with_the_transcript(self):
         payload = main_payload()
-        before = parse_codex_payload(payload).context_chars
+        before = _parse(payload).context_chars
 
         payload["input"].append(_user("Dodaj jeszcze jeden komunikat."))
 
-        assert parse_codex_payload(payload).context_chars > before
+        assert _parse(payload).context_chars > before
 
     def test_parsing_never_serializes_the_payload(self, monkeypatch):
         payload = main_payload()
@@ -1277,36 +1287,36 @@ class TestPayloadRobustness:
 
         monkeypatch.setattr(payload_module.json, "dumps", spy)
 
-        request = parse_codex_payload(payload)
+        request = _parse(payload)
 
         assert serialized == []
         assert request.context_chars > 0
 
     def test_content_length_of_the_plain_fragments(self):
-        assert payload_module._content_length(None) == 0
-        assert payload_module._content_length("abc") == 3
-        assert payload_module._content_length(12345) == 5
-        assert payload_module._content_length(True) == 4
+        assert CodexPayloadParser._content_length(None) == 0
+        assert CodexPayloadParser._content_length("abc") == 3
+        assert CodexPayloadParser._content_length(12345) == 5
+        assert CodexPayloadParser._content_length(True) == 4
 
     def test_content_length_counts_nested_values_and_keys(self):
-        assert payload_module._content_length({"ab": ["cde", 99]}) == 7
-        assert payload_module._content_length(("ab", "cd")) == 4
-        assert payload_module._content_length({1: "abc"}) == 3
+        assert CodexPayloadParser._content_length({"ab": ["cde", 99]}) == 7
+        assert CodexPayloadParser._content_length(("ab", "cd")) == 4
+        assert CodexPayloadParser._content_length({1: "abc"}) == 3
 
     def test_content_length_survives_a_self_referencing_payload(self):
         node = {"text": "abc"}
         node["self"] = node
 
-        assert payload_module._content_length(node) == 11
+        assert CodexPayloadParser._content_length(node) == 11
 
     def test_environment_context_is_not_the_user_text(self):
-        request = parse_codex_payload(main_payload())
+        request = _parse(main_payload())
 
         assert request.latest_user_text == "Zaimplementuj nowy moduł eksportu."
         assert "<environment_context>" not in request.latest_user_text
 
     def test_title_request_is_structured_and_collaboration_free(self):
-        request = parse_codex_payload(title_payload())
+        request = _parse(title_payload())
 
         assert request.structured_output is True
         assert request.request_class == REQUEST_CLASS_AUX_TITLE
@@ -1314,7 +1324,7 @@ class TestPayloadRobustness:
         assert request.tool_names == ()
 
     def test_compaction_request_is_tagged(self):
-        request = parse_codex_payload(compaction_payload())
+        request = _parse(compaction_payload())
 
         assert request.request_class == REQUEST_CLASS_COMPACTION
 
@@ -1322,7 +1332,7 @@ class TestPayloadRobustness:
         payload = main_payload()
         before = copy.deepcopy(payload)
 
-        parse_codex_payload(payload)
+        _parse(payload)
 
         assert payload == before
 
@@ -1719,7 +1729,7 @@ class TestDeterminism:
 
     def test_classification_is_stable_across_repeats(self):
         payload = main_payload("Uruchom testy i napraw błędy.")
-        request = parse_codex_payload(payload)
+        request = _parse(payload)
 
         decisions = [_decide(request, payload) for _ in range(5)]
 
@@ -1736,7 +1746,7 @@ class TestDeterminism:
 
     def test_parsing_is_stable_across_repeats(self):
         payload = plan_payload()
-        parsed = [parse_codex_payload(payload) for _ in range(3)]
+        parsed = [_parse(payload) for _ in range(3)]
 
         assert parsed[0] == parsed[1] == parsed[2]
 
@@ -1745,7 +1755,7 @@ class TestDeterminism:
         for _ in range(4):
             payload = main_payload("Napraw testy jednostkowe.")
             similarities.add(
-                _decide(parse_codex_payload(payload), payload).similarity
+                _decide(_parse(payload), payload).similarity
             )
 
         assert len(similarities) == 1
@@ -1829,7 +1839,7 @@ def _semantic_layer(router, threshold=0.5, modes=None, logger=None):
 
 def _classify_semantic(payload, router, threshold=0.5, logger=None):
     """Classify *payload* with a stub-backed semantic layer attached."""
-    request = parse_codex_payload(payload)
+    request = _parse(payload)
     return classify(
         payload,
         request,
@@ -2000,7 +2010,7 @@ class TestSemanticSimilarity:
     def test_similarity_without_a_layer_is_derived_from_the_score(self):
         payload = main_payload("napraw testy")
 
-        decision = _decide(parse_codex_payload(payload), payload)
+        decision = _decide(_parse(payload), payload)
 
         assert decision.source == SOURCE_HEURISTIC
         assert decision.similarity == score_to_similarity(decision.score)

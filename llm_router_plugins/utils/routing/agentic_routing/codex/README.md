@@ -153,8 +153,9 @@ memory between requests, so the same request is routed identically by any replic
 
 ### Step 1 — payload normalization
 
-`parse_codex_payload()` is the only code that knows where Codex metadata lives on the wire; everything downstream works
-on an immutable `CodexRequest` snapshot. Reading it never raises — an unreadable value keeps the field default.
+`CodexPayloadParser.parse()` is the only code that knows where Codex metadata lives on the wire; everything downstream
+works on an immutable `CodexRequest` snapshot. The parser is configured once (with `classify_max_chars`) and holds no
+per-request state; reading never raises — an unreadable value keeps the field default.
 
 | Snapshot field                              | Read from                                                                 |
 |---------------------------------------------|---------------------------------------------------------------------------|
