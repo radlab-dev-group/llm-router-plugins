@@ -48,6 +48,7 @@ __all__ = [
     "COLLABORATION_MODE_PLAN",
     "COLLABORATION_MODE_DEFAULT",
     "DEFAULT_CLASSIFY_MAX_CHARS",
+    "CodexActivity",
     "CodexRequest",
     "CodexPayloadParser",
 ]
@@ -58,7 +59,7 @@ _CHARS_PER_TOKEN = 4
 #: Default character budget for the text assembled for classification.
 DEFAULT_CLASSIFY_MAX_CHARS = 4000
 
-#: Characters :meth:`_latest_user_text` puts between two assembled messages.
+#: Characters separating commands in the optional history context.
 _MESSAGE_SEPARATOR_CHARS = 2
 
 #: The turn-metadata header of the Codex CLI is a JSON-encoded string.
@@ -92,6 +93,23 @@ _COLLABORATION_MODE_RE = re.compile(
     r"<collaboration_mode>(.*?)(</collaboration_mode>|\Z)",
     re.DOTALL,
 )
+
+_FOLLOW_UP_RE = re.compile(
+    r"(?:tak|ok(?:ay)?|yes|sure|continue|kontynuuj|dalej|zrób to|zrob to|"
+    r"do it|go ahead|proceed|(?:tak|ok|yes)[,\s]+(?:zrób to|zrob to|do it|go ahead))"
+    r"[.!\s]*",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class CodexActivity:
+    """One assistant utterance or tool event in the active user turn."""
+
+    kind: str
+    text: str
+    name: str = ""
+    call_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -141,11 +159,15 @@ class CodexRequest:
     collaboration_mode : str
         ``plan``, ``default`` or ``""`` when no block is present.
     latest_user_text : str
-        The genuine user messages assembled newest first, within the character
-        budget given to the :class:`CodexPayloadParser` that produced it.
+        Only the newest genuine user command, kept whole.
+    user_history : Tuple[str, ...]
+        Earlier commands, newest first, within the parser's character budget.
     assistant_messages:
-        Full list of assistant messages produced during function calling.
-        The items are ordered from the oldest to the newest.
+        Copies of assistant output text after the newest genuine user command.
+    activity : Tuple[CodexActivity, ...]
+        Assistant and tool events after that command, oldest first.
+    classify_max_chars : int
+        Separate history budget and total semantic-query character cap.
     request_class : str
         One of ``main``, ``aux_title``, ``compaction``.
     """
@@ -171,6 +193,20 @@ class CodexRequest:
     latest_user_text: str = ""
     assistant_messages: Optional[List[Dict[str, Any]]] = None
     request_class: str = REQUEST_CLASS_MAIN
+    user_history: Tuple[str, ...] = ()
+    activity: Tuple[CodexActivity, ...] = ()
+    classify_max_chars: int = DEFAULT_CLASSIFY_MAX_CHARS
+
+    @property
+    def intent_text(self) -> str:
+        """Use earlier commands only to resolve a short, referential reply."""
+        texts = [self.latest_user_text]
+        if _FOLLOW_UP_RE.fullmatch(self.latest_user_text.strip()):
+            for text in self.user_history:
+                texts.append(text)
+                if not _FOLLOW_UP_RE.fullmatch(text.strip()):
+                    break
+        return "\n\n".join(texts)
 
 
 class CodexPayloadParser:
@@ -249,6 +285,13 @@ class CodexPayloadParser:
         has_tools = bool(tool_names)
         structured_output = self._is_structured_output(body.get("text"))
         latest_user_text = self._latest_user_text(items, body)
+        user_turns = []
+        for index, item in enumerate(items):
+            text = self._user_text(item)
+            if text:
+                user_turns.append((index, text))
+        active_items = items[user_turns[-1][0] + 1:] if user_turns else []
+        assistant_messages = self._assistant_messages(active_items)
 
         return CodexRequest(
             session_id=self._text(client_metadata.get("session_id"))
@@ -275,7 +318,10 @@ class CodexPayloadParser:
             context_tokens=context_chars // _CHARS_PER_TOKEN,
             collaboration_mode=self._collaboration_mode(items),
             latest_user_text=latest_user_text,
-            assistant_messages=self._assistant_messages(items),
+            assistant_messages=assistant_messages,
+            user_history=self._user_history(user_turns),
+            activity=self._activity(active_items),
+            classify_max_chars=self._max_chars,
             request_class=self._request_class(
                 request_kind,
                 thread_source,
@@ -553,56 +599,79 @@ class CodexPayloadParser:
         return ""
 
     def _latest_user_text(self, items: List[Any], payload: Dict[str, Any]) -> str:
-        """
-        Return the user text, newest message first, within the budget.
-
-        Every ``role == "user"`` message counts, including the ones the CLI
-        adds on top of the original prompt.  They are assembled from the newest
-        to the oldest: the newest message is always kept whole, and an older
-        message is appended only while the assembled text stays within
-        :attr:`_max_chars` — the first message that would overflow ends the
-        assembly.
-
-        Parameters
-        ----------
-        items : List[Any]
-            The ``input`` items of the payload, scanned in reverse order.
-        payload : dict
-            The payload body, consulted for a legacy ``prompt`` fallback.
-
-        Returns
-        -------
-        str
-            The user text, or ``""`` when the request carries none.  Messages
-            that only inject an ``<environment_context>`` block are skipped.
-
-        Raises
-        ------
-        None
-        """
-        max_chars = self._max_chars
-        messages: List[str] = []
-        total_chars = 0
+        """Return only the newest command, or the legacy prompt fallback."""
         for item in reversed(items):
+            text = self._user_text(item)
+            if text:
+                return text
+        return self._text(payload.get("prompt"))
+
+    @classmethod
+    def _user_text(cls, item: Any) -> str:
+        """Exclude environment-only messages without losing attached commands."""
+        if not isinstance(item, dict):
+            return ""
+        if item.get("type") != "message" or item.get("role") != "user":
+            return ""
+        text = "\n".join(cls._input_texts(item)).strip()
+        if (
+            text.startswith("<environment_context>")
+            and "</environment_context>" not in text
+        ):
+            return ""
+        return re.sub(
+            r"<environment_context>.*?</environment_context>", "", text, flags=re.DOTALL
+        ).strip()
+
+    def _user_history(self, turns: List[Tuple[int, str]]) -> Tuple[str, ...]:
+        """Keep a bounded, separate history; never truncate the current command."""
+        messages: List[str] = []
+        remaining = self._max_chars
+        for _, text in reversed(turns[:-1]):
+            if self._max_chars > 0:
+                if remaining <= 0:
+                    break
+                text = text[:remaining]
+                remaining -= len(text) + _MESSAGE_SEPARATOR_CHARS
+            messages.append(text)
+        return tuple(messages)
+
+    def _activity(self, items: List[Any]) -> Tuple[CodexActivity, ...]:
+        """Copy ordered tool events, linking outputs only to calls in this turn."""
+        events: List[CodexActivity] = []
+        calls: Dict[str, str] = {}
+        for item in items:
             if not isinstance(item, dict):
                 continue
-            if item.get("type") != "message" or item.get("role") != "user":
-                continue
-
-            text = "\n".join(self._input_texts(item)).strip()
-            if not text or text.startswith("<environment_context>"):
-                continue
-
-            if max_chars > 0 and messages:
-                if total_chars + len(text) + _MESSAGE_SEPARATOR_CHARS > max_chars:
-                    break
-            total_chars += len(text) + (_MESSAGE_SEPARATOR_CHARS if messages else 0)
-            messages.append(text)
-
-        if messages:
-            return "\n\n".join(messages)
-
-        return self._text(payload.get("prompt"))
+            kind = item.get("type")
+            if kind == "message" and item.get("role") == "assistant":
+                messages = self._assistant_messages([item]) or []
+                for message in messages:
+                    text = "\n".join(part["text"] for part in message["content"])
+                    events.append(CodexActivity("assistant", text))
+            elif kind in ("function_call", "custom_tool_call"):
+                name = self._text(item.get("name"))
+                call_id = self._text(item.get("call_id"))
+                if call_id:
+                    calls[call_id] = name
+                arguments = (
+                    item.get("input") if kind == "custom_tool_call"
+                    else item.get("arguments")
+                )
+                events.append(
+                    CodexActivity("function_call", self._text(arguments), name, call_id)
+                )
+            elif kind in ("function_call_output", "custom_tool_call_output"):
+                call_id = self._text(item.get("call_id"))
+                text = self._text(item.get("output"))
+                if self._max_chars > 0:
+                    text = text[:self._max_chars]
+                events.append(
+                    CodexActivity(
+                        "function_call_output", text, calls.get(call_id, ""), call_id
+                    )
+                )
+        return tuple(events)
 
     @staticmethod
     def _assistant_messages(items: List[Any]) -> Optional[List[Dict[str, Any]]]:
@@ -645,7 +714,13 @@ class CodexPayloadParser:
             if not output_parts:
                 continue
             messages.append(
-                {"type": "message", "role": "assistant", "content": output_parts}
+                {
+                    "type": "message", "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": part["text"]}
+                        for part in output_parts
+                    ],
+                }
             )
         return messages
 

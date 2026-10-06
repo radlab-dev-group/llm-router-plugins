@@ -285,11 +285,10 @@ class CodexSemanticLayer:
         """
         Assemble the text embedded for the semantic lookup.
 
-        The newest user text is followed by the text of the last
+        The current user intent is followed by the text of the last
         *last_agent_messages* assistant ``output_text`` parts (oldest first),
-        joined with newlines.  Assistant turns give the embedding model the
-        thread context that the one-line user message alone lacks, which is
-        what separates a "review this" turn from a "fix this" turn.
+        plus the latest linked tool activity. Only the active user turn is
+        eligible; a separate phase budget protects it from a long user prompt.
 
         Parameters
         ----------
@@ -308,18 +307,47 @@ class CodexSemanticLayer:
         ------
         None
         """
-        _text = request.latest_user_text or ""
+        utterances = [
+            "\n".join(part["text"] for part in message["content"])
+            for message in (request.assistant_messages or [])
+        ]
+        phase_parts = (
+            utterances[-last_agent_messages:] if last_agent_messages > 0 else []
+        )
+        tool_events = [
+            event for event in request.activity
+            if event.kind in ("function_call", "function_call_output") and event.name
+        ]
+        if tool_events:
+            latest = tool_events[-1]
+            call = next(
+                (event for event in reversed(tool_events)
+                 if event.kind == "function_call" and event.call_id == latest.call_id),
+                None,
+            )
+            if call is not None:
+                phase_parts.append(call.name + "\n" + call.text)
+                if latest.kind == "function_call_output":
+                    phase_parts.append(latest.text)
 
-        _messages = request.assistant_messages or []
-        _assistant_messages = []
-        for _msg in _messages:
-            for _item in _msg["content"]:
-                _assistant_messages.append(_item["text"])
-
-        _text = [_text] + _assistant_messages[-last_agent_messages:]
-        if not len(_text):
+        intent = request.intent_text.strip()
+        phase_parts = [part for part in phase_parts if part.strip()]
+        budget = request.classify_max_chars
+        if budget > 0:
+            phase_budget = budget // 2 if intent else budget
+            if phase_parts:
+                part_budget = max(
+                    1, (phase_budget - len(phase_parts) + 1) // len(phase_parts)
+                )
+                phase_parts = [part[:part_budget] for part in phase_parts]
+            phase = "\n".join(phase_parts)[:phase_budget]
+            intent = intent[:max(0, budget - len(phase) - (1 if phase else 0))]
+        else:
+            phase = "\n".join(phase_parts)
+        parts = [part for part in (intent, phase) if part]
+        if not parts:
             return None
-        return "\n".join(_text)
+        return "\n".join(parts)
 
     def _warn(self, message: str, *args: Any) -> None:
         """

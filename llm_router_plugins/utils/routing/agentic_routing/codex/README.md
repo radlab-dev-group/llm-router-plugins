@@ -167,22 +167,26 @@ per-request state; reading never raises — an unreadable value keeps the field 
 | `reasoning_effort`, `parallel_tool_calls`   | `reasoning.effort`, `parallel_tool_calls`                                 |
 | `context_chars`, `context_tokens`           | content length of `instructions` + `input` (tokens ≈ chars / 4)           |
 | `collaboration_mode`                        | `<collaboration_mode>…</collaboration_mode>` block in `developer` messages |
-| `latest_user_text`                          | genuine `user` messages, newest first, within `classify_max_chars`         |
-| `assistant_messages`                        | `role == "assistant"` messages with `output_text` content, oldest → newest |
+| `latest_user_text`                          | newest genuine `user` command, kept whole                                 |
+| `user_history`                              | earlier user commands, newest first, within `classify_max_chars`           |
+| `intent_text`                               | current command; nearest earlier task only for a short confirmation       |
+| `assistant_messages`                        | assistant `output_text` messages after the current command                |
+| `activity`                                  | ordered assistant utterances, actual tool calls and linked outputs after that command |
 
 Details that matter when you debug routing:
 
 - **Collaboration mode** is read from every `role == "developer"` message; the **last** `<collaboration_mode>` block
   wins, so a Plan → Default switch mid-session is picked up on the next turn. Its first heading decides: `# Plan Mode`
   → `plan`, `# Collaboration Mode: Default` → `default`, anything else → `""`.
-- **`latest_user_text`** scans `input` in reverse and keeps only `type == "message"`, `role == "user"` items whose text
-  is not just an `<environment_context>` block. The newest message is always kept whole; older ones are appended while
-  the `classify_max_chars` budget holds (a non-positive budget means "unbounded"). If the request carries no usable
-  user message, the legacy `payload["prompt"]` is used.
-- **`assistant_messages`** collects every `type == "message"`, `role == "assistant"` item, keeping only its
-  `output_text` content parts (oldest → newest) as **copies** — parsing never touches the payload that is forwarded
-  to the model. The semantic layer uses them to enrich the query it embeds, so the model sees not just the latest
-  user turn but also what the agent is doing right now.
+- **`latest_user_text`** keeps only the newest real command. Environment-only messages do not start a new task;
+  an environment block attached to a command is stripped without dropping that command. With no usable user message,
+  the legacy `payload["prompt"]` is used. Earlier commands live separately in bounded **`user_history`**.
+- **`intent_text`** uses history only for narrowly recognised confirmations such as `tak, zrób to`, `yes, do it`,
+  `ok` or `continue`. It stops at the nearest non-confirmation command; an independent new instruction never inherits
+  older test/Git keywords. This is a conservative rule, not general reference resolution.
+- **`assistant_messages`** and **`activity`** include only events after the newest real command. Assistant text is
+  copied, and tool outputs are linked by `call_id` only to calls in that active turn. An old final answer, old failure,
+  or advertised tool therefore cannot establish the new task's phase. No session cache is needed.
 
 ### Step 2 — request class
 
@@ -212,9 +216,10 @@ fallback mode: the keyword and semantic layers can specialise the decision, neve
 | 1 | Explicit `agent_mode` / `codex_mode` / `metadata.agent_mode` in the payload | `explicit`           | `1.0`             |
 | 2 | Request class — `compaction`, then `aux_title` | `class`              | `1.0`                               |
 | 3 | `<collaboration_mode>` Plan block from the CLI  | `collaboration_mode` | `1.0`                               |
-| 4 | Keyword scoring of the user text                | `heuristic`          | `score / (score + 1)`               |
-| 5 | Embedding cosine similarity over the modes      | `semantic`           | cosine of the matched mode          |
-| 6 | Configured `fallback_mode` (`implement`)        | `fallback`           | cosine of that mode, else `0.0`     |
+| 4 | Clear current assistant action or actual tool activity | `phase`         | `1.0` (rule strength, not calibrated probability) |
+| 5 | Keyword scoring of the current user intent      | `heuristic`          | `score / (score + 1)`               |
+| 6 | Embedding cosine similarity over the modes      | `semantic`           | cosine of the matched mode          |
+| 7 | Configured `fallback_mode` (`implement`)        | `fallback`           | cosine of that mode, else `0.0`     |
 
 Notes:
 
@@ -225,7 +230,12 @@ Notes:
   (`HEURISTIC_MODES`). `plan` is declared by the CLI and `implement` is the fallback, so their `keywords` / `phrases` /
   `patterns` are never scored — only their `description` and `examples` feed the embedding index. `aux_title` and
   `compaction` are class-routed and are left out of the index too.
-- Layers 1–4 never touch the embedding stack. The vector store is queried **at most once per request**, and only after
+- The phase layer recognises explicit current-action announcements and concrete executed commands/patches, rather
+  than arbitrary mentions of tests or Git. Thus commit inspection can route to `git_review`, then editing `CHANGELOG`
+  to `implement`; helper commands such as `git status` do not create a Git phase. The newest clear action wins.
+  Unknown or ambiguous activity leaves the remaining cascade to decide. Rule-based phase detection is disabled along
+  with keyword scoring by `heuristic_enabled=false`, and a phase must name a configured mode.
+- Layers 1–5 never touch the embedding stack. The vector store is queried **at most once per request**, and only after
   the deterministic layers have stayed silent.
 
 ### Step 4 — keyword scoring
@@ -288,11 +298,10 @@ Enabled with `settings.semantic.enabled`, disabled for a single process with
   reaches `similarity_threshold` (`0.51` by default).
 - One lookup serves both the accept decision and the fallback mode's reported similarity, so a request never embeds the
   same text twice.
-- The query is built by `CodexSemanticLayer._build_semantic_context(request)`: it starts from
-  `request.latest_user_text` and appends the agent's **last utterance** — the `output_text` of its newest assistant
-  message — joined with a newline. One utterance, not a window of old ones: a Codex thread switches topic constantly,
-  so anything older is about the previous task and would dilute the query instead of steering it. When the request has
-  neither a user text nor assistant utterance the query is empty and the router is not called.
+- The query is built by `CodexSemanticLayer._build_semantic_context(request)` from `request.intent_text`, the
+  agent's last active-turn utterance and its latest linked tool call/result. It is capped at `classify_max_chars`,
+  reserving up to half the budget for the phase so a huge user command cannot push current activity out of the query.
+  Earlier assistant turns never cross a new user-command boundary. An empty query does not call the router.
 - The model is loaded with `device="cpu"` and `trust_remote_code=True` at plugin construction. A router that raises at
   query time (broken index, empty vector) disables only the semantic answer for that request.
 
@@ -422,7 +431,7 @@ construction** (so after a restart, never mid-session).
 | `…_FALLBACK_MODE`                                                   | Mode used when nothing matches                        |
 | `…_HEURISTIC_ENABLED`                                               | `1/0`, `true/false`, `yes/no`, `on/off`               |
 | `…_HEURISTIC_MIN_SCORE`                                             | Minimum keyword score to accept a heuristic hit       |
-| `…_CLASSIFY_MAX_CHARS`                                              | Character budget of the classified user text          |
+| `…_CLASSIFY_MAX_CHARS`                                              | Separate history budget and total semantic-query cap  |
 | `…_MODEL`                                                           | **Embedding** model for the semantic layer            |
 | `…_SEMANTIC_ENABLED`                                                | Toggle the embedding layer                            |
 | `…_SIMILARITY_THRESHOLD`                                            | Minimum cosine similarity for a semantic hit          |

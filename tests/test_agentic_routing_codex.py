@@ -43,6 +43,7 @@ from llm_router_plugins.utils.routing.agentic_routing.codex import (
     SOURCE_EXPLICIT,
     SOURCE_FALLBACK,
     SOURCE_HEURISTIC,
+    SOURCE_PHASE,
     SOURCE_SEMANTIC,
     CodexMode,
     CodexModeClassifier,
@@ -1285,8 +1286,122 @@ class TestScoring:
 # --------------------------------------------------------------------------
 # classified-text budget
 # --------------------------------------------------------------------------
+class TestActiveWorkPhase:
+    """Clear current work can supersede the original task's topic."""
+
+    @staticmethod
+    def _call(name, arguments):
+        return {"type": "function_call", "name": name, "call_id": "active",
+                "arguments": arguments}
+
+    @pytest.mark.parametrize(
+        "task,name,arguments,expected",
+        [
+            ("Dodaj endpoint", "exec_command", '{"cmd":"pytest tests/"}', "test"),
+            ("Dodaj CHANGELOG dla commitów", "exec_command", '{"cmd":"git log main..HEAD"}', "git_review"),
+            ("Przejrzyj commity", "apply_patch",
+             '*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n+Added endpoint\n*** End Patch',
+             "implement"),
+        ],
+    )
+    def test_current_phase_precedes_user_heuristics(self, task, name, arguments, expected):
+        payload = main_payload(task)
+        payload["input"].append(self._call(name, arguments))
+        router = _StubRouter()
+        decision = _classify_semantic(payload, router)
+
+        assert (decision.mode, decision.source) == (expected, SOURCE_PHASE)
+        assert router.calls == []
+
+    def test_neutral_git_status_does_not_create_a_git_phase(self):
+        payload = main_payload("Dodaj endpoint")
+        payload["input"].append(self._call("exec_command", '{"cmd":"git status"}'))
+
+        assert _decide(_parse(payload), payload).mode == "implement"
+        assert _decide(_parse(payload), payload).source == SOURCE_FALLBACK
+
+    def test_advertised_tools_are_not_executed_activity(self):
+        request = _parse(main_payload("Dodaj endpoint"))
+
+        assert request.has_tools
+        assert request.activity == ()
+        assert _decide(request).source == SOURCE_FALLBACK
+
+    def test_custom_patch_call_is_normalized_and_changes_the_phase(self):
+        payload = main_payload("Przejrzyj commity")
+        payload["input"].extend([
+            {"type": "custom_tool_call", "name": "apply_patch", "call_id": "patch",
+             "input": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n+Entry\n*** End Patch"},
+            {"type": "custom_tool_call_output", "call_id": "patch", "output": "Success"},
+        ])
+        request = _parse(payload)
+
+        assert request.activity[0].kind == "function_call"
+        assert request.activity[1].kind == "function_call_output"
+        assert request.activity[1].name == "apply_patch"
+        decision = _decide(request, payload)
+        assert (decision.mode, decision.source) == ("implement", SOURCE_PHASE)
+
+    @pytest.mark.parametrize("override", ["explicit", "plan", "compaction", "title"])
+    def test_structural_layers_keep_priority(self, override):
+        payload = {
+            "explicit": main_payload(), "plan": plan_payload(),
+            "compaction": compaction_payload(), "title": title_payload(),
+        }[override]
+        if override == "explicit":
+            payload["agent_mode"] = "review"
+        payload["input"].append(self._call("exec_command", '{"cmd":"pytest"}'))
+        expected = {
+            "explicit": ("review", SOURCE_EXPLICIT),
+            "plan": ("plan", SOURCE_COLLABORATION_MODE),
+            "compaction": ("compaction", SOURCE_CLASS),
+            "title": ("aux_title", SOURCE_CLASS),
+        }[override]
+
+        decision = _decide(_parse(payload), payload)
+
+        assert (decision.mode, decision.source) == expected
+
+    def test_unconfigured_phase_does_not_select_a_missing_mode(self):
+        payload = main_payload("Dodaj endpoint")
+        payload["input"].append(self._call("exec_command", '{"cmd":"pytest"}'))
+
+        decision = _decide(_parse(payload), payload, config=_without_mode(_config(), "test"))
+
+        assert decision.mode == "implement"
+
+    def test_disabling_heuristics_also_disables_rule_based_phase_detection(self):
+        payload = main_payload("Dodaj endpoint")
+        payload["input"].append(self._call("exec_command", '{"cmd":"pytest"}'))
+        config = _rebuild(_config(), heuristic_enabled=False)
+
+        assert _decide(_parse(payload), payload, config=config).source == SOURCE_FALLBACK
+
+    def test_phase_routing_changes_only_routing_keys_end_to_end(self):
+        payload = main_payload("Przejrzyj commity")
+        payload["input"].append(self._call(
+            "apply_patch",
+            "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n+Entry\n*** End Patch",
+        ))
+        before = copy.deepcopy(payload)
+        router = _StubRouter()
+        plugin = CodexRoutingPlugin(config=_config(), emb_router=router)
+
+        result = plugin.apply(payload)
+
+        assert result is payload
+        assert result["model"] == _expected_model("implement")
+        assert result["routing"]["source"] == SOURCE_PHASE
+        assert result["agent_mode"] == "implement"
+        assert {key: value for key, value in result.items()
+                if key not in ("model", "routing", "agent_mode")} == {
+            key: value for key, value in before.items() if key != "model"
+        }
+        assert router.calls == []
+
+
 class TestClassifyTextBudget:
-    """The classified text is the user history, newest first, capped."""
+    """Current command and bounded optional history are kept separate."""
 
     @staticmethod
     def _history(*texts):
@@ -1300,9 +1415,9 @@ class TestClassifyTextBudget:
 
         request = _parse(payload)
 
-        assert request.latest_user_text == (
-            "ostatnia\n\ndruga sprawa\n\npierwsza sprawa"
-        )
+        assert request.latest_user_text == "ostatnia"
+        assert request.user_history == ("druga sprawa", "pierwsza sprawa")
+        assert request.intent_text == "ostatnia"
 
     def test_the_newest_message_always_survives_the_budget(self):
         payload = self._history("stara sprawa", "N" * 50)
@@ -1312,8 +1427,36 @@ class TestClassifyTextBudget:
     def test_older_messages_stop_at_the_budget(self):
         payload = self._history("M1", "M2", "M3")
 
-        assert _parse(payload, max_chars=6).latest_user_text == "M3\n\nM2"
-        assert _parse(payload, max_chars=10).latest_user_text == "M3\n\nM2\n\nM1"
+        assert _parse(payload, max_chars=4).latest_user_text == "M3"
+        assert _parse(payload, max_chars=4).user_history == ("M2",)
+        assert _parse(payload, max_chars=6).user_history == ("M2", "M1")
+
+    def test_history_is_bounded_even_when_one_message_is_huge(self):
+        payload = self._history("X" * 100, "nowe zadanie")
+
+        assert _parse(payload, max_chars=10).user_history == ("X" * 10,)
+
+    @pytest.mark.parametrize("reply", ["tak, zrób to", "Yes, do it!", "kontynuuj", "ok"])
+    def test_short_confirmation_resolves_only_the_nearest_task(self, reply):
+        payload = self._history("git diff", "Przygotuj testy jednostkowe", reply)
+        request = _parse(payload)
+
+        assert request.latest_user_text == reply
+        assert request.intent_text == reply + "\n\nPrzygotuj testy jednostkowe"
+        assert _decide(request, payload).mode == "test"
+
+    @pytest.mark.parametrize("old_task", ["Przygotuj testy", "Przejrzyj git diff"])
+    def test_new_task_does_not_inherit_old_testing_or_git_intent(self, old_task):
+        payload = self._history(old_task, "Dodaj sekcję instalacji w README")
+        request = _parse(payload)
+
+        assert request.intent_text == "Dodaj sekcję instalacji w README"
+        assert _decide(request, payload).mode == "implement"
+
+    def test_independent_instruction_starting_with_yes_is_not_a_confirmation(self):
+        payload = self._history("Przygotuj testy", "Tak, teraz popraw dokumentację")
+
+        assert _parse(payload).intent_text == "Tak, teraz popraw dokumentację"
 
     def test_environment_context_messages_stay_out(self):
         request = _parse(main_payload("krótka odpowiedź"))
@@ -1496,8 +1639,7 @@ class TestPayloadRobustness:
 
     def test_assistant_messages_are_extracted_as_copies(self):
         payload = main_payload()
-        payload["input"].insert(
-            -1,
+        payload["input"].append(
             {
                 "type": "message",
                 "role": "assistant",
@@ -1519,6 +1661,57 @@ class TestPayloadRobustness:
                 "content": [{"type": "output_text", "text": "naprawiam testy"}],
             }
         ]
+        request.assistant_messages[0]["content"][0]["text"] = "zmieniona kopia"
+        assert payload == before
+
+    def test_old_assistant_and_tools_are_excluded_after_a_new_command(self):
+        payload = main_payload("Przygotuj testy")
+        payload["input"].extend([
+            _assistant("Teraz uruchomię pytest."),
+            {"type": "function_call", "name": "exec_command", "call_id": "old",
+             "arguments": '{"cmd":"pytest"}'},
+            _user("Popraw dokumentację"),
+            {"type": "function_call_output", "call_id": "old", "output": "Traceback"},
+        ])
+        request = _parse(payload)
+
+        assert request.assistant_messages == []
+        assert len(request.activity) == 1
+        assert request.activity[0].name == ""
+        assert _decide(request, payload).mode == "implement"
+
+    def test_environment_only_message_does_not_reset_the_active_turn(self):
+        payload = main_payload("Dodaj endpoint")
+        payload["input"].extend([
+            _assistant("Teraz uruchomię pytest."),
+            _user("<environment_context>cwd=/repo</environment_context>"),
+        ])
+
+        assert len(_parse(payload).activity) == 1
+
+    def test_environment_context_with_a_command_keeps_the_command(self):
+        payload = main_payload(
+            "<environment_context>cwd=/repo</environment_context>\nPopraw README"
+        )
+
+        assert _parse(payload).latest_user_text == "Popraw README"
+
+    def test_active_tool_outputs_are_linked_to_their_calls(self):
+        payload = main_payload("Dodaj endpoint")
+        payload["input"].extend([
+            {"type": "function_call", "name": "exec_command", "call_id": "new",
+             "arguments": '{"cmd":"pytest"}'},
+            {"type": "function_call_output", "call_id": "new", "output": "passed"},
+        ])
+        before = copy.deepcopy(payload)
+        request = _parse(payload)
+
+        assert tuple(event.kind for event in request.activity) == (
+            "function_call", "function_call_output"
+        )
+        assert request.activity[-1].name == "exec_command"
+        assert request.activity[-1].call_id == "new"
+        assert payload == before
 
     def test_assistant_message_without_text_is_dropped(self):
         payload = main_payload()
@@ -2211,12 +2404,60 @@ class TestSemanticSimilarity:
         payload["input"].append(_assistant("przechodzę do testów"))
         router = _StubRouter()
 
-        decision = _classify_semantic(payload, router)
+        result = _semantic_layer(router).route(_parse(payload))
 
-        assert decision.source == SOURCE_SEMANTIC
+        assert result["target_name"] == "test"
         assert router.calls == [
             "wyrenderuj pusty stan w widoku\nprzechodzę do testów"
         ]
+
+    def test_new_task_excludes_old_assistant_and_user_from_semantic_query(self):
+        payload = main_payload("Przygotuj testy")
+        payload["input"].extend([
+            _assistant("Testy są gotowe"), _user("Popraw README")
+        ])
+        router = _StubRouter()
+
+        _semantic_layer(router).route(_parse(payload))
+
+        assert router.calls == ["Popraw README"]
+
+    def test_phase_has_a_reserved_budget_after_a_long_command(self):
+        payload = main_payload("X" * 1000)
+        payload["input"].append(_assistant("Sprawdzam zgodność konfiguracji."))
+        request = _parse(payload, max_chars=100)
+        router = _StubRouter()
+
+        _semantic_layer(router).route(request)
+
+        assert len(router.calls[0]) <= 100
+        assert router.calls[0].endswith("Sprawdzam zgodność konfiguracji.")
+        assert request.latest_user_text == "X" * 1000
+
+    def test_semantic_query_includes_linked_tool_command_and_result(self):
+        payload = main_payload("Dodaj endpoint")
+        payload["input"].extend([
+            TestActiveWorkPhase._call("exec_command", '{"cmd":"git status"}'),
+            {"type": "function_call_output", "call_id": "active", "output": "clean"},
+        ])
+        router = _StubRouter()
+
+        _semantic_layer(router).route(_parse(payload))
+
+        assert router.calls == ['Dodaj endpoint\nexec_command\n{"cmd":"git status"}\nclean']
+
+    def test_long_assistant_does_not_exclude_the_latest_tool_from_semantics(self):
+        payload = main_payload("Dodaj endpoint")
+        payload["input"].extend([
+            _assistant("X" * 1000),
+            TestActiveWorkPhase._call("exec_command", '{"cmd":"git status"}'),
+        ])
+        router = _StubRouter()
+
+        _semantic_layer(router).route(_parse(payload, max_chars=200))
+
+        assert len(router.calls[0]) <= 200
+        assert 'git status' in router.calls[0]
 
     def test_malformed_assistant_message_does_not_break_routing(self):
         payload = main_payload("wyrenderuj pusty stan w widoku")

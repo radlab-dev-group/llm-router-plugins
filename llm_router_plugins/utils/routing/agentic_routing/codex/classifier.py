@@ -16,14 +16,15 @@ Cascade
    compaction and auxiliary title generation.
 3. **collaboration_mode** — the ``<collaboration_mode>`` block injected by the
    Codex CLI declares Plan Mode.
-4. **heuristic** — keyword scoring of the user text (newest message first,
-   capped by ``classify_max_chars``) against the
+4. **phase** — a clear current action in assistant/tool activity after the
+   latest user command.
+5. **heuristic** — keyword scoring of the current user intent against the
    keyword-scored modes (``test``, ``git_review``, ``review``, ``debug``).
-5. **semantic** — embedding cosine similarity over the mode descriptions and
+6. **semantic** — embedding cosine similarity over the mode descriptions and
    examples, delegated to
    :class:`~llm_router_plugins.utils.routing.agentic_routing.codex.semantic.
    CodexSemanticLayer`.  Optional: a cascade without a layer skips it.
-6. **fallback** — the configured fallback mode (``implement`` by default).
+7. **fallback** — the configured fallback mode (``implement`` by default).
 
 A main turn therefore never falls below the fallback mode: the keyword and
 semantic layers can specialise the decision but can never make it weaker.
@@ -58,6 +59,7 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
 from llm_router_plugins.utils.routing.agentic_routing.codex.scoring import (
     CodexModeScorer,
 )
+from llm_router_plugins.utils.routing.agentic_routing.codex.phase import detect_phase
 from llm_router_plugins.utils.routing.agentic_routing.codex.semantic import (
     CodexSemanticLayer,
 )
@@ -66,6 +68,7 @@ __all__ = [
     "SOURCE_EXPLICIT",
     "SOURCE_CLASS",
     "SOURCE_COLLABORATION_MODE",
+    "SOURCE_PHASE",
     "SOURCE_HEURISTIC",
     "SOURCE_SEMANTIC",
     "SOURCE_FALLBACK",
@@ -83,6 +86,9 @@ SOURCE_CLASS = "class"
 
 #: The ``<collaboration_mode>`` block declared the mode.
 SOURCE_COLLABORATION_MODE = "collaboration_mode"
+
+#: A clear current assistant action or executed tool decided the work phase.
+SOURCE_PHASE = "phase"
 
 #: Keyword scoring of the latest user message decided the mode.
 SOURCE_HEURISTIC = "heuristic"
@@ -251,7 +257,10 @@ class CodexModeClassifier:
             return RoutingDecision("plan", SOURCE_COLLABORATION_MODE, 1.0, 1.0)
 
         if config.heuristic_enabled:
-            decision = self._heuristic_mode(request.latest_user_text, modes)
+            phase = detect_phase(request.activity)
+            if phase is not None and phase in modes:
+                return RoutingDecision(phase, SOURCE_PHASE, 1.0, 1.0)
+            decision = self._heuristic_mode(request.intent_text, modes)
             if decision is not None:
                 return decision
 
