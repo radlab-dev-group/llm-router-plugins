@@ -49,12 +49,10 @@ from llm_router_plugins.utils.routing.agentic_routing.codex import (
     CodexRequest,
     CodexPayloadParser,
     CodexSemanticLayer,
+    CodexModeScorer,
     CodexRoutingConfig,
     CodexRoutingPlugin,
     RoutingDecision,
-    detect_mode,
-    score_mode,
-    score_to_similarity,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex import (
     plugin as plugin_module,
@@ -87,6 +85,9 @@ _ROUTING_KEYS = {
     "thread_id",
     "turn_id",
 }
+
+#: Scorer shared by the scoring tests; its plan cache is exercised directly.
+_scorer = CodexModeScorer()
 
 
 @pytest.fixture(autouse=True)
@@ -480,7 +481,7 @@ class TestHeuristicClassification:
         assert decision.source == SOURCE_HEURISTIC
         assert decision.score == expected_score
         assert decision.similarity == pytest.approx(
-            score_to_similarity(expected_score)
+            _scorer.score_to_similarity(expected_score)
         )
 
     @pytest.mark.parametrize(
@@ -976,19 +977,21 @@ class TestScoring:
         ],
     )
     def test_score_mode(self, mode_kwargs, text, expected):
-        assert score_mode(_mode("probe", **mode_kwargs), text.lower()) == expected
+        mode = _mode("probe", **mode_kwargs)
+
+        assert _scorer.score_mode(mode, text.lower()) == expected
 
     def test_score_to_similarity_saturates(self):
-        assert score_to_similarity(0.0) == 0.0
-        assert score_to_similarity(-3.0) == 0.0
-        assert score_to_similarity(1.0) == 0.5
-        assert score_to_similarity(3.0) == 0.75
-        assert score_to_similarity(9.0) == 0.9
+        assert _scorer.score_to_similarity(0.0) == 0.0
+        assert _scorer.score_to_similarity(-3.0) == 0.0
+        assert _scorer.score_to_similarity(1.0) == 0.5
+        assert _scorer.score_to_similarity(3.0) == 0.75
+        assert _scorer.score_to_similarity(9.0) == 0.9
 
     def test_detect_mode_returns_mode_and_score(self):
         probe = _mode("probe", keywords=("testy",))
 
-        mode, score = detect_mode("napraw testy", [probe])
+        mode, score = _scorer.detect_mode("napraw testy", [probe])
 
         assert mode is probe
         assert score == 1.0
@@ -997,20 +1000,20 @@ class TestScoring:
         probe = _mode("probe", keywords=("testy",))
         other = _mode("other", keywords=("przejrzyj",))
 
-        mode, _ = detect_mode("testy przejrzyj", [probe, other])
+        mode, _ = _scorer.detect_mode("testy przejrzyj", [probe, other])
         assert mode is probe
 
-        mode, _ = detect_mode("przejrzyj przejrzyj", [probe, other])
+        mode, _ = _scorer.detect_mode("przejrzyj przejrzyj", [probe, other])
         assert mode is other
 
     def test_detect_mode_lowercases_the_text(self):
         probe = _mode("probe", keywords=("testy",))
 
-        assert detect_mode("TESTY", [probe])[0] is probe
+        assert _scorer.detect_mode("TESTY", [probe])[0] is probe
 
     @pytest.mark.parametrize("modes", [[], [_mode("probe", keywords=("testy",))]])
     def test_detect_mode_without_a_match(self, modes):
-        mode, score = detect_mode("completely unrelated", modes)
+        mode, score = _scorer.detect_mode("completely unrelated", modes)
 
         assert mode is None
         assert score == 0.0
@@ -1031,9 +1034,9 @@ class TestScoring:
             if not needle:
                 continue
             if re.search(r"(?<!\w)" + re.escape(needle), text_lower):
-                score += scoring_module._keyword_weight(keyword, weights)
+                score += _scorer._keyword_weight(keyword, weights)
         for phrase in mode.phrases:
-            needle, weight = scoring_module._signal_weight(phrase, 2.0)
+            needle, weight = _scorer._signal_weight(phrase, 2.0)
             if needle and re.search(r"(?<!\w)" + re.escape(needle), text_lower):
                 score += weight
         for pattern in mode.patterns:
@@ -1071,18 +1074,18 @@ class TestScoring:
         text_lower = text.lower()
 
         for mode in _config().codex_modes:
-            assert score_mode(mode, text_lower) == self._regex_score(
+            assert _scorer.score_mode(mode, text_lower) == self._regex_score(
                 mode, text_lower
             )
 
     def test_word_boundary_rules_are_preserved(self):
         mode = _mode("probe", keywords=("test",))
 
-        assert score_mode(mode, "testów") == 1.0
-        assert score_mode(mode, "protest") == 0.0
-        assert score_mode(mode, "_test") == 0.0
-        assert score_mode(mode, "8test") == 0.0
-        assert score_mode(mode, "a_test") == 0.0
+        assert _scorer.score_mode(mode, "testów") == 1.0
+        assert _scorer.score_mode(mode, "protest") == 0.0
+        assert _scorer.score_mode(mode, "_test") == 0.0
+        assert _scorer.score_mode(mode, "8test") == 0.0
+        assert _scorer.score_mode(mode, "a_test") == 0.0
 
     @pytest.mark.parametrize(
         "text",
@@ -1109,23 +1112,44 @@ class TestScoring:
         for needle in ("test", "testow", "code review", "code", "x"):
             expected = bool(re.search(r"(?<!\w)" + re.escape(needle), lowered))
 
-            assert scoring_module._literal_matches(lowered, needle) is expected
+            assert _scorer._literal_matches(lowered, needle) is expected
 
     def test_invalid_patterns_are_skipped_and_valid_ones_count(self):
         mode = _mode("probe", keywords=("test",), patterns=("(", r"test\w*"))
 
-        assert score_mode(mode, "testy") == 1.0 + scoring_module.PATTERN_WEIGHT
+        assert _scorer.score_mode(mode, "testy") == 1.0 + scoring_module.PATTERN_WEIGHT
 
     def test_plans_are_cached_per_signal_signature(self):
-        scoring_module._PLAN_CACHE.clear()
+        _scorer.clear_cache()
         mode = _mode("cache", keywords=("alpha",), weights={"alpha": 2})
         same = _mode("cache", keywords=("alpha",), weights={"alpha": 2})
         changed = _mode("cache", keywords=("alpha", "beta"), weights={"alpha": 2})
 
-        plan = scoring_module._mode_plan(mode)
+        plan = _scorer._mode_plan(mode)
 
-        assert scoring_module._mode_plan(same) is plan
-        assert scoring_module._mode_plan(changed) is not plan
+        assert _scorer._mode_plan(same) is plan
+        assert _scorer._mode_plan(changed) is not plan
+
+    def test_plans_are_not_shared_between_scorers(self):
+        mode = _mode("isolation", keywords=("alpha",))
+
+        assert CodexModeScorer()._mode_plan(mode) is not \
+            CodexModeScorer()._mode_plan(mode)
+
+    def test_the_cascade_scores_through_the_injected_scorer(self):
+        queried = []
+
+        class SpyScorer(CodexModeScorer):
+            def detect_mode(self, text, modes):
+                queried.append(text)
+                return super().detect_mode(text, modes)
+
+        classifier = CodexModeClassifier(_config(), scorer=SpyScorer())
+
+        decision = classifier.classify({}, _parse(main_payload("napraw testy")))
+
+        assert queried == ["napraw testy"]
+        assert decision.source == SOURCE_HEURISTIC
 
 
 # --------------------------------------------------------------------------
@@ -1972,7 +1996,7 @@ class TestSemanticSimilarity:
         assert decision.mode == "test"
         assert decision.source == SOURCE_HEURISTIC
         assert decision.score == 14.0
-        assert decision.similarity == score_to_similarity(14.0)
+        assert decision.similarity == _scorer.score_to_similarity(14.0)
         assert router.calls == []
 
     def test_semantic_match_wins_when_keywords_are_silent(self):
@@ -2022,7 +2046,7 @@ class TestSemanticSimilarity:
         decision = _decide(_parse(payload), payload)
 
         assert decision.source == SOURCE_HEURISTIC
-        assert decision.similarity == score_to_similarity(decision.score)
+        assert decision.similarity == _scorer.score_to_similarity(decision.score)
 
     def test_below_threshold_match_is_logged(self):
         logger = _CaptureLogger()

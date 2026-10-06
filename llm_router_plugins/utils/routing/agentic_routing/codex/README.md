@@ -230,9 +230,9 @@ declared stem therefore also hits inflected forms — `test` matches `testy` and
 | `phrases` | `":weight"` suffix, else `2.0`             | `"napraw błąd:3"`                |
 | `patterns`| `3.0` per match                            | `"\broot\s+cause\b"`             |
 
-Scores of all matched signals are summed per mode; `detect_mode` uses strictly-greater-than while scanning
-`HEURISTIC_MODES` in order, so **ties go to the earlier mode** (`test` over `git_review`, `git_review` over `review`).
-The best score is accepted only when it reaches `heuristic_min_score` (`3.0` by default), and is reported as
+Scores of all matched signals are summed per mode; `CodexModeScorer.detect_mode()` uses strictly-greater-than while
+scanning `HEURISTIC_MODES` in order, so **ties go to the earlier mode** (`test` over `git_review`, `git_review` over
+`review`).  The best score is accepted only when it reaches `heuristic_min_score` (`3.0` by default), and is reported as
 `similarity = score / (score + 1)`.
 
 Measured against the shipped configuration:
@@ -669,7 +669,7 @@ title, compaction) the payload builders mirror.
 | Module            | Responsibility                                                             |
 |-------------------|----------------------------------------------------------------------------|
 | `payload.py`      | Codex wire format → immutable `CodexRequest`; request classes; user-text assembly |
-| `scoring.py`      | keyword / phrase / regex scoring, `score / (score + 1)` confidence mapping  |
+| `scoring.py`      | `CodexModeScorer`: keyword / phrase / regex scoring, cached per-mode plans  |
 | `classifier.py`   | `CodexModeClassifier` cascade, `HEURISTIC_MODES`, `CLASS_ROUTED_MODES`, `RoutingDecision` |
 | `semantic.py`     | optional cosine-similarity layer, acceptance threshold, fail-open lookups   |
 | `config.py`       | JSON loading, env overrides, `validate_args`, `lint_signals`                |

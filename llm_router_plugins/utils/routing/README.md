@@ -633,7 +633,7 @@ plugins' configuration: `auto` traffic stays with the semantic plugins, `auto_co
 | Module          | Contents                                                                              |
 |-----------------|-----------------------------------------------------------------------------------------|
 | `payload.py`    | `CodexRequest` and `CodexPayloadParser` — the read-only request normalizer                 |
-| `scoring.py`    | `detect_mode()`, `score_mode()`, `score_to_similarity()` — deterministic keyword scoring |
+| `scoring.py`    | `CodexModeScorer` (`detect_mode`, `score_mode`, `score_to_similarity`) — keyword scoring |
 | `semantic.py`   | `CodexSemanticLayer` — availability gate and cosine-similarity lookup                    |
 | `classifier.py` | `CodexModeClassifier` and `RoutingDecision` — the resolution cascade                  |
 | `config.py`     | `CodexRoutingConfig`, `CodexMode`, defaults, validation, env overrides                   |

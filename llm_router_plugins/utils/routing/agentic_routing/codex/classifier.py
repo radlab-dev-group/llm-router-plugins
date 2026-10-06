@@ -56,8 +56,7 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
     CodexRequest,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.scoring import (
-    detect_mode,
-    score_to_similarity,
+    CodexModeScorer,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.semantic import (
     CodexSemanticLayer,
@@ -171,15 +170,20 @@ class CodexModeClassifier:
         Embedding similarity layer, consulted only after every deterministic
         layer has stayed silent.  When omitted or unavailable the cascade stays
         fully deterministic.
+    scorer : CodexModeScorer, optional
+        Keyword scorer shared by every request.  Built on demand, so injecting
+        one is only useful to share a pre-warmed plan cache or to stub scoring
+        out.
     """
 
     def __init__(
         self,
         config: CodexRoutingConfig,
         semantic: Optional[CodexSemanticLayer] = None,
+        scorer: Optional[CodexModeScorer] = None,
     ) -> None:
         """
-        Store the configuration and the optional semantic layer.
+        Store the configuration, the semantic layer and the keyword scorer.
 
         Parameters
         ----------
@@ -188,6 +192,8 @@ class CodexModeClassifier:
         semantic : CodexSemanticLayer, optional
             Embedding similarity layer, or ``None`` for a purely
             deterministic cascade.
+        scorer : CodexModeScorer, optional
+            Keyword scorer, built when omitted.
 
         Returns
         -------
@@ -199,6 +205,7 @@ class CodexModeClassifier:
         """
         self._config = config
         self._semantic = semantic
+        self._scorer = scorer if scorer is not None else CodexModeScorer()
 
     def classify(
         self, payload: Dict[str, Any], request: CodexRequest
@@ -367,7 +374,7 @@ class CodexModeClassifier:
         if not candidates:
             return None
 
-        best_mode, score = detect_mode(text, candidates)
+        best_mode, score = self._scorer.detect_mode(text, candidates)
         if best_mode is None or score < self._config.heuristic_min_score:
             return None
 
@@ -375,5 +382,5 @@ class CodexModeClassifier:
             mode=best_mode.name,
             source=SOURCE_HEURISTIC,
             score=score,
-            similarity=score_to_similarity(score),
+            similarity=self._scorer.score_to_similarity(score),
         )
