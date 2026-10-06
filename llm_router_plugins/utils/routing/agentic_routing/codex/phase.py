@@ -7,52 +7,9 @@ from pathlib import PurePosixPath
 from typing import Optional, Tuple
 
 from .payload import CodexActivity
+from .phase_config import CodexPhaseConfig
 
 
-_ANNOUNCEMENT_PREFIX = re.compile(
-    r"^(?:teraz\s+(?:ja\s+)?|"
-    r"now\s+(?:i\s+(?:will\s+|am\s+)|i['’](?:ll|m)\s+)?|"
-    r"i\s+(?:will|am)\s+now\s+|i['’](?:ll|m)\s+now\s+)",
-    re.IGNORECASE,
-)
-_ANNOUNCEMENTS = {
-    "implement": re.compile(
-        r"(?:edytuję|dodam|zaktualizuję|zmienię|"
-        r"edit(?:ing)?|add(?:ing)?|updat(?:e|ing)|modify(?:ing)?)\s+"
-        r"(?:the\s+)?(?:wpis\s+do\s+)?"
-        r"(?:changelog\b|readme\b|docs?\b|documentation\b|dokumentację\b|"
-        r"kod\b|code\b|plik\b|pliki\b|files?\b|"
-        r"[\w./-]+\.(?:py|js|ts|tsx|jsx|md|rst|txt)\b)"
-        r"(?:\.(?:md|rst|txt))?",
-        re.IGNORECASE,
-    ),
-    "test": re.compile(
-        r"(?:uruchomię|uruchamiam|run(?:ning)?)\s+"
-        r"(?:the\s+)?(?:pytest|python(?:3)?\s+-m\s+(?:pytest|unittest)|"
-        r"unittest|npm\s+(?:run\s+)?test|testy|tests|test suite)"
-        r"(?:\s+--?[\w./=-]+)*",
-        re.IGNORECASE,
-    ),
-    "debug": re.compile(
-        r"(?:diagnozuję|zdiagnozuję|naprawię|naprawiam|"
-        r"debug(?:ging)?|diagnos(?:e|ing)|fix(?:ing)?|investigat(?:e|ing))\s+"
-        r"(?:the\s+)?(?:błąd|błędy|awarię|bug|error|failure|"
-        r"failing test|test failure)",
-        re.IGNORECASE,
-    ),
-    "git_review": re.compile(
-        r"(?:przejrzę|przeglądam|sprawdzę|review(?:ing)?|inspect(?:ing)?)\s+"
-        r"(?:the\s+)?(?:diff|git\s+(?:diff|log|show|blame)|"
-        r"changes|zmiany)",
-        re.IGNORECASE,
-    ),
-}
-_UNCERTAIN = re.compile(
-    r"\b(?:not|never|don't|won't|cannot|can't|if|maybe|might|would|"
-    r"but|then|later|after|before|instead|nie|jeśli|gdy|może|"
-    r"potem|później|zamiast|ale|oraz|and|lub|or)\b",
-    re.IGNORECASE,
-)
 _EXIT_CODE = re.compile(
     r"^\s*(?:(?:process\s+)?exited\s+with\s+code\s+|"
     r"exit[ _-]code\s*[:=]?\s*)(-?\d+)\s*[.!]?\s*$",
@@ -60,22 +17,22 @@ _EXIT_CODE = re.compile(
 )
 
 
-def _announcement(text: str) -> Optional[str]:
+def _announcement(text: str, rules: CodexPhaseConfig) -> Optional[str]:
     text = text.strip()
-    if "\n" in text or "```" in text or _UNCERTAIN.search(text):
+    if "\n" in text or "```" in text or rules.uncertain.search(text):
         return None
-    match = _ANNOUNCEMENT_PREFIX.match(text)
+    match = rules.announcement_prefix.match(text)
     if not match:
         return None
     action = text[match.end():].rstrip(".! ").replace("`", "")
     phases = [
-        phase for phase, pattern in _ANNOUNCEMENTS.items()
+        phase for phase, pattern in rules.announcements
         if pattern.fullmatch(action)
     ]
     return phases[0] if len(phases) == 1 else None
 
 
-def _command_phase(text: str) -> Optional[str]:
+def _command_phase(text: str, rules: CodexPhaseConfig) -> Optional[str]:
     try:
         arguments = json.loads(text)
         if not isinstance(arguments, dict):
@@ -119,20 +76,7 @@ def _command_phase(text: str) -> Optional[str]:
         args = words[1:]
         if any(arg in ("--help", "-h", "--version") for arg in args):
             return None
-        if executable in ("pytest", "unittest"):
-            phases.add("test")
-        elif re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", executable):
-            if len(args) >= 2 and args[:2] in (
-                ["-m", "pytest"], ["-m", "unittest"]
-            ):
-                phases.add("test")
-            else:
-                return None
-        elif executable == "npm" and (
-            args[:1] == ["test"] or args[:2] == ["run", "test"]
-        ):
-            phases.add("test")
-        elif executable == "git":
+        if executable == "git":
             while args:
                 if args[0] == "--no-pager":
                     args = args[1:]
@@ -140,26 +84,30 @@ def _command_phase(text: str) -> Optional[str]:
                     args = args[2:]
                 else:
                     break
-            if args and args[0] in ("log", "diff", "show", "blame"):
-                phases.add("git_review")
-            elif args[:1] != ["status"]:
-                return None
-        elif executable != "cd":
+        matches = {
+            rule.mode for rule in rules.commands
+            if rule.executable.fullmatch(executable)
+            and tuple(args[:len(rule.args_prefix)]) == rule.args_prefix
+        }
+        if len(matches) != 1:
             return None
+        signal = next(iter(matches))
+        if signal is not None:
+            phases.add(signal)
     return next(iter(phases)) if len(phases) == 1 else None
 
 
-def _test_path(path: str) -> bool:
+def _test_path(path: str, rules: CodexPhaseConfig) -> bool:
     parts = PurePosixPath(path).parts
     name = parts[-1].lower()
     return (
-        any(part.lower() in ("test", "tests", "__tests__") for part in parts[:-1])
-        or name.startswith("test_")
-        or bool(re.search(r"(?:_test\.py|\.(?:test|spec)\.[\w]+)$", name))
+        any(part.lower() in rules.test_directories for part in parts[:-1])
+        or name.startswith(rules.test_filename_prefixes)
+        or bool(rules.test_filename_pattern.search(name))
     )
 
 
-def _patch_phase(text: str) -> Optional[str]:
+def _patch_phase(text: str, rules: CodexPhaseConfig) -> Optional[str]:
     try:
         arguments = json.loads(text)
     except (ValueError, TypeError):
@@ -204,7 +152,10 @@ def _patch_phase(text: str) -> Optional[str]:
             or path.endswith("/")
         ):
             return None
-    return "test" if all(_test_path(path) for path in paths) else "implement"
+    return (
+        rules.test_mode if all(_test_path(path, rules) for path in paths)
+        else rules.implement_mode
+    )
 
 
 def _failed_test(text: str) -> bool:
@@ -221,31 +172,37 @@ def _failed_test(text: str) -> bool:
     return bool(re.search(r"^Traceback \(most recent call last\):", text, re.MULTILINE))
 
 
-def detect_phase(activity: Tuple[CodexActivity, ...]) -> Optional[str]:
+def detect_phase(
+    activity: Tuple[CodexActivity, ...], rules: Optional[CodexPhaseConfig] = None,
+) -> Optional[str]:
     """Return the latest unambiguous phase, without retaining cross-turn state.
 
     Only explicit current announcements, recognized executed commands and Codex
     patch envelopes count. Test failures require a matching call in this turn.
     Neutral or ambiguous activity leaves the previous clear signal intact.
     """
+    if rules is None:
+        rules = CodexPhaseConfig.from_raw()
+    if not rules.enabled:
+        return None
     phase = None
     calls = {}
     for item in activity:
         signal = None
         if item.kind == "assistant":
-            signal = _announcement(item.text)
+            signal = _announcement(item.text, rules)
         elif item.kind == "function_call":
-            if item.name in ("exec_command", "shell_command"):
-                signal = _command_phase(item.text)
-            elif item.name == "apply_patch":
-                signal = _patch_phase(item.text)
+            if item.name in rules.command_tools:
+                signal = _command_phase(item.text, rules)
+            elif item.name in rules.patch_tools:
+                signal = _patch_phase(item.text, rules)
             if item.call_id:
                 calls[item.call_id] = (item.name, signal)
         elif item.kind == "function_call_output" and item.name and item.call_id:
-            if calls.get(item.call_id) == (item.name, "test"):
-                if item.name in ("exec_command", "shell_command"):
+            if calls.get(item.call_id) == (item.name, rules.test_mode):
+                if item.name in rules.command_tools:
                     if _failed_test(item.text):
-                        signal = "debug"
+                        signal = rules.failure_mode
         if signal is not None:
             phase = signal
     return phase

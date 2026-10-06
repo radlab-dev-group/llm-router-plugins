@@ -8,6 +8,38 @@
     "heuristic_min_score": 3.0,
     "classify_max_chars": 4000,
     "vector_store_path": "",
+    "phase": {
+      "enabled": true,
+      "announcement_prefix": "^(?:teraz\\s+(?:ja\\s+)?|now\\s+(?:i\\s+(?:will\\s+|am\\s+)|i['’](?:ll|m)\\s+)?|i\\s+(?:will|am)\\s+now\\s+|i['’](?:ll|m)\\s+now\\s+)",
+      "uncertain": "\\b(?:not|never|don't|won't|cannot|can't|if|maybe|might|would|but|then|later|after|before|instead|nie|jeśli|gdy|może|potem|później|zamiast|ale|oraz|and|lub|or)\\b",
+      "announcements": {
+        "implement": "(?:edytuję|dodam|zaktualizuję|zmienię|edit(?:ing)?|add(?:ing)?|updat(?:e|ing)|modify(?:ing)?)\\s+(?:the\\s+)?(?:wpis\\s+do\\s+)?(?:changelog\\b|readme\\b|docs?\\b|documentation\\b|dokumentację\\b|kod\\b|code\\b|plik\\b|pliki\\b|files?\\b|[\\w./-]+\\.(?:py|js|ts|tsx|jsx|md|rst|txt)\\b)(?:\\.(?:md|rst|txt))?",
+        "test": "(?:uruchomię|uruchamiam|run(?:ning)?)\\s+(?:the\\s+)?(?:pytest|python(?:3)?\\s+-m\\s+(?:pytest|unittest)|unittest|npm\\s+(?:run\\s+)?test|testy|tests|test suite)(?:\\s+--?[\\w./=-]+)*",
+        "debug": "(?:diagnozuję|zdiagnozuję|naprawię|naprawiam|debug(?:ging)?|diagnos(?:e|ing)|fix(?:ing)?|investigat(?:e|ing))\\s+(?:the\\s+)?(?:błąd|błędy|awarię|bug|error|failure|failing test|test failure)",
+        "git_review": "(?:przejrzę|przeglądam|sprawdzę|review(?:ing)?|inspect(?:ing)?)\\s+(?:the\\s+)?(?:diff|git\\s+(?:diff|log|show|blame)|changes|zmiany)"
+      },
+      "command_tools": ["exec_command", "shell_command"],
+      "patch_tools": ["apply_patch"],
+      "commands": [
+        {"executable": "pytest|unittest", "args_prefix": [], "mode": "test"},
+        {"executable": "python(?:\\d+(?:\\.\\d+)?)?", "args_prefix": ["-m", "pytest"], "mode": "test"},
+        {"executable": "python(?:\\d+(?:\\.\\d+)?)?", "args_prefix": ["-m", "unittest"], "mode": "test"},
+        {"executable": "npm", "args_prefix": ["test"], "mode": "test"},
+        {"executable": "npm", "args_prefix": ["run", "test"], "mode": "test"},
+        {"executable": "git", "args_prefix": ["log"], "mode": "git_review"},
+        {"executable": "git", "args_prefix": ["diff"], "mode": "git_review"},
+        {"executable": "git", "args_prefix": ["show"], "mode": "git_review"},
+        {"executable": "git", "args_prefix": ["blame"], "mode": "git_review"},
+        {"executable": "git", "args_prefix": ["status"], "mode": null},
+        {"executable": "cd", "args_prefix": [], "mode": null}
+      ],
+      "test_directories": ["test", "tests", "__tests__"],
+      "test_filename_prefixes": ["test_"],
+      "test_filename_pattern": "(?:_test\\.py|\\.(?:test|spec)\\.[\\w]+)$",
+      "test_mode": "test",
+      "implement_mode": "implement",
+      "failure_mode": "debug"
+    },
     "semantic": {
       "enabled": true,
       "threshold": 0.51,

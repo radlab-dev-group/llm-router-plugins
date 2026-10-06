@@ -4,6 +4,7 @@ import pytest
 
 from llm_router_plugins.utils.routing.agentic_routing.codex.payload import CodexActivity
 from llm_router_plugins.utils.routing.agentic_routing.codex.phase import detect_phase
+from llm_router_plugins.utils.routing.agentic_routing.codex.phase_config import CodexPhaseConfig
 
 
 def assistant(text):
@@ -228,3 +229,99 @@ def test_latest_clear_signal_wins_and_neutral_activity_preserves_it():
 def test_no_cross_turn_memory():
     assert detect_phase((command("pytest"),)) == "test"
     assert detect_phase((output("Exit code: 1"),)) is None
+
+
+def test_phase_can_be_disabled_without_disabling_keywords():
+    rules = CodexPhaseConfig.from_raw({"enabled": False})
+    assert detect_phase((command("pytest"),), rules) is None
+
+
+def test_custom_announcements_replace_defaults():
+    rules = CodexPhaseConfig.from_raw({
+        "announcement_prefix": r"^Next:\s+",
+        "announcements": {"review": "inspect configuration"},
+    })
+    assert detect_phase((assistant("Next: inspect configuration"),), rules) == "review"
+    assert detect_phase((assistant("Teraz uruchomię pytest."),), rules) is None
+
+
+def test_custom_command_and_tool_rules_replace_defaults():
+    rules = CodexPhaseConfig.from_raw({
+        "command_tools": ["run_shell"],
+        "commands": [{"executable": "cargo", "args_prefix": ["test"], "mode": "test"}],
+    })
+    assert detect_phase((command("cargo test", name="run_shell"),), rules) == "test"
+    assert detect_phase((command("cargo build", name="run_shell"),), rules) is None
+    assert detect_phase((command("pytest", name="run_shell"),), rules) is None
+    assert detect_phase((command("cargo test"),), rules) is None
+    assert detect_phase((command("cargo test | tee log", name="run_shell"),), rules) is None
+
+
+def test_conflicting_command_rules_do_not_pick_by_order():
+    rules = CodexPhaseConfig.from_raw({"commands": [
+        {"executable": "cargo", "args_prefix": [], "mode": "implement"},
+        {"executable": "cargo", "args_prefix": ["test"], "mode": "test"},
+    ]})
+    assert detect_phase((command("cargo test"),), rules) is None
+
+
+def test_custom_test_paths_and_failure_mode():
+    rules = CodexPhaseConfig.from_raw({
+        "test_directories": ["checks"],
+        "test_filename_prefixes": ["check_"],
+        "test_filename_pattern": r"\.check\.rs$",
+        "failure_mode": "review",
+    })
+    assert detect_phase((patch("checks/main.rs"),), rules) == "test"
+    assert detect_phase((patch("src/check_main.rs"),), rules) == "test"
+    assert detect_phase((patch("src/main.check.rs"),), rules) == "test"
+    assert detect_phase((patch("tests/main.rs"),), rules) == "implement"
+    assert detect_phase((command("pytest"), output("Exit code: 1")), rules) == "review"
+
+
+def test_empty_rule_collections_disable_only_their_signals():
+    rules = CodexPhaseConfig.from_raw({"announcements": {}, "commands": []})
+    assert detect_phase((assistant("Teraz uruchomię pytest."), command("pytest")), rules) is None
+    assert detect_phase((patch("src/main.py"),), rules) == "implement"
+
+
+@pytest.mark.parametrize("raw", [
+    [], {"enabled": "false"}, {"enabled": 0}, {"unknown": True},
+    {"announcement_prefix": "["}, {"uncertain": 123},
+    {"announcements": []}, {"announcements": {"test": "["}},
+    {"command_tools": "exec_command"}, {"patch_tools": [1]},
+    {"test_directories": [""]}, {"test_filename_pattern": "["},
+    {"commands": {}}, {"commands": [{"executable": "pytest"}]},
+    {"commands": [{"executable": "[", "args_prefix": [], "mode": "test"}]},
+    {"commands": [{"executable": "pytest", "args_prefix": "test", "mode": "test"}]},
+    {"commands": [{"executable": "pytest", "args_prefix": [], "mode": False}]},
+    {"test_mode": ""},
+])
+def test_invalid_phase_configuration_is_rejected(raw):
+    with pytest.raises(ValueError, match=r"settings\.phase"):
+        CodexPhaseConfig.from_raw(raw)
+
+
+def test_explicit_rules_require_configured_modes_but_defaults_allow_subsets():
+    CodexPhaseConfig.from_raw({}, mode_names=["implement"])
+    with pytest.raises(ValueError, match="Unknown settings.phase modes"):
+        CodexPhaseConfig.from_raw({"failure_mode": "missing"}, mode_names=["implement"])
+
+
+def test_routing_config_loads_phase_overrides_and_legacy_defaults():
+    from llm_router_plugins.utils.routing.agentic_routing.codex.config import CodexRoutingConfig
+
+    raw = {
+        "settings": {"trigger_model": "auto_codex", "fallback_mode": "implement"},
+        "codex_modes": [{"name": "implement", "model_name": "model", "description": "Edit code"}],
+    }
+    legacy = CodexRoutingConfig._from_raw(raw)
+    assert legacy.phase.enabled is True
+    raw["settings"]["phase"] = {"enabled": False}
+    config = CodexRoutingConfig._from_raw(raw)
+    assert config.phase.enabled is False
+    assert config.heuristic_enabled is True
+    assert legacy.phase.enabled is True
+    raw["settings"]["phase"] = None
+    with pytest.raises(ValueError, match=r"settings\.phase"):
+        CodexRoutingConfig._from_raw(raw)

@@ -235,8 +235,39 @@ Notes:
   to `implement`; helper commands such as `git status` do not create a Git phase. The newest clear action wins.
   Unknown or ambiguous activity leaves the remaining cascade to decide. Rule-based phase detection is disabled along
   with keyword scoring by `heuristic_enabled=false`, and a phase must name a configured mode.
+  `settings.phase.enabled=false` disables only the phase layer, leaving keyword scoring active.
 - Layers 1–5 never touch the embedding stack. The vector store is queried **at most once per request**, and only after
   the deterministic layers have stayed silent.
+
+#### Phase configuration
+
+Phase signals live in `settings.phase` in `agentic_routing_codex.json`, not in Python keyword lists:
+
+- `announcement_prefix`, `uncertain`, `announcements`: case-insensitive regexes for current-action prefixes,
+  uncertainty/negation and complete actions mapped to mode names. Actions use full matches, not substring searches.
+- `command_tools`, `patch_tools`: names of actual command/patch tools. Advertised tools are never signals.
+- `commands`: each rule has an `executable` regex (case-sensitive full match of the executable basename), an
+  `args_prefix` list of exact leading arguments, and a `mode`. A `null` mode is neutral (e.g. `git status` or `cd`).
+  Unknown commands or conflicting matches make the command ambiguous; rule order does not break ties.
+- `test_directories`, `test_filename_prefixes`, `test_filename_pattern`: recognition of test-only patches;
+  directory names and prefixes should be lower-case, since paths are compared in lower-case.
+- `test_mode`, `implement_mode`, `failure_mode`: modes for test-only patches, other patches and linked test failures.
+  Failure transitions apply only to command calls routed to `test_mode`, never to unrelated tool outputs.
+
+Missing fields inherit the packaged JSON defaults, so older configurations remain compatible. Supplied maps/lists
+replace the entire corresponding field (they are not merged); empty maps/lists disable those signals. Regexes are
+compiled when configuration is loaded. Invalid types, regexes, unknown fields or explicitly referenced unknown modes
+reject configuration loading. Defaults referencing modes omitted from a legacy config are ignored by the classifier.
+Apply configuration changes by reloading/recreating the plugin; rules are not read from disk per request.
+
+For example, a custom configuration can disable phase routing without affecting the keyword layer:
+
+```json
+"phase": {"enabled": false}
+```
+
+Shell/patch syntax validation, rejected unsafe shell constructs, Git option parsing and call/output linkage remain
+in code. They are parser safeguards, not configurable routing signals. Extending the command list cannot bypass them.
 
 ### Step 4 — keyword scoring
 

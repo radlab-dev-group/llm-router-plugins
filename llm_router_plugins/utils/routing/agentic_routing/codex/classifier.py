@@ -257,7 +257,7 @@ class CodexModeClassifier:
             return RoutingDecision("plan", SOURCE_COLLABORATION_MODE, 1.0, 1.0)
 
         if config.heuristic_enabled:
-            phase = detect_phase(request.activity)
+            phase = detect_phase(request.activity, config.phase)
             if phase is not None and phase in modes:
                 return RoutingDecision(phase, SOURCE_PHASE, 1.0, 1.0)
             decision = self._heuristic_mode(request.intent_text, modes)

@@ -47,6 +47,9 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple
 from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
     DEFAULT_CLASSIFY_MAX_CHARS,
 )
+from llm_router_plugins.utils.routing.agentic_routing.codex.phase_config import (
+    CodexPhaseConfig,
+)
 from llm_router_plugins.utils.routing.constants import AGENTIC_CODEX_ROUTING_PREFIX
 from llm_router_plugins.utils.routing.common import (
     RoutingConfigBase,
@@ -110,6 +113,9 @@ class CodexRoutingConfig(RoutingConfigBase):
         Character budget of the text the keyword and semantic layers see: the
         newest user message is always kept whole, older ones are appended while
         the budget holds.
+    phase : CodexPhaseConfig
+        Validated current-activity rules from ``settings.phase``. Missing fields
+        inherit defaults from the packaged JSON configuration.
     """
 
     # RoutingConfigBase hooks (ClassVar — not dataclass fields)
@@ -134,6 +140,7 @@ class CodexRoutingConfig(RoutingConfigBase):
     embedding_model: str
     codex_modes: Tuple["CodexMode", ...]
     classify_max_chars: int = DEFAULT_CLASSIFY_MAX_CHARS
+    phase: CodexPhaseConfig = field(default_factory=CodexPhaseConfig.from_raw)
 
     @property
     def mode_names(self) -> List[str]:
@@ -206,6 +213,8 @@ class CodexRoutingConfig(RoutingConfigBase):
         )
 
         semantic = settings.get("semantic", {}) or {}
+        if "phase" in settings and not isinstance(settings["phase"], dict):
+            raise ValueError("settings.phase must be an object")
         chunk_size = int(semantic.get("chunk_size", 256))
         chunk_overlap = int(semantic.get("chunk_overlap", 64))
         top_k = int(semantic.get("top_k", 3))
@@ -227,6 +236,9 @@ class CodexRoutingConfig(RoutingConfigBase):
             codex_modes=codex_modes,
             classify_max_chars=int(
                 settings.get("classify_max_chars", DEFAULT_CLASSIFY_MAX_CHARS)
+            ),
+            phase=CodexPhaseConfig.from_raw(
+                settings.get("phase"), mode_names=[mode.name for mode in codex_modes]
             ),
         )
 
