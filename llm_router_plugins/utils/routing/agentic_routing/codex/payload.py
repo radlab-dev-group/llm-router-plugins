@@ -129,6 +129,9 @@ class CodexRequest:
     latest_user_text : str
         The genuine user messages assembled newest first, within the character
         budget given to :func:`parse_codex_payload`.
+    assistant_messages:
+        Full list of assistant messages produced during function calling.
+        The items are ordered from the oldest to the newest.
     request_class : str
         One of ``main``, ``aux_title``, ``compaction``.
     """
@@ -152,6 +155,7 @@ class CodexRequest:
     context_tokens: int = 0
     collaboration_mode: str = ""
     latest_user_text: str = ""
+    assistant_messages: Optional[List[Dict[str, Any]]] = None
     request_class: str = REQUEST_CLASS_MAIN
 
 
@@ -219,6 +223,7 @@ def parse_codex_payload(
         context_tokens=context_chars // _CHARS_PER_TOKEN,
         collaboration_mode=_collaboration_mode(items),
         latest_user_text=_latest_user_text(items, body, max_chars),
+        assistant_messages = _assistant_messages(items),
         request_class=_request_class(request_kind, thread_source),
     )
 
@@ -547,6 +552,32 @@ def _latest_user_text(
 
     return _text(payload.get("prompt"))
 
+def _assistant_messages(items: List[Any]) -> Optional[List[Dict[str, Any]]]:
+    """
+    Filters and returns assistant messages from a list of message-like items.
+
+    This function processes a list of items and extracts those that represent
+    messages with a role of "assistant". If no such items are found, the function
+    returns None.
+
+    Parameters:
+    items: List[Any]
+        A list of dictionaries or message-like items to be processed. Each item
+        is expected to have a "type" and "role" key.
+
+    Returns:
+    Optional[List[Dict[str, Any]]]
+        A list of filtered dictionaries representing "assistant" messages. If no
+        matching messages are found, the function returns None.
+    """
+    messages: List[Dict[str, Any]] = []
+
+    for item in items:
+        if item.get("type") != "message" or item.get("role") != "assistant":
+            continue
+        messages.append(item)
+
+    return messages if messages else None
 
 def _request_class(request_kind: str, thread_source: str) -> str:
     """
