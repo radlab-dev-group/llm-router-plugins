@@ -870,7 +870,9 @@ class TestPassthrough:
             def classify(self, payload, request):
                 raise RuntimeError("classifier exploded")
 
-        monkeypatch.setattr(plugin_module, "CodexModeClassifier", ExplodingClassifier)
+        monkeypatch.setattr(
+            plugin_module, "CodexModeClassifier", ExplodingClassifier
+        )
         payload = main_payload()
         before = copy.deepcopy(payload)
 
@@ -915,7 +917,9 @@ class TestPassthrough:
             def classify(self, payload, request):
                 raise RuntimeError("classifier exploded")
 
-        monkeypatch.setattr(plugin_module, "CodexModeClassifier", ExplodingClassifier)
+        monkeypatch.setattr(
+            plugin_module, "CodexModeClassifier", ExplodingClassifier
+        )
 
         result = CodexRoutingPlugin(logger=RecordingLogger()).apply(main_payload())
 
@@ -1121,7 +1125,9 @@ class TestScoring:
     def test_invalid_patterns_are_skipped_and_valid_ones_count(self):
         mode = _mode("probe", keywords=("test",), patterns=("(", r"test\w*"))
 
-        assert _scorer.score_mode(mode, "testy") == 1.0 + scoring_module.PATTERN_WEIGHT
+        assert (
+            _scorer.score_mode(mode, "testy") == 1.0 + scoring_module.PATTERN_WEIGHT
+        )
 
     def test_plans_are_cached_per_signal_signature(self):
         _scorer.clear_cache()
@@ -1137,8 +1143,9 @@ class TestScoring:
     def test_plans_are_not_shared_between_scorers(self):
         mode = _mode("isolation", keywords=("alpha",))
 
-        assert CodexModeScorer()._mode_plan(mode) is not \
-            CodexModeScorer()._mode_plan(mode)
+        assert CodexModeScorer()._mode_plan(
+            mode
+        ) is not CodexModeScorer()._mode_plan(mode)
 
     def test_the_cascade_scores_through_the_injected_scorer(self):
         queried = []
@@ -1181,20 +1188,13 @@ class TestClassifyTextBudget:
     def test_the_newest_message_always_survives_the_budget(self):
         payload = self._history("stara sprawa", "N" * 50)
 
-        assert (
-            _parse(payload, max_chars=10).latest_user_text == "N" * 50
-        )
+        assert _parse(payload, max_chars=10).latest_user_text == "N" * 50
 
     def test_older_messages_stop_at_the_budget(self):
         payload = self._history("M1", "M2", "M3")
 
-        assert (
-            _parse(payload, max_chars=6).latest_user_text == "M3\n\nM2"
-        )
-        assert (
-            _parse(payload, max_chars=10).latest_user_text
-            == "M3\n\nM2\n\nM1"
-        )
+        assert _parse(payload, max_chars=6).latest_user_text == "M3\n\nM2"
+        assert _parse(payload, max_chars=10).latest_user_text == "M3\n\nM2\n\nM1"
 
     def test_environment_context_messages_stay_out(self):
         request = _parse(main_payload("krótka odpowiedź"))
@@ -1796,9 +1796,7 @@ class TestDeterminism:
         similarities = set()
         for _ in range(4):
             payload = main_payload("Napraw testy jednostkowe.")
-            similarities.add(
-                _decide(_parse(payload), payload).similarity
-            )
+            similarities.add(_decide(_parse(payload), payload).similarity)
 
         assert len(similarities) == 1
 

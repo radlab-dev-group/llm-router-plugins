@@ -22,7 +22,6 @@ from llm_router_plugins.utils.routing.semantic_biencoder.embedder import (
     EmbeddingRouter,
 )
 
-
 # ---------- helpers ----------
 _CONFIG_PATH = (
     pathlib.Path(__file__).resolve().parent.parent
