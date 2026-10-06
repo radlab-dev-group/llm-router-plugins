@@ -206,6 +206,14 @@ def _user(text):
     }
 
 
+def _assistant(text):
+    return {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text}],
+    }
+
+
 def main_payload(
     text="Zaimplementuj nowy moduł eksportu.",
     collaboration=DEFAULT_BLOCK,
@@ -1428,6 +1436,45 @@ class TestPayloadRobustness:
 
         assert payload == before
 
+    def test_assistant_messages_are_extracted_as_copies(self):
+        payload = main_payload()
+        payload["input"].insert(
+            -1,
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "naprawiam testy"},
+                    {"type": "refusal"},
+                ],
+            },
+        )
+        before = copy.deepcopy(payload)
+
+        request = _parse(payload)
+
+        assert payload == before
+        assert request.assistant_messages == [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "naprawiam testy"}],
+            }
+        ]
+
+    def test_assistant_message_without_text_is_dropped(self):
+        payload = main_payload()
+        payload["input"].insert(
+            -1,
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text"}],
+            },
+        )
+
+        assert _parse(payload).assistant_messages == []
+
 
 # --------------------------------------------------------------------------
 # configuration loading and validation
@@ -2099,6 +2146,51 @@ class TestSemanticSimilarity:
         assert decision.source == SOURCE_FALLBACK
         assert decision.similarity == 0.0
         assert "semantic lookup failed" in logger.joined()
+
+    def test_context_built_from_the_latest_agent_utterance_only(self):
+        payload = main_payload("napraw testy")
+        payload["input"].append(_assistant("stary temat: przegląd kodu"))
+        payload["input"].append(_assistant("przechodzę do testów"))
+        router = _StubRouter()
+
+        decision = _classify_semantic(payload, router)
+
+        assert router.calls == ["napraw testy\nprzechodzę do testów"]
+        assert decision.source in (SOURCE_HEURISTIC, SOURCE_SEMANTIC)
+
+    def test_malformed_assistant_message_does_not_break_routing(self):
+        payload = main_payload("wyrenderuj pusty stan w widoku")
+        payload["input"].append(_assistant("dobrze"))
+        payload["input"].append(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text"}],
+            }
+        )
+        router = _StubRouter("debug", 0.81)
+        logger = _CaptureLogger()
+
+        decision = _classify_semantic(payload, router, logger=logger)
+
+        assert decision.mode == "debug"
+        assert decision.source == SOURCE_SEMANTIC
+        assert "context building failed" not in logger.joined()
+
+    def test_broken_context_building_is_fail_open(self):
+        logger = _CaptureLogger()
+        payload = main_payload("wyrenderuj pusty stan w widoku")
+        router = _StubRouter()
+        layer = _semantic_layer(router, logger=logger)
+
+        def boom(request):
+            raise ValueError("nope")
+
+        layer.__dict__["_build_semantic_context"] = boom
+
+        assert layer.route(_parse(payload)) is None
+        assert router.calls == []
+        assert "context building failed" in logger.joined()
 
     def test_similarity_without_a_layer_is_derived_from_the_score(self):
         payload = main_payload("napraw testy")

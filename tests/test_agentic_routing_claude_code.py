@@ -163,9 +163,7 @@ class TestNormalizeModelName:
             == "us.anthropic.claude-opus-5-5"
         )
         assert (
-            _mapper.normalize(
-                "us.anthropic.claude-opus-5-5", provider_prefixes=()
-            )
+            _mapper.normalize("us.anthropic.claude-opus-5-5", provider_prefixes=())
             == "us.anthropic.claude-opus-5-5"
         )
 
