@@ -20,8 +20,13 @@ same text twice.
 """
 
 import logging
+from email.mime import text
 
 from typing import Any, Dict, Mapping, Optional, Tuple
+
+from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
+    CodexRequest,
+)
 
 from llm_router_plugins.utils.routing.agentic_routing.codex.config import CodexMode
 
@@ -109,7 +114,7 @@ class CodexSemanticLayer:
         """
         return self._router is not None
 
-    def route(self, text: str) -> Optional[Dict[str, Any]]:
+    def route(self, request: CodexRequest) -> Optional[Dict[str, Any]]:
         """
         Query the vector store once, translating failures into ``None``.
 
@@ -119,8 +124,8 @@ class CodexSemanticLayer:
 
         Parameters
         ----------
-        text : str
-            The request text.  Empty text never reaches the router.
+        request : CodexRequest
+            The request object.
 
         Returns
         -------
@@ -132,11 +137,12 @@ class CodexSemanticLayer:
         ------
         None
         """
-        if self._router is None or not text:
+        if self._router is None or not request:
             return None
 
+        _text = self._build_router_context(request)
         try:
-            result = self._router.route(text)
+            result = self._router.route(_text)
         except Exception as exc:
             self._warn("CodexRouting: semantic lookup failed, ignoring it: %s", exc)
             return None
@@ -256,6 +262,23 @@ class CodexSemanticLayer:
             return float(result.get("similarity", 0.0) or 0.0)
 
         return None
+
+    @staticmethod
+    def _build_router_context(
+        request: CodexRequest, last_agent_messages: int = 5
+    ) -> Optional[str]:
+        _text = request.latest_user_text or ""
+
+        _messages = request.assistant_messages or []
+        _assistant_messages = []
+        for _msg in _messages:
+            for _item in _msg["content"]:
+                _assistant_messages.append(_item["text"])
+
+        _text = [_text] + _assistant_messages[-last_agent_messages:]
+        if not len(_text):
+            return None
+        return "\n".join(_text)
 
     def _warn(self, message: str, *args: Any) -> None:
         """
