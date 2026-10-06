@@ -2148,15 +2148,17 @@ class TestSemanticSimilarity:
         assert "semantic lookup failed" in logger.joined()
 
     def test_context_built_from_the_latest_agent_utterance_only(self):
-        payload = main_payload("napraw testy")
+        payload = main_payload("wyrenderuj pusty stan w widoku", collaboration=None)
         payload["input"].append(_assistant("stary temat: przegląd kodu"))
         payload["input"].append(_assistant("przechodzę do testów"))
         router = _StubRouter()
 
         decision = _classify_semantic(payload, router)
 
-        assert router.calls == ["napraw testy\nprzechodzę do testów"]
-        assert decision.source in (SOURCE_HEURISTIC, SOURCE_SEMANTIC)
+        assert decision.source == SOURCE_SEMANTIC
+        assert router.calls == [
+            "wyrenderuj pusty stan w widoku\nprzechodzę do testów"
+        ]
 
     def test_malformed_assistant_message_does_not_break_routing(self):
         payload = main_payload("wyrenderuj pusty stan w widoku")

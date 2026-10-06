@@ -180,8 +180,9 @@ Details that matter when you debug routing:
   the `classify_max_chars` budget holds (a non-positive budget means "unbounded"). If the request carries no usable
   user message, the legacy `payload["prompt"]` is used.
 - **`assistant_messages`** collects every `type == "message"`, `role == "assistant"` item, keeping only its
-  `output_text` content parts (oldest → newest). The semantic layer uses these to enrich the query it embeds, so the
-  model sees not just the latest user turn but also what the agent has already said in the current thread.
+  `output_text` content parts (oldest → newest) as **copies** — parsing never touches the payload that is forwarded
+  to the model. The semantic layer uses them to enrich the query it embeds, so the model sees not just the latest
+  user turn but also what the agent is doing right now.
 
 ### Step 2 — request class
 
@@ -278,9 +279,10 @@ Enabled with `settings.semantic.enabled`, disabled for a single process with
 - One lookup serves both the accept decision and the fallback mode's reported similarity, so a request never embeds the
   same text twice.
 - The query is built by `CodexSemanticLayer._build_semantic_context(request)`: it starts from
-  `request.latest_user_text` and appends the text of the last five `output_text` parts of
-  `request.assistant_messages` (oldest → newest), joined with newlines. When the request has neither a user text nor
-  assistant messages the query is empty and the router is not called.
+  `request.latest_user_text` and appends the agent's **last utterance** — the `output_text` of its newest assistant
+  message — joined with a newline. One utterance, not a window of old ones: a Codex thread switches topic constantly,
+  so anything older is about the previous task and would dilute the query instead of steering it. When the request has
+  neither a user text nor assistant utterance the query is empty and the router is not called.
 - The model is loaded with `device="cpu"` and `trust_remote_code=True` at plugin construction. A router that raises at
   query time (broken index, empty vector) disables only the semantic answer for that request.
 

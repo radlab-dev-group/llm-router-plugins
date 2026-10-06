@@ -670,8 +670,8 @@ Notes on the wire format:
   message that would overflow, so the text the classifier sees is bounded as the session grows. `instructions` is deliberately **not** classified — in captured
   sessions it is one constant 16 979-character preamble that would drown the signal.
 - `assistant_messages` keeps every `role == "assistant"` message (oldest → newest), retaining only its `output_text`
-  content parts. The semantic layer appends the last five of these to `latest_user_text` when it builds the query it
-  embeds, so the vector store sees the recent agent turns, not just the latest user message.
+  content parts. The semantic layer appends only the **last** of these to `latest_user_text` when it builds the query
+  it embeds, so the vector store sees the agent's current utterance, not the whole thread history.
 - Parsing never mutates the payload and never raises: a missing or non-list `input`, `tools=None`, an absent
   `client_metadata` or a missing `text` all yield a well-formed `CodexRequest` with empty defaults.
 
