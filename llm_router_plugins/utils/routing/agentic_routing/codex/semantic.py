@@ -118,14 +118,18 @@ class CodexSemanticLayer:
         """
         Query the vector store once, translating failures into ``None``.
 
-        A router that raises (unreadable index, embedding model error, empty
-        query vector) disables the semantic answer for this request only; the
-        deterministic cascade keeps working.
+        The query is the request's semantic context
+        (:meth:`_build_semantic_context`): ``latest_user_text`` plus the text
+        of the last few assistant ``output_text`` parts, so the embedding sees
+        the recent conversation, not only the latest user message.  When that
+        context is empty the router is never called.  A router that raises
+        (unreadable index, embedding model error) disables the semantic answer
+        for this request only; the deterministic cascade keeps working.
 
         Parameters
         ----------
         request : CodexRequest
-            The request object.
+            The parsed request whose context is embedded.
 
         Returns
         -------
@@ -141,6 +145,9 @@ class CodexSemanticLayer:
             return None
 
         _text = self._build_semantic_context(request)
+
+        self._warn("CodexRouting: text used to route: %s", _text)
+
         if not _text:
             return None
         try:
@@ -269,6 +276,32 @@ class CodexSemanticLayer:
     def _build_semantic_context(
         request: CodexRequest, last_agent_messages: int = 5
     ) -> Optional[str]:
+        """
+        Assemble the text embedded for the semantic lookup.
+
+        The newest user text is followed by the text of the last
+        *last_agent_messages* assistant ``output_text`` parts (oldest first),
+        joined with newlines.  Assistant turns give the embedding model the
+        thread context that the one-line user message alone lacks, which is
+        what separates a "review this" turn from a "fix this" turn.
+
+        Parameters
+        ----------
+        request : CodexRequest
+            The parsed request.
+        last_agent_messages : int
+            How many of the newest assistant message parts are appended.
+
+        Returns
+        -------
+        Optional[str]
+            The assembled query, or ``None`` when the request carries no text
+            at all (neither user nor assistant).
+
+        Raises
+        ------
+        None
+        """
         _text = request.latest_user_text or ""
 
         _messages = request.assistant_messages or []

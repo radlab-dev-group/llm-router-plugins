@@ -607,18 +607,21 @@ class CodexPayloadParser:
         messages: List[Dict[str, Any]] = []
 
         for item in items:
-            _n_content = []
-
+            if not isinstance(item, dict):
+                continue
             if item.get("type") != "message" or item.get("role") != "assistant":
-                _content = item.get("content", [])
-                if not len(_content):
-                    continue
+                continue
 
-                for _c_itm in _content:
-                    if _c_itm.get("type") == "output_text":
-                        _n_content.append(_c_itm)
+            _content = item.get("content", [])
+            if not isinstance(_content, list) or not _content:
+                continue
 
-            if not len(_n_content):
+            _n_content = [
+                _c_itm
+                for _c_itm in _content
+                if isinstance(_c_itm, dict) and _c_itm.get("type") == "output_text"
+            ]
+            if not _n_content:
                 continue
 
             item["content"] = _n_content

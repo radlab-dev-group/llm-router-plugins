@@ -929,7 +929,7 @@ class TestPassthrough:
     def test_minimal_trigger_only_payload_is_routed(self):
         payload = {"model": "auto_codex"}
 
-        result = _plugin().apply(payload)
+        result = _plugin(_rebuild(_config(), semantic_enabled=False)).apply(payload)
 
         assert result["agent_mode"] == "implement"
         assert result["model"] == _expected_model("implement")
@@ -1822,9 +1822,9 @@ class _StubRouter:
         self.raw_result = raw_result
         self.calls = []
 
-    def route(self, text):
+    def route(self, request):
         """Record the query and replay a router-shaped result."""
-        self.calls.append(text)
+        self.calls.append(getattr(request, "latest_user_text", request))
         if self.fail:
             raise RuntimeError("index unavailable")
         if self.raw_result is not None:
@@ -1895,14 +1895,16 @@ class TestSemanticSimilarity:
 
     def test_empty_text_never_reaches_the_router(self):
         router = _StubRouter()
+        request = CodexRequest(latest_user_text="")
 
-        assert _semantic_layer(router).route("") is None
+        assert _semantic_layer(router).route(request) is None
         assert router.calls == []
 
     def test_router_result_must_be_a_mapping(self):
         router = _StubRouter(raw_result="not-a-dict")
+        request = CodexRequest(latest_user_text="napraw testy")
 
-        assert _semantic_layer(router).route("napraw testy") is None
+        assert _semantic_layer(router).route(request) is None
         assert router.calls == ["napraw testy"]
 
     def test_threshold_acceptance_is_inclusive(self):
@@ -2075,8 +2077,9 @@ class TestSemanticSimilarity:
         assert len(router.calls) == 1
 
     def test_resolve_combines_route_and_accept(self):
+        request = CodexRequest(latest_user_text="przejrzyj moduł")
         mode, similarity = _semantic_layer(_StubRouter("review", 0.66)).resolve(
-            "przejrzyj moduł"
+            request
         )
 
         assert mode.name == "review"

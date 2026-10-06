@@ -632,9 +632,9 @@ plugins' configuration: `auto` traffic stays with the semantic plugins, `auto_co
 
 | Module          | Contents                                                                              |
 |-----------------|-----------------------------------------------------------------------------------------|
-| `payload.py`    | `CodexRequest` and `CodexPayloadParser` — the read-only request normalizer                 |
+| `payload.py`    | `CodexRequest` (incl. `assistant_messages`) and `CodexPayloadParser` — read-only normalizer |
 | `scoring.py`    | `CodexModeScorer` (`detect_mode`, `score_mode`, `score_to_similarity`) — keyword scoring |
-| `semantic.py`   | `CodexSemanticLayer` — availability gate and cosine-similarity lookup                    |
+| `semantic.py`   | `CodexSemanticLayer` — availability gate, `_build_semantic_context`, cosine lookup        |
 | `classifier.py` | `CodexModeClassifier` and `RoutingDecision` — the resolution cascade                  |
 | `config.py`     | `CodexRoutingConfig`, `CodexMode`, defaults, validation, env overrides                   |
 | `plugin.py`     | `CodexRoutingPlugin` — trigger check, cascade, payload annotation                        |
@@ -669,6 +669,9 @@ Notes on the wire format:
   one is appended only while the text stays within `classify_max_chars` (default `4000`), and assembly stops at the first
   message that would overflow, so the text the classifier sees is bounded as the session grows. `instructions` is deliberately **not** classified — in captured
   sessions it is one constant 16 979-character preamble that would drown the signal.
+- `assistant_messages` keeps every `role == "assistant"` message (oldest → newest), retaining only its `output_text`
+  content parts. The semantic layer appends the last five of these to `latest_user_text` when it builds the query it
+  embeds, so the vector store sees the recent agent turns, not just the latest user message.
 - Parsing never mutates the payload and never raises: a missing or non-list `input`, `tools=None`, an absent
   `client_metadata` or a missing `text` all yield a well-formed `CodexRequest` with empty defaults.
 

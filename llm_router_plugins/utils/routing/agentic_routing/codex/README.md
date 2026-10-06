@@ -168,6 +168,7 @@ per-request state; reading never raises — an unreadable value keeps the field 
 | `context_chars`, `context_tokens`           | content length of `instructions` + `input` (tokens ≈ chars / 4)           |
 | `collaboration_mode`                        | `<collaboration_mode>…</collaboration_mode>` block in `developer` messages |
 | `latest_user_text`                          | genuine `user` messages, newest first, within `classify_max_chars`         |
+| `assistant_messages`                        | `role == "assistant"` messages with `output_text` content, oldest → newest |
 
 Details that matter when you debug routing:
 
@@ -178,6 +179,9 @@ Details that matter when you debug routing:
   is not just an `<environment_context>` block. The newest message is always kept whole; older ones are appended while
   the `classify_max_chars` budget holds (a non-positive budget means "unbounded"). If the request carries no usable
   user message, the legacy `payload["prompt"]` is used.
+- **`assistant_messages`** collects every `type == "message"`, `role == "assistant"` item, keeping only its
+  `output_text` content parts (oldest → newest). The semantic layer uses these to enrich the query it embeds, so the
+  model sees not just the latest user turn but also what the agent has already said in the current thread.
 
 ### Step 2 — request class
 
@@ -266,6 +270,10 @@ Enabled with `settings.semantic.enabled`, disabled for a single process with
   reaches `similarity_threshold` (`0.51` by default).
 - One lookup serves both the accept decision and the fallback mode's reported similarity, so a request never embeds the
   same text twice.
+- The query is built by `CodexSemanticLayer._build_semantic_context(request)`: it starts from
+  `request.latest_user_text` and appends the text of the last five `output_text` parts of
+  `request.assistant_messages` (oldest → newest), joined with newlines. When the request has neither a user text nor
+  assistant messages the query is empty and the router is not called.
 - The model is loaded with `device="cpu"` and `trust_remote_code=True` at plugin construction. A router that raises at
   query time (broken index, empty vector) disables only the semantic answer for that request.
 
