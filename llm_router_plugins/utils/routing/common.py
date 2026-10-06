@@ -27,7 +27,6 @@ from llm_router_plugins.utils.routing.embedder import (
     EmbeddingRouterConfig,
 )
 
-
 # Accepted textual representations of booleans coming from env vars.
 _BOOL_TRUE_VALUES = ("1", "true", "yes", "on")
 _BOOL_FALSE_VALUES = ("0", "false", "no", "off")
