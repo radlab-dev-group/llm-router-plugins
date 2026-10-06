@@ -541,6 +541,12 @@ class TestHeuristicClassification:
             "Sprawdź historię tego pliku przez git blame.",
             "zrób commit z tymi zmianami",
             "resolve the merge conflicts",
+            "review this branch",
+            "review the branch before merging",
+            "przejrzyj ten branch",
+            "przejrzyj zmiany na gałęzi",
+            "compare branches and summarize the changes",
+            "Zobacz na commity na tym branczu, podsumuj co tam jest.",
         ],
     )
     def test_git_review_prompts_select_git_review(self, text):
@@ -560,6 +566,16 @@ class TestHeuristicClassification:
             "rozważ inne podejście do projektowania",
             "porównaj dwa podejścia architektoniczne",
             "the prairie fire spread",
+            "Dodaj endpoint w tym repozytorium.",
+            "Implement the handler in this repository.",
+            "Dodaj obsługę GitHub do integracji.",
+            "Podsumuj zmiany w README.",
+            "Opisz zmiany w konfiguracji.",
+            "Przejrzyj zmiany w dokumentacji.",
+            "Zaimplementuj historię zmian ustawień użytkownika.",
+            "Resolve conflicts between application settings.",
+            "Implement branching logic in the parser.",
+            "Dodaj endpoint na tym branchu.",
         ],
     )
     def test_non_git_prompts_do_not_select_git_review(self, text):
@@ -568,6 +584,48 @@ class TestHeuristicClassification:
         decision = _decide(_parse(payload), payload)
 
         assert decision.mode != "git_review"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Implement the specification for the API.",
+            "Dodaj obsługę specyfikacji OpenAPI.",
+            "Implement a mock payment provider.",
+            "Dodaj mock do trybu demonstracyjnego.",
+            "Add assertions to validate production input.",
+            "Implement the fixture importer for the application.",
+            "Extend the product suite with a new module.",
+            "Show geographic coverage on the map.",
+            "Implement testimony collection.",
+            "Sprawdź konfigurację i porównaj ją z README.",
+        ],
+    )
+    def test_non_testing_prompts_do_not_select_test(self, text):
+        payload = main_payload(text)
+
+        decision = _decide(_parse(payload), payload)
+
+        assert decision.mode != "test"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Write unit tests using mocks and fixtures.",
+            "Przygotuj testy jednostkowe dla modułu wandb.",
+            "Uruchom pytest i popraw czerwone przypadki.",
+            "Increase coverage of the scoring module.",
+            "Zwiększ coverage tego pakietu.",
+            "Add a test fixture for the parser.",
+            "Run the RSpec specs.",
+        ],
+    )
+    def test_explicit_testing_intent_still_selects_test(self, text):
+        payload = main_payload(text)
+
+        decision = _decide(_parse(payload), payload)
+
+        assert decision.mode == "test"
+        assert decision.source == SOURCE_HEURISTIC
 
     def test_explicit_git_review_override_short_circuits_scoring(self):
         payload = main_payload("przygotuj opis zmian")

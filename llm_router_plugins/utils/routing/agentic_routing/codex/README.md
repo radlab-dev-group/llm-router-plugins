@@ -255,9 +255,19 @@ Measured against the shipped configuration:
 | `testy`                                      | `test`      | 8.0   | yes → `0.889`      |
 | `Dlaczego nie działa ta funkcja?`            | `debug`     | 9.0   | yes → `0.900`      |
 | `review this PR`                             | `review`    | 9.0   | yes → `0.900`      |
-| `git review przed merge`                     | `git_review`| 11.0  | yes → `0.917`      |
+| `git review przed merge`                     | `git_review`| 9.0   | yes → `0.900`      |
 | `Przygotuj plan refactoru`                   | `review`    | 2.0   | no → semantic/fallback |
 | `Dodaj nowy endpoint do API`                 | —           | 0.0   | no → semantic/fallback |
+
+The shipped `test` signals deliberately exclude standalone `spec`, `mock`, `assertion`, `fixture`, `suite` and
+`coverage`: these can describe production code rather than testing. Test patterns match bounded test nouns rather
+than every `test…` prefix; coverage needs a concrete action such as `increase coverage` or `sprawdź coverage`.
+Test-framework names and explicit phrases such as `unit tests` and `test fixture` remain strong signals.
+
+Likewise, repository and hosting names, generic descriptions of changes and configuration conflicts do not by
+themselves establish `git_review`. Branch mentions are weak signals; reviewing or comparing a branch supplies the
+stronger evidence. Git commands, commit history and pull/merge requests remain explicit Git signals. These are
+heuristic safeguards, not a veto on the optional semantic layer or a general negation/history parser.
 
 The last two rows are the point of the design: **`plan` is never decided by keywords** (the CLI tells you, in Plan
 Mode, and a planning *sentence* in Default mode is not enough), and a plain imperative like "add an endpoint" is left to
