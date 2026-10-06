@@ -256,7 +256,7 @@ class CodexModeClassifier:
                 return decision
 
         routed = (
-            semantic.route(request.latest_user_text)
+            semantic.route(request)
             if semantic is not None and semantic.available
             else None
         )
@@ -264,7 +264,9 @@ class CodexModeClassifier:
             semantic.accept(routed) if semantic is not None else (None, 0.0)
         )
         if mode is not None:
-            return RoutingDecision(mode.name, SOURCE_SEMANTIC, similarity, similarity)
+            return RoutingDecision(
+                mode.name, SOURCE_SEMANTIC, similarity, similarity
+            )
 
         fallback_similarity = 0.0
         if semantic is not None:

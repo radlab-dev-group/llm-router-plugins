@@ -446,7 +446,9 @@ class CodexModeScorer:
             found = text_lower.find(needle, start)
             if found < 0:
                 return False
-            if found == 0 or not CodexModeScorer._is_word_char(text_lower[found - 1]):
+            if found == 0 or not CodexModeScorer._is_word_char(
+                text_lower[found - 1]
+            ):
                 return True
             start = found + 1
 
