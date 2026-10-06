@@ -118,12 +118,13 @@ class CodexSemanticLayer:
         Query the vector store once, translating failures into ``None``.
 
         The query is the request's semantic context
-        (:meth:`_build_semantic_context`): ``latest_user_text`` plus the text
-        of the last few assistant ``output_text`` parts, so the embedding sees
-        the recent conversation, not only the latest user message.  When that
-        context is empty the router is never called.  A router that raises
-        (unreadable index, embedding model error) disables the semantic answer
-        for this request only; the deterministic cascade keeps working.
+        (:meth:`_build_semantic_context`): ``latest_user_text`` followed by the
+        agent's last utterance, so the embedding sees what the agent is about
+        to work on, not the whole history of the thread.  When that context is
+        empty the router is never called.  Anything that raises while building
+        the context or querying the router is translated into ``None``, so a
+        broken request only loses its semantic answer, never the deterministic
+        cascade.
 
         Parameters
         ----------
@@ -143,14 +144,20 @@ class CodexSemanticLayer:
         if self._router is None or not request:
             return None
 
-        _text = self._build_semantic_context(request)
-
-        self._warn("CodexRouting: text used to route: %s", _text)
-
-        if not _text:
-            return None
+        text = None
         try:
-            result = self._router.route(_text)
+            text = self._build_semantic_context(request)
+        except Exception as exc:  # never let context building break routing
+            self._warn("CodexRouting: context building failed, ignoring it: %s", exc)
+            return None
+
+        if not text or not text.strip():
+            return None
+
+        self._info("CodexRouting: text used to route: %s", text)
+
+        try:
+            result = self._router.route(text)
         except Exception as exc:
             self._warn("CodexRouting: semantic lookup failed, ignoring it: %s", exc)
             return None
@@ -273,7 +280,7 @@ class CodexSemanticLayer:
 
     @staticmethod
     def _build_semantic_context(
-        request: CodexRequest, last_agent_messages: int = 5
+        request: CodexRequest, last_agent_messages: int = 1
     ) -> Optional[str]:
         """
         Assemble the text embedded for the semantic lookup.
@@ -331,3 +338,21 @@ class CodexSemanticLayer:
         """
         if self._logger is not None:
             self._logger.warning(message, *args)
+
+    def _info(self, message: str, *args: Any) -> None:
+        """
+        Log a info when a logger is available.
+
+        Parameters
+        ----------
+        message : str
+            The log message, optionally with ``%`` placeholders.
+        *args : Any
+            Arguments for the ``%`` placeholders.
+
+        Returns
+        -------
+        None
+        """
+        if self._logger is not None:
+            self._logger.info(message, *args)

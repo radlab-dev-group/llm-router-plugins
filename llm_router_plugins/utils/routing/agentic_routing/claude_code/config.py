@@ -547,9 +547,7 @@ class ClaudeCodeRoutingConfig(RoutingConfigBase):
             for pattern in mode.models:
                 validate_pattern(pattern)
 
-        claimed = find_duplicate_literals(
-            self.patterns, self.provider_prefixes
-        )
+        claimed = find_duplicate_literals(self.patterns, self.provider_prefixes)
         if claimed:
             detail = ", ".join(
                 f"'{pattern}' claimed by modes '{first}' and '{second}'"

@@ -607,48 +607,47 @@ class CodexPayloadParser:
     @staticmethod
     def _assistant_messages(items: List[Any]) -> Optional[List[Dict[str, Any]]]:
         """
-        Filters and returns assistant messages from a list of message-like items.
+        Return copies of the assistant messages of *items*.
 
-        This function processes a list of items and extracts those that
-        represent messages with a role of "assistant". If no such items are
-        found, the method returns None.
+        Only ``type == "message"`` / ``role == "assistant"`` items count, and
+        each returned copy keeps just its ``output_text`` content parts, so
+        the semantic layer sees agent utterances and nothing else.  The
+        original payload is never touched — the copies are new dicts — and an
+        item without any ``output_text`` part is skipped.
 
         Parameters
         ----------
         items : List[Any]
-            A list of dictionaries or message-like items to be processed. Each
-            item is expected to have a "type" and "role" key.
+            The ``input`` items of the payload.
 
         Returns
         -------
         Optional[List[Dict[str, Any]]]
-            A list of filtered dictionaries representing "assistant" messages.
-            If no matching messages are found, ``None`` is returned.
+            The new message dicts, oldest first, or ``None`` when the request
+            carries no assistant message.
         """
         messages: List[Dict[str, Any]] = []
-
         for item in items:
             if not isinstance(item, dict):
                 continue
             if item.get("type") != "message" or item.get("role") != "assistant":
                 continue
-
-            _content = item.get("content", [])
-            if not isinstance(_content, list) or not _content:
+            content = item.get("content")
+            if not isinstance(content, list):
                 continue
-
-            _n_content = [
-                _c_itm
-                for _c_itm in _content
-                if isinstance(_c_itm, dict) and _c_itm.get("type") == "output_text"
+            output_parts = [
+                part
+                for part in content
+                if isinstance(part, dict)
+                and part.get("type") == "output_text"
+                and isinstance(part.get("text"), str)
             ]
-            if not _n_content:
+            if not output_parts:
                 continue
-
-            item["content"] = _n_content
-            messages.append(item)
-
-        return messages if messages else None
+            messages.append(
+                {"type": "message", "role": "assistant", "content": output_parts}
+            )
+        return messages
 
     @staticmethod
     def _is_title_call(
