@@ -141,6 +141,8 @@ class CodexSemanticLayer:
             return None
 
         _text = self._build_semantic_context(request)
+        if not _text:
+            return None
         try:
             result = self._router.route(_text)
         except Exception as exc:
@@ -198,14 +200,14 @@ class CodexSemanticLayer:
                 )
         return None, similarity
 
-    def resolve(self, text: str) -> Tuple[Optional[CodexMode], float]:
+    def resolve(self, request: CodexRequest) -> Tuple[Optional[CodexMode], float]:
         """
-        Resolve *text* to a configured mode through the vector store.
+        Resolve *request* to a configured mode through the vector store.
 
         Parameters
         ----------
-        text : str
-            The request text.  Empty text never reaches the router.
+        request : CodexRequest
+            The parsed request.  An empty context never reaches the router.
 
         Returns
         -------
@@ -217,7 +219,7 @@ class CodexSemanticLayer:
         ------
         None
         """
-        return self.accept(self.route(text))
+        return self.accept(self.route(request))
 
     def similarity_for(
         self,
