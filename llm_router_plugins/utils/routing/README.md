@@ -634,7 +634,7 @@ plugins' configuration: `auto` traffic stays with the semantic plugins, `auto_co
 |-----------------|-----------------------------------------------------------------------------------------|
 | `payload.py`    | `CodexRequest` (incl. `assistant_messages`) and `CodexPayloadParser` — read-only normalizer |
 | `scoring.py`    | `CodexModeScorer` (`detect_mode`, `score_mode`, `score_to_similarity`) — keyword scoring |
-| `semantic.py`   | `CodexSemanticLayer` — availability gate, `_build_semantic_context`, cosine lookup        |
+| `semantic.py`   | `CodexSemanticLayer` — independent intent/phase encoding, cosine threshold + margin      |
 | `classifier.py` | `CodexModeClassifier` and `RoutingDecision` — the resolution cascade                  |
 | `config.py`     | `CodexRoutingConfig`, `CodexMode`, defaults, validation, env overrides                   |
 | `plugin.py`     | `CodexRoutingPlugin` — trigger check, cascade, payload annotation                        |
@@ -686,7 +686,7 @@ Mode resolution is strictly ordered — the first layer that answers wins:
 | 3 | **Class: aux title**   | `class`              | Auxiliary title generation on a system thread — never keyword-scored                           | no    |
 | 4 | **Collaboration mode** | `collaboration_mode` | The CLI declared Plan Mode in the latest `<collaboration_mode>` block                          | no    |
 | 5 | **Heuristic**          | `heuristic`          | Keywords (default 1.0), `text:weight` phrases (default 2.0), regex patterns (default 3.0)      | no    |
-| 6 | **Semantic**           | `semantic`           | Embedding cosine similarity over mode descriptions/examples, accepted at `similarity >= threshold`; reached only when 1-5 stay silent | yes   |
+| 6 | **Semantic**           | `semantic`           | Complete balanced cosine ranking, accepted at threshold + minimum lead over runner-up; reached only when deterministic layers stay silent | yes   |
 | 7 | **Fallback**           | `fallback`           | The configured `fallback_mode` (`implement`)                                                    | no    |
 
 Details worth knowing:
@@ -737,6 +737,12 @@ Notes:
   unaffected; only the semantic and fallback similarities drop out.
 - The index persists to disk through the shared `resolve_persist_dir()` helper (`PERSIST_DIR`,
   `settings.vector_store_path`).
+- Codex opts into `settings.semantic.aggregation: "per_target_top_k"`: all indexed fragments are scored,
+  then each mode contributes the same count of its best fragments (up to `top_k`). Acceptance requires a complete
+  finite ranking, `threshold` and a strictly positive lead of at least `min_margin`; ties abstain.
+  `intent_max_chars` and `phase_max_chars` independently bound sections encoded separately before one lookup.
+  Other routing plugins retain legacy `global_top_k` aggregation. See the [Codex reference](agentic_routing/codex/README.md#step-5--semantic-similarity-optional)
+  for the full contract and required custom-config migration.
 
 ### 3.5 Configuration
 
@@ -755,6 +761,10 @@ Notes:
     "semantic": {
       "enabled": true,
       "threshold": 0.51,
+      "aggregation": "per_target_top_k",
+      "min_margin": 0.05,
+      "intent_max_chars": 2000,
+      "phase_max_chars": 2000,
       "top_k": 3,
       "chunk_size": 256,
       "chunk_overlap": 64

@@ -2434,8 +2434,12 @@ class _StubRouter:
             "target_name": self.target_name,
             "similarity": self.similarity,
         }
-        if self.all_scores is not None:
-            result["all_scores"] = self.all_scores
+        result["all_scores"] = self.all_scores if self.all_scores is not None else [
+            {"target": mode.name, "similarity": (
+                self.similarity if mode.name == self.target_name else -0.5
+            )}
+            for mode in _config().codex_modes if mode.name not in CLASS_ROUTED_MODES
+        ]
         return result
 
 
@@ -2467,13 +2471,22 @@ class _CaptureLogger:
         )
 
 
-def _semantic_layer(router, threshold=0.5, modes=None, logger=None):
+def _semantic_layer(
+    router, threshold=0.5, modes=None, logger=None,
+    intent_max_chars=None, phase_max_chars=None,
+):
     """Build a semantic layer over *router* for the shipped mode table."""
+    config = _config()
     return CodexSemanticLayer(
         router,
         threshold,
-        modes if modes is not None else _config().mode_by_name,
+        modes if modes is not None else config.mode_by_name,
         logger,
+        min_margin=config.semantic_min_margin,
+        intent_max_chars=(config.semantic_intent_max_chars
+                          if intent_max_chars is None else intent_max_chars),
+        phase_max_chars=(config.semantic_phase_max_chars
+                         if phase_max_chars is None else phase_max_chars),
     )
 
 
@@ -2509,7 +2522,7 @@ class TestSemanticSimilarity:
 
     def test_threshold_acceptance_is_inclusive(self):
         mode, similarity = _semantic_layer(_StubRouter()).accept(
-            {"target_name": "test", "similarity": 0.5}
+            _StubRouter("test", 0.5).route("query")
         )
 
         assert mode.name == "test"
@@ -2613,7 +2626,10 @@ class TestSemanticSimilarity:
                                    _mode("test", keywords=("alpha",), weights={"alpha": scores[0]}),
                                    _mode("review", keywords=("beta",), weights={"beta": scores[1]})),
         )
-        router = _StubRouter("review", 0.9)
+        router = _StubRouter("review", 0.9, all_scores=[
+            {"target": mode.name, "similarity": 0.9 if mode.name == "review" else 0.2}
+            for mode in config.codex_modes
+        ])
         payload = main_payload("alpha beta")
         classifier = CodexModeClassifier(
             config, semantic=_semantic_layer(router, modes=config.mode_by_name)
@@ -2713,7 +2729,7 @@ class TestSemanticSimilarity:
         request = _parse(payload, max_chars=100)
         router = _StubRouter()
 
-        _semantic_layer(router).route(request)
+        _semantic_layer(router, intent_max_chars=50, phase_max_chars=49).route(request)
 
         assert len(router.calls[0]) <= 100
         assert router.calls[0].endswith("Sprawdzam zgodność konfiguracji.")
@@ -2739,7 +2755,9 @@ class TestSemanticSimilarity:
         ])
         router = _StubRouter()
 
-        _semantic_layer(router).route(_parse(payload, max_chars=200))
+        _semantic_layer(router, intent_max_chars=100, phase_max_chars=99).route(
+            _parse(payload, max_chars=200)
+        )
 
         assert len(router.calls[0]) <= 200
         assert 'git status' in router.calls[0]
@@ -2769,10 +2787,10 @@ class TestSemanticSimilarity:
         router = _StubRouter()
         layer = _semantic_layer(router, logger=logger)
 
-        def boom(request):
+        def boom(request, intent_max_chars, phase_max_chars):
             raise ValueError("nope")
 
-        layer.__dict__["_build_semantic_context"] = boom
+        layer.__dict__["_build_semantic_parts"] = boom
 
         assert layer.route(_parse(payload)) is None
         assert router.calls == []
@@ -2892,6 +2910,7 @@ class TestSemanticSimilarity:
         assert captured["chunk_size"] == config.chunk_size
         assert captured["chunk_overlap"] == config.chunk_overlap
         assert captured["top_k"] == config.top_k
+        assert captured["aggregation"] == config.semantic_aggregation
         assert captured["persist_dir"] == str(tmp_path)
         assert tuple(m.name for m in captured["routing_targets"]) == (
             "plan",

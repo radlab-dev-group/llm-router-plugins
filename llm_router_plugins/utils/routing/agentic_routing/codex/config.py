@@ -16,6 +16,10 @@ JSON structure::
         "semantic": {
           "enabled": true,
           "threshold": 0.51,
+          "aggregation": "per_target_top_k",
+          "min_margin": 0.05,
+          "intent_max_chars": 2000,
+          "phase_max_chars": 2000,
           "top_k": 3,
           "chunk_size": 256,
           "chunk_overlap": 64
@@ -101,7 +105,7 @@ class CodexRoutingConfig(RoutingConfigBase):
     similarity_threshold : float
         Minimum cosine similarity required for a semantic match to be accepted.
     top_k : int
-        Number of nearest neighbours to retrieve during routing queries.
+        Maximum fragment count per mode with per-target aggregation.
     chunk_size : int
         Number of tokens per chunk when splitting mode text.
     chunk_overlap : int
@@ -111,9 +115,7 @@ class CodexRoutingConfig(RoutingConfigBase):
     codex_modes : Tuple[CodexMode, ...]
         Immutable sequence of :class:`CodexMode` dataclasses, one per work mode.
     classify_max_chars : int
-        Character budget of the text the keyword and semantic layers see: the
-        newest user message is always kept whole, older ones are appended while
-        the budget holds.
+        Parser's optional history budget. Semantic section budgets are separate.
     phase : CodexPhaseConfig
         Validated current-activity rules from the supplied ``settings.phase``.
     heuristic_min_margin : float
@@ -122,6 +124,12 @@ class CodexRoutingConfig(RoutingConfigBase):
         Regex matching locally forbidden action clauses, not generic negation.
     heuristic_weights : Dict[str, float]
         Default keyword, phrase and pattern weights from the supplied config.
+    semantic_aggregation : str
+        ``per_target_top_k`` for a complete balanced ranking, or legacy ``global_top_k``.
+    semantic_min_margin : float
+        Minimum cosine lead over the runner-up; ties always abstain.
+    semantic_intent_max_chars, semantic_phase_max_chars : int
+        Independent character budgets applied before encoding each section.
     """
 
     # RoutingConfigBase hooks (ClassVar — not dataclass fields)
@@ -149,6 +157,10 @@ class CodexRoutingConfig(RoutingConfigBase):
     heuristic_negation_pattern: str
     heuristic_weights: Dict[str, float]
     phase: CodexPhaseConfig
+    semantic_aggregation: str
+    semantic_min_margin: float
+    semantic_intent_max_chars: int
+    semantic_phase_max_chars: int
     classify_max_chars: int = DEFAULT_CLASSIFY_MAX_CHARS
 
     @property
@@ -224,7 +236,24 @@ class CodexRoutingConfig(RoutingConfigBase):
             for m in raw["codex_modes"]
         )
 
-        semantic = settings.get("semantic", {}) or {}
+        semantic = settings.get("semantic")
+        if not isinstance(semantic, dict):
+            raise ValueError("settings.semantic must be an object")
+        for key in ("aggregation", "min_margin", "intent_max_chars", "phase_max_chars"):
+            if key not in semantic:
+                raise KeyError(f"Missing required field '{key}' in settings.semantic")
+        if semantic["aggregation"] not in ("global_top_k", "per_target_top_k"):
+            raise ValueError("settings.semantic.aggregation is not a supported strategy")
+        margin = semantic["min_margin"]
+        if (
+            isinstance(margin, bool) or not isinstance(margin, (int, float))
+            or not math.isfinite(margin) or not 0 <= margin <= 2
+        ):
+            raise ValueError("settings.semantic.min_margin must be finite and in [0, 2]")
+        for key in ("intent_max_chars", "phase_max_chars"):
+            value = semantic[key]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"settings.semantic.{key} must be a positive integer")
         if "phase" in settings and not isinstance(settings["phase"], dict):
             raise ValueError("settings.phase must be an object")
         chunk_size = int(semantic.get("chunk_size", 256))
@@ -241,6 +270,10 @@ class CodexRoutingConfig(RoutingConfigBase):
             or settings.get("vector_store_path"),
             semantic_enabled=bool(semantic.get("enabled", True)),
             similarity_threshold=float(semantic.get("threshold", 0.51)),
+            semantic_aggregation=semantic["aggregation"],
+            semantic_min_margin=float(margin),
+            semantic_intent_max_chars=semantic["intent_max_chars"],
+            semantic_phase_max_chars=semantic["phase_max_chars"],
             top_k=top_k,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
@@ -572,6 +605,20 @@ class CodexRoutingConfig(RoutingConfigBase):
 
         if self.top_k < 1:
             raise ValueError(f"CodexRouting: top_k must be >= 1, got {self.top_k}")
+
+        if self.semantic_aggregation not in ("global_top_k", "per_target_top_k"):
+            raise ValueError("CodexRouting: unsupported semantic_aggregation")
+        if (
+            isinstance(self.semantic_min_margin, bool)
+            or not isinstance(self.semantic_min_margin, (int, float))
+            or not math.isfinite(self.semantic_min_margin)
+            or not 0 <= self.semantic_min_margin <= 2
+        ):
+            raise ValueError("CodexRouting: semantic_min_margin must be finite and in [0, 2]")
+        for name in ("semantic_intent_max_chars", "semantic_phase_max_chars"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"CodexRouting: {name} must be a positive integer")
 
         for name in ("heuristic_min_score", "heuristic_min_margin"):
             value = getattr(self, name)

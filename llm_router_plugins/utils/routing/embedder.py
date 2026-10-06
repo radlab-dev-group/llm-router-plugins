@@ -78,11 +78,14 @@ class EmbeddingRouterConfig:
     chunk_overlap : int
         Number of tokens overlapping between adjacent chunks.
     top_k : int
-        Number of nearest neighbours to retrieve during routing queries.
+        Global neighbour limit, or maximum fragments per target in balanced mode.
     routing_targets : Tuple[Any, ...]
         Routing targets to index — any object exposing ``name``, ``model_name``,
         ``description`` and ``examples`` (e.g. :class:`RoutingTarget` or its
         subclasses).
+    aggregation : str
+        ``global_top_k`` preserves legacy behaviour. ``per_target_top_k`` scores
+        all targets using an equal count of their best available fragments.
     """
 
     embedding_model: str
@@ -90,6 +93,7 @@ class EmbeddingRouterConfig:
     chunk_overlap: int
     top_k: int
     routing_targets: Tuple[Any, ...]
+    aggregation: str = "global_top_k"
 
 
 class EmbeddingRouter:
@@ -134,6 +138,10 @@ class EmbeddingRouter:
             If *config* contains no routing targets.
         """
         self._config = config
+        if getattr(config, "aggregation", "global_top_k") not in (
+            "global_top_k", "per_target_top_k",
+        ):
+            raise ValueError("Unknown embedding score aggregation")
         self._logger = logger
         self._persist_dir: Optional[str] = persist_dir
         self._model: Optional["SentenceTransformer"] = None
@@ -207,8 +215,8 @@ class EmbeddingRouter:
             Dictionary with keys:
             - ``model_name`` (str): the model to use
             - ``target_name`` (str): the matched target name
-            - ``similarity`` (float): cosine similarity score (0–1)
-            - ``all_scores`` (List[dict]): full ranking
+            - ``similarity`` (float): cosine similarity score (-1–1)
+            - ``all_scores`` (List[dict]): ranking (complete in per-target mode)
 
         Raises
         ------
@@ -220,9 +228,38 @@ class EmbeddingRouter:
         assert self._faiss_index is not None
 
         user_embedding = self._encode_query(user_message)  # (1, embed_dim)
+        return self._route_embedding(user_embedding)
+
+    def route_context(self, parts: Tuple[str, ...]) -> Dict[str, Any]:
+        """Encode each context section independently, then perform one lookup.
+
+        Each section has its own query-window budget, so a long first section
+        cannot displace the subsequent section before embedding.
+        """
+        self._ensure_initialized()
+        vectors = [self._encode_query(part) for part in parts if part.strip()]
+        if not vectors:
+            raise ValueError("Routing context must contain non-empty text")
+        embedding = np.mean(np.concatenate(vectors, axis=0), axis=0)
+        norm = float(np.linalg.norm(embedding))
+        if norm > 0:
+            embedding = embedding / norm
+        return self._route_embedding(embedding.reshape(1, -1))
+
+    def _route_embedding(self, user_embedding: np.ndarray) -> Dict[str, Any]:
+        """Aggregate a query's similarities using the configured strategy."""
+        assert self._faiss_index is not None
+        balanced = getattr(self._config, "aggregation", "global_top_k") == "per_target_top_k"
+        target_models: Dict[str, str] = {
+            t.name: t.model_name for t in self._config.routing_targets
+        }
 
         # FAISS query
-        k = min(self._config.top_k, self._faiss_index.ntotal)
+        k = self._faiss_index.ntotal if balanced else min(
+            self._config.top_k, self._faiss_index.ntotal
+        )
+        if k < 1:
+            raise ValueError("Routing index contains no vectors")
         scores, doc_ids = self._faiss_index.search(user_embedding, k)
 
         # Aggregate scores per target
@@ -231,12 +268,26 @@ class EmbeddingRouter:
             if doc_id < 0:
                 continue
             tname = self._doc_store.get(doc_id, "unknown")
-            target_scores.setdefault(tname, []).append(float(s))
+            if balanced and tname not in target_models:
+                continue
+            if balanced and not np.isfinite(s):
+                raise ValueError("Routing index returned a non-finite similarity")
+            # Unit-vector float32 inner products can slightly exceed cosine bounds.
+            similarity = float(np.clip(s, -1.0, 1.0)) if balanced else float(s)
+            target_scores.setdefault(tname, []).append(similarity)
+
+        if balanced:
+            if not target_models or set(target_scores) != set(target_models):
+                raise ValueError("Routing index is missing configured targets; rebuild it")
+            per_target_k = min(
+                self._config.top_k, min(len(sims) for sims in target_scores.values())
+            )
+            target_scores = {
+                name: sorted(sims, reverse=True)[:per_target_k]
+                for name, sims in target_scores.items()
+            }
 
         # Build ranked list
-        target_models: Dict[str, str] = {
-            t.name: t.model_name for t in self._config.routing_targets
-        }
         all_scores: List[Tuple[str, float, str]] = []
         for tname, sims in target_scores.items():
             avg_sim = float(np.mean(sims))

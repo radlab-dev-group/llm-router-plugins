@@ -143,6 +143,9 @@ class CodexRoutingPlugin(PluginInterface):
                     threshold=self._config.similarity_threshold,
                     mode_by_name=self._config.mode_by_name,
                     logger=self._logger,
+                    min_margin=self._config.semantic_min_margin,
+                    intent_max_chars=self._config.semantic_intent_max_chars,
+                    phase_max_chars=self._config.semantic_phase_max_chars,
                 )
 
         self._classifier = CodexModeClassifier(
@@ -262,6 +265,7 @@ class CodexRoutingPlugin(PluginInterface):
             logger=self._logger,
             persist_dir=self._config.vector_store_path,
             missing_deps_hint=_MISSING_DEPENDENCIES_MESSAGE,
+            aggregation=self._config.semantic_aggregation,
         )
 
     def _info(self, message: str, *args: Any) -> None:

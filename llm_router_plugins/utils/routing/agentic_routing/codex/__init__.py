@@ -50,6 +50,10 @@ contributes embedding cosine similarity over the mode descriptions and
 examples through the shared BiEncoder + FAISS router
 (``llm_router_plugins.utils.routing.embedder``); without it — or without
 ``faiss`` installed — the layer steps aside and nothing else changes.
+Codex opts into ``settings.semantic.aggregation = per_target_top_k``: complete,
+balanced per-mode scores must meet both the threshold and ``min_margin``.
+``intent_max_chars`` and ``phase_max_chars`` budget independently encoded
+context sections. These four settings are required in the supplied JSON.
 
 Within each mode, scoring keeps the strongest non-overlapping matches, preferring
 longer spans at equal weights; each declared rule contributes at most once.

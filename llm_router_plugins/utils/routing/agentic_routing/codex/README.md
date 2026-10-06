@@ -334,17 +334,25 @@ Enabled with `settings.semantic.enabled`, disabled for a single process with
 - An `EmbeddingRouter` indexes `description` + `examples` of the six non-class-routed modes with a sliding window
   (`chunk_size` 256, `chunk_overlap` 64) using a sentence-transformers BiEncoder.
 - Index vectors are L2-normalized and searched with FAISS inner product, which is cosine similarity.
-- A query longer than the embedding model's `max_seq_length` is split into overlapping token windows; at most the
-  first `MAX_QUERY_WINDOWS = 4` windows are encoded and their unit vectors are averaged and renormalized, so a huge
-  prompt costs a bounded amount of compute.
-- `top_k` hits are grouped per mode and **averaged**; the best mode wins and is accepted only when its average cosine
-  reaches `similarity_threshold` (`0.51` by default).
-- One lookup serves both the accept decision and the fallback mode's reported similarity, so a request never embeds the
-  same text twice.
-- The query is built by `CodexSemanticLayer._build_semantic_context(request)` from `request.intent_text`, the
-  agent's last active-turn utterance and its latest linked tool call/result. It is capped at `classify_max_chars`,
-  reserving up to half the budget for the phase so a huge user command cannot push current activity out of the query.
-  Earlier assistant turns never cross a new user-command boundary. An empty query does not call the router.
+- With `aggregation: "per_target_top_k"`, FAISS retrieves every indexed fragment. Each mode contributes the same
+  number of its best fragments: `min(top_k, smallest indexed mode's fragment count)`. Their cosines are averaged,
+  producing a complete `all_scores` ranking, including negative similarities. Larger example collections do not
+  contribute more votes. A missing indexed mode rejects the lookup rather than inventing a score.
+- Acceptance requires both `threshold` (shipped value `0.51`) and a strictly positive lead over the runner-up of
+  at least `min_margin` (shipped value `0.05`). Ties, incomplete rankings, inconsistent winners and malformed scores
+  abstain. A single configured semantic mode needs only the threshold. Margin `0.05` is a starting setting,
+  not a measured or calibrated optimum.
+- `CodexSemanticLayer._build_semantic_parts` separately budgets current `request.intent_text` and phase context
+  (last active-turn utterance plus latest linked tool call/result). `intent_max_chars` and `phase_max_chars`
+  are both `2000` in the shipped JSON and are independent of the parser's `classify_max_chars` history budget.
+  Earlier assistant turns never cross a new user-command boundary. Empty context does not call the router.
+- The shared router's `route_context(parts)` encodes those sections separately, then averages and normalizes their
+  vectors for one FAISS lookup. Each section has its own bounded token-window budget (`MAX_QUERY_WINDOWS = 4`),
+  so a long intent cannot displace the phase before embedding. One lookup serves acceptance and fallback similarity.
+- Other routing plugins retain legacy `global_top_k` aggregation unless explicitly opted in. Codex can also select
+  that strategy, but an incomplete global ranking cannot meet its acceptance contract. Injected routers exposing
+  only `route(text)` receive concatenated, budgeted sections; they must return a complete ranking to be accepted,
+  and do not gain independent section encoding automatically.
 - The model is loaded with `device="cpu"` and `trust_remote_code=True` at plugin construction. A router that raises at
   query time (broken index, empty vector) disables only the semantic answer for that request.
 
@@ -438,6 +446,10 @@ it after logging — the plugin itself only guarantees that the request shape Co
     "semantic": {
       "enabled": true,
       "threshold": 0.51,
+      "aggregation": "per_target_top_k",  // required
+      "min_margin": 0.05,                 // required
+      "intent_max_chars": 2000,           // required
+      "phase_max_chars": 2000,            // required
       "top_k": 3,
       "chunk_size": 256,
       "chunk_overlap": 64
@@ -460,7 +472,8 @@ it after logging — the plugin itself only guarantees that the request shape Co
 
 Required keys: top-level `settings` and `codex_modes`; inside `settings`, `trigger_model`, `fallback_mode`,
 `heuristic_min_margin`, `heuristic_negation_pattern`, `heuristic_weights` and complete `phase`; inside
-each mode, `name`, `model_name` and `description`. Other settings retain their existing defaults (see
+each mode, `name`, `model_name` and `description`. The `semantic` object must explicitly supply `aggregation`,
+`min_margin`, `intent_max_chars` and `phase_max_chars`, even when disabled. Other settings retain their existing defaults (see
 [Defaults at a glance](#defaults-at-a-glance)). `description` and `examples` are not decoration — with the semantic
 layer enabled they *are* the classifier's training set.
 
@@ -475,6 +488,12 @@ loading chooses the bundled file only when no custom config is supplied.
 Per-keyword `weights` and phrase `:weight` suffixes still take precedence. All three weights must be supplied;
 values must be finite, nonnegative numbers. Changing them requires only changes to the loaded JSON, not edits
 to the scorer.
+
+The new semantic settings are taken only from the supplied JSON, never merged with another config.
+Older custom configurations must add all four explicitly. `aggregation` accepts `per_target_top_k` or
+`global_top_k`; `min_margin` must be finite in `[0, 2]` (cosine differences), and both section budgets must
+be positive integers. Changing aggregation, margin or query budgets does not require rebuilding the index;
+changing descriptions, examples, modes or the embedding model does. These new settings have no separate env overrides.
 
 ### Environment variables
 
@@ -492,7 +511,7 @@ construction** (so after a restart, never mid-session).
 | `…_HEURISTIC_ENABLED`                                               | `1/0`, `true/false`, `yes/no`, `on/off`               |
 | `…_HEURISTIC_MIN_SCORE`                                             | Minimum keyword score to accept a heuristic hit       |
 | `…_HEURISTIC_MIN_MARGIN`                                            | Minimum score lead over the runner-up (default `1.0`; ties always rejected) |
-| `…_CLASSIFY_MAX_CHARS`                                              | Separate history budget and total semantic-query cap  |
+| `…_CLASSIFY_MAX_CHARS`                                              | Parser's optional history budget                      |
 | `…_MODEL`                                                           | **Embedding** model for the semantic layer            |
 | `…_SEMANTIC_ENABLED`                                                | Toggle the embedding layer                            |
 | `…_SIMILARITY_THRESHOLD`                                            | Minimum cosine similarity for a semantic hit          |
@@ -738,6 +757,7 @@ Then confirm the router logged `mode=test source=heuristic model=qwen/Qwen3.8-27
 
 ```bash
 python -m pytest tests/test_agentic_routing_codex.py -q      # plugin, cascade, scoring, config
+python -m pytest tests/test_codex_semantic_ranking.py -q     # balanced ranking, margin, section encoding
 python -m pytest tests/test_routing_common.py -q             # shared routing plumbing
 ```
 
@@ -775,7 +795,7 @@ title, compaction) the payload builders mirror.
 | `payload.py`      | Codex wire format → immutable `CodexRequest`; request classes; user-text assembly |
 | `scoring.py`      | `CodexModeScorer`: deduplicated keyword / phrase / regex scoring, local negations, `ModeScore` / `SignalMatch` ranking |
 | `classifier.py`   | `CodexModeClassifier` cascade, `HEURISTIC_MODES`, `CLASS_ROUTED_MODES`, `RoutingDecision` |
-| `semantic.py`     | optional cosine-similarity layer, acceptance threshold, fail-open lookups   |
+| `semantic.py`     | optional cosine ranking, threshold + margin, section budgets, fail-open lookups |
 | `config.py`       | JSON loading, env overrides, `validate_args`, `lint_signals`                |
 | `plugin.py`       | `CodexRoutingPlugin`: trigger gate, router construction, payload annotation  |
 
@@ -793,13 +813,16 @@ title, compaction) the payload builders mirror.
 | `settings.classify_max_chars`| `4000`                                |
 | `settings.semantic.enabled`  | `true`                                |
 | `settings.semantic.threshold`| `0.51`                                |
+| `settings.semantic.aggregation` | `per_target_top_k`                  |
+| `settings.semantic.min_margin` | `0.05`                               |
+| `settings.semantic.intent_max_chars` / `phase_max_chars` | `2000` / `2000` |
 | `settings.semantic.top_k`    | `3`                                   |
 | `settings.semantic.chunk_size` / `chunk_overlap` | `256` / `64`          |
 | keyword / phrase / pattern weight | `1.0` / `2.0` / `3.0`            |
 | heuristic candidate order    | `test`, `git_review`, `review`, `debug` |
 | class-routed modes           | `compaction`, `aux_title`             |
 | embedding device             | `cpu`                                 |
-| `MAX_QUERY_WINDOWS`          | `4` (over-length query windows)       |
+| `MAX_QUERY_WINDOWS`          | `4` per semantic context section      |
 
 ### Reference deployment (example — your hosts will differ)
 

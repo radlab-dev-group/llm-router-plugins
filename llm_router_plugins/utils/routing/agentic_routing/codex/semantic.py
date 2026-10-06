@@ -20,11 +20,15 @@ same text twice.
 """
 
 import logging
+import math
+from numbers import Real
 
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
     CodexRequest,
+    REQUEST_CLASS_AUX_TITLE,
+    REQUEST_CLASS_COMPACTION,
 )
 
 from llm_router_plugins.utils.routing.agentic_routing.codex.config import CodexMode
@@ -53,6 +57,10 @@ class CodexSemanticLayer:
         Lookup table used to translate the router target name into a mode.
     logger : logging.Logger, optional
         Logger instance.  If ``None``, logging is skipped.
+    min_margin : float
+        Required cosine lead over the runner-up; ties always abstain.
+    intent_max_chars, phase_max_chars : int
+        Independent context-section budgets from the supplied configuration.
 
     Raises
     ------
@@ -65,6 +73,10 @@ class CodexSemanticLayer:
         threshold: float,
         mode_by_name: Mapping[str, CodexMode],
         logger: Optional[logging.Logger] = None,
+        *,
+        min_margin: float,
+        intent_max_chars: int,
+        phase_max_chars: int,
     ) -> None:
         """
         Store the router, acceptance threshold and mode lookup table.
@@ -92,6 +104,13 @@ class CodexSemanticLayer:
         self._threshold = float(threshold)
         self._mode_by_name = mode_by_name
         self._logger = logger
+        self._min_margin = min_margin
+        self._intent_max_chars = intent_max_chars
+        self._phase_max_chars = phase_max_chars
+        self._semantic_modes = {
+            name for name in mode_by_name
+            if name not in (REQUEST_CLASS_AUX_TITLE, REQUEST_CLASS_COMPACTION)
+        }
 
     @property
     def available(self) -> bool:
@@ -117,10 +136,9 @@ class CodexSemanticLayer:
         """
         Query the vector store once, translating failures into ``None``.
 
-        The query is the request's semantic context
-        (:meth:`_build_semantic_context`): ``latest_user_text`` followed by the
-        agent's last utterance, so the embedding sees what the agent is about
-        to work on, not the whole history of the thread.  When that context is
+        The query comprises independently budgeted intent and phase sections
+        (:meth:`_build_semantic_parts`). The shared router encodes each section
+        separately before a single vector-store lookup. When that context is
         empty the router is never called.  Anything that raises while building
         the context or querying the router is translated into ``None``, so a
         broken request only loses its semantic answer, never the deterministic
@@ -144,20 +162,23 @@ class CodexSemanticLayer:
         if self._router is None or not request:
             return None
 
-        text = None
         try:
-            text = self._build_semantic_context(request)
+            parts = self._build_semantic_parts(
+                request, self._intent_max_chars, self._phase_max_chars
+            )
         except Exception as exc:  # never let context building break routing
             self._warn("CodexRouting: context building failed, ignoring it: %s", exc)
             return None
 
-        if not text or not text.strip():
+        if not parts:
             return None
 
-        self._info("CodexRouting: text used to route: %s", text)
-
         try:
-            result = self._router.route(text)
+            route_context = getattr(self._router, "route_context", None)
+            result = (
+                route_context(parts) if callable(route_context)
+                else self._router.route("\n".join(parts))
+            )
         except Exception as exc:
             self._warn("CodexRouting: semantic lookup failed, ignoring it: %s", exc)
             return None
@@ -180,38 +201,69 @@ class CodexSemanticLayer:
         Tuple[Optional[CodexMode], float]
             The accepted mode and its similarity, or ``(None, similarity)``
             when the router produced nothing usable — no target, an unknown
-            target, or a similarity below the configured threshold.
+            target, an incomplete ranking, or insufficient similarity/margin.
 
         Raises
         ------
         None
         """
-        if not result:
+        if not isinstance(result, Mapping) or not result:
             return None, 0.0
 
-        similarity = float(result.get("similarity", 0.0) or 0.0)
+        similarity = self._cosine(result.get("similarity"))
+        if similarity is None:
+            return None, 0.0
         target = str(result.get("target_name", "") or "")
         mode = self._mode_by_name.get(target)
-
-        if mode is not None and similarity >= self._threshold:
+        entries = result.get("all_scores")
+        scores = {}
+        if not isinstance(entries, (list, tuple)):
+            return None, similarity
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                return None, similarity
+            name = entry.get("target")
+            score = self._cosine(entry.get("similarity"))
+            if (
+                not isinstance(name, str) or name not in self._semantic_modes
+                or name in scores or score is None
+            ):
+                return None, similarity
+            scores[name] = score
+        if set(scores) != self._semantic_modes or target not in scores:
+            self._info("CodexRouting: incomplete semantic ranking, ignoring it")
+            return None, similarity
+        if not math.isclose(similarity, scores[target], rel_tol=1e-6, abs_tol=1e-7):
+            return None, similarity
+        runner_up = max(
+            (score for name, score in scores.items() if name != target), default=None
+        )
+        margin = scores[target] - runner_up if runner_up is not None else None
+        self._info(
+            "CodexRouting: semantic target=%s similarity=%.4f runner_up=%s margin=%s",
+            target, similarity, runner_up, margin,
+        )
+        if similarity < self._threshold:
+            self._info(
+                "CodexRouting: semantic match '%s' similarity=%.4f is below threshold %.4f",
+                target, similarity, self._threshold,
+            )
+        if mode is not None and similarity >= self._threshold and (
+            margin is None or (margin > 0 and (
+                margin >= self._min_margin
+                or math.isclose(margin, self._min_margin, rel_tol=0, abs_tol=1e-12)
+            ))
+        ):
             return mode, similarity
-
-        if self._logger is not None:
-            if mode is None:
-                self._logger.info(
-                    "CodexRouting: semantic target '%s' is not a configured "
-                    "mode, ignoring it",
-                    target or "unknown",
-                )
-            else:
-                self._logger.info(
-                    "CodexRouting: semantic match '%s' similarity=%.4f is "
-                    "below threshold %.4f, ignoring it",
-                    target,
-                    similarity,
-                    self._threshold,
-                )
         return None, similarity
+
+    @staticmethod
+    def _cosine(value: Any) -> Optional[float]:
+        """Reject malformed and non-finite scores instead of inventing confidence."""
+        if isinstance(value, bool) or not isinstance(value, Real):
+            return None
+        number = float(value)
+        return number if math.isfinite(number) and -1 <= number <= 1 else None
 
     def resolve(self, request: CodexRequest) -> Tuple[Optional[CodexMode], float]:
         """
@@ -257,7 +309,7 @@ class CodexSemanticLayer:
         Returns
         -------
         Optional[float]
-            The cosine similarity in ``[0.0, 1.0]``, or ``None`` when the
+            The cosine similarity in ``[-1.0, 1.0]``, or ``None`` when the
             result does not mention the mode at all.
 
         Raises
@@ -267,14 +319,15 @@ class CodexSemanticLayer:
         if self._router is None or not result or not mode_name:
             return None
 
-        for entry in result.get("all_scores", []) or []:
+        entries = result.get("all_scores", [])
+        for entry in entries if isinstance(entries, (list, tuple)) else []:
             if not isinstance(entry, dict):
                 continue
             if str(entry.get("target", "")) == mode_name:
-                return float(entry.get("similarity", 0.0) or 0.0)
+                return self._cosine(entry.get("similarity"))
 
         if str(result.get("target_name", "") or "") == mode_name:
-            return float(result.get("similarity", 0.0) or 0.0)
+            return self._cosine(result.get("similarity"))
 
         return None
 
@@ -282,6 +335,24 @@ class CodexSemanticLayer:
     def _build_semantic_context(
         request: CodexRequest, last_agent_messages: int = 1
     ) -> Optional[str]:
+        """Compatibility view of the request's budgeted semantic sections."""
+        budget = request.classify_max_chars
+        parts = CodexSemanticLayer._build_semantic_parts(
+            request, budget, budget // 2 if request.intent_text else budget,
+            last_agent_messages,
+        )
+        if not parts:
+            return None
+        if budget > 0 and len(parts) == 2:
+            intent, phase = parts
+            return "\n".join((intent[:max(0, budget - len(phase) - 1)], phase))
+        return "\n".join(parts)
+
+    @staticmethod
+    def _build_semantic_parts(
+        request: CodexRequest, intent_max_chars: int, phase_max_chars: int,
+        last_agent_messages: int = 1,
+    ) -> Tuple[str, ...]:
         """
         Assemble the text embedded for the semantic lookup.
 
@@ -294,13 +365,15 @@ class CodexSemanticLayer:
         ----------
         request : CodexRequest
             The parsed request.
+        intent_max_chars, phase_max_chars : int
+            Independent character budgets, applied before section encoding.
         last_agent_messages : int
             How many of the newest assistant message parts are appended.
 
         Returns
         -------
-        Optional[str]
-            The assembled query, or ``None`` when the request carries no text
+        Tuple[str, ...]
+            Independently budgeted sections, empty when the request carries no text
             at all (neither user nor assistant).
 
         Raises
@@ -330,24 +403,15 @@ class CodexSemanticLayer:
                 if latest.kind == "function_call_output":
                     phase_parts.append(latest.text)
 
-        intent = request.intent_text.strip()
+        intent = request.intent_text.strip()[:intent_max_chars]
         phase_parts = [part for part in phase_parts if part.strip()]
-        budget = request.classify_max_chars
-        if budget > 0:
-            phase_budget = budget // 2 if intent else budget
-            if phase_parts:
-                part_budget = max(
-                    1, (phase_budget - len(phase_parts) + 1) // len(phase_parts)
-                )
-                phase_parts = [part[:part_budget] for part in phase_parts]
-            phase = "\n".join(phase_parts)[:phase_budget]
-            intent = intent[:max(0, budget - len(phase) - (1 if phase else 0))]
-        else:
-            phase = "\n".join(phase_parts)
-        parts = [part for part in (intent, phase) if part]
-        if not parts:
-            return None
-        return "\n".join(parts)
+        if phase_parts:
+            part_budget = max(
+                1, (phase_max_chars - len(phase_parts) + 1) // len(phase_parts)
+            )
+            phase_parts = [part[:part_budget] for part in phase_parts]
+        phase = "\n".join(phase_parts)[:phase_max_chars]
+        return tuple(part for part in (intent, phase) if part)
 
     def _warn(self, message: str, *args: Any) -> None:
         """
