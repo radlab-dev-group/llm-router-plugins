@@ -765,6 +765,45 @@ The suite asserts the deterministic layers exactly and exercises the semantic la
 runs without a model or network. `agents-conversation/codex/conv-01/` holds the captured real requests (main turn,
 title, compaction) the payload builders mirror.
 
+### Semantic quality evaluation and calibration
+
+`tests/data/codex_routing_quality.json` is a small, manually labelled main-turn corpus, not a record of the router's
+historical choices. It distinguishes Git-related product code from Git inspection, demo doubles from automated tests,
+test repair from diagnosing application failures, and README/config consistency review from running tests. It includes
+new-task boundaries, short confirmations and `git_review → implement` / `test → debug` phase sequences.
+The three log-derived prompts have file/line provenance and reconstructed minimal inputs; synthetic continuations
+are marked explicitly. Labels describe the current action, not every eventual deliverable of a compound task.
+
+Run from the repository root with the project's Python environment and optional embedding dependencies:
+
+```bash
+python -m llm_router_plugins.utils.routing.agentic_routing.codex.evaluation \
+  --config llm_router_plugins/resources/routing/agentic_routing_codex.json \
+  --dataset tests/data/codex_routing_quality.json \
+  --split calibration > codex-calibration.json
+```
+
+Use `--split holdout` for the separate check set (the default), or `all` for diagnostics only. The evaluator loads the
+supplied JSON without environment overrides and rebuilds the index in memory; stale persisted embeddings cannot
+hide description/example changes. Missing model/dependencies, failed lookups and incomplete rankings stop evaluation
+instead of silently measuring disabled semantics. No generation model/provider is called.
+
+The report separates the **production cascade** from **semantic-only classification plus configured fallback** for
+every case, including cases that heuristics or phase detection would intercept. It reports mode accuracy/precision/
+recall, target-model accuracy and confusion counts, acceptance/fallback sources, expected versus actual model switches,
+missed and unnecessary switches, full cosine rankings and margins. Expected models always come from the supplied
+mode table, not hard-coded model names. Initialization and routing timings are separate; two diagnostic passes and
+cache warm-up mean these are not a production latency benchmark. Config/dataset hashes identify each run.
+
+Tune descriptions/examples and threshold/margin only on `calibration`, then compare an untouched `holdout` run with
+the previous configuration using the same embedding weights and dataset. Do not copy evaluation prompts into indexed
+examples; if tuning against holdout, retire it and create a new independent set. Prioritize wrong **model** selections
+and false switches, then per-mode recall and abstention. This small corpus is a regression starting point, not proof
+of statistical quality. No measured improvement or optimal threshold is claimed by adding it. The embedding model,
+model mapping and acceptance thresholds remain unchanged; measuring answer quality, token cost and provider latency
+requires a separate generation experiment on both target models. Rebuild any production persisted index after changing
+examples/descriptions. `tests/test_codex_routing_quality.py` covers evaluation plumbing only, without loading a model.
+
 ---
 
 ## Troubleshooting
