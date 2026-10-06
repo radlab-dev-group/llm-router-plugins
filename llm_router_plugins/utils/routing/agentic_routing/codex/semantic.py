@@ -140,7 +140,7 @@ class CodexSemanticLayer:
         if self._router is None or not request:
             return None
 
-        _text = self._build_router_context(request)
+        _text = self._build_semantic_context(request)
         try:
             result = self._router.route(_text)
         except Exception as exc:
@@ -264,7 +264,7 @@ class CodexSemanticLayer:
         return None
 
     @staticmethod
-    def _build_router_context(
+    def _build_semantic_context(
         request: CodexRequest, last_agent_messages: int = 5
     ) -> Optional[str]:
         _text = request.latest_user_text or ""
