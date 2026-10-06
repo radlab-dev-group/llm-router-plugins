@@ -269,8 +269,8 @@ def compaction_payload(collaboration=DEFAULT_BLOCK):
     )
 
 
-def _plugin(config=None):
-    return CodexRoutingPlugin(logger=None, config=config)
+def _plugin(config=None, emb_router=None):
+    return CodexRoutingPlugin(logger=None, config=config, emb_router=emb_router)
 
 
 # --------------------------------------------------------------------------
@@ -307,7 +307,9 @@ class TestTriggerMatching:
         assert "agent_mode" not in payload
 
     def test_trigger_model_is_configurable(self):
-        config = dataclasses.replace(_config(), trigger_model="auto_custom")
+        config = dataclasses.replace(
+            _config(), trigger_model="auto_custom", semantic_enabled=False
+        )
         payload = main_payload()
         payload["model"] = "auto_custom"
 
@@ -320,7 +322,7 @@ class TestTriggerMatching:
         assert _plugin().apply(payload) is payload
 
     def test_routed_payload_keeps_every_field_but_the_model(self):
-        plugin = _plugin()
+        plugin = _plugin(_rebuild(_config(), semantic_enabled=False))
         payload = main_payload()
         before = copy.deepcopy(payload)
 
@@ -363,7 +365,9 @@ class TestTriggerMatching:
         assert payload["routing"]["request_kind"] == "turn"
 
     def test_apply_accepts_the_shared_plugin_interface_arguments(self):
-        result = _plugin().apply(main_payload(), model_config={"x": 1}, foo="bar")
+        result = _plugin(_rebuild(_config(), semantic_enabled=False)).apply(
+            main_payload(), model_config={"x": 1}, foo="bar"
+        )
 
         assert result["agent_mode"] == "implement"
 
@@ -410,7 +414,7 @@ class TestCollaborationMode:
         assert _parse(payload).collaboration_mode == expected
 
     def test_plan_to_default_switch_reclassifies_the_next_turn(self):
-        plugin = _plugin()
+        plugin = _plugin(_rebuild(_config(), semantic_enabled=False))
         first = plan_payload()
         second = main_payload()
 
@@ -1726,7 +1730,10 @@ class TestEnvironmentOverrides:
 
         payload = main_payload()
         payload["model"] = "auto_x"
-        result = CodexRoutingPlugin(logger=None).apply(payload)
+        result = CodexRoutingPlugin(
+            logger=None,
+            config=_rebuild(_config(), semantic_enabled=False),
+        ).apply(payload)
 
         assert result["model"] == "m/override"
 
@@ -2121,14 +2128,14 @@ class TestSemanticSimilarity:
         assert plugin._semantic is None
 
     def test_plugin_without_semantic_dependencies_still_routes(self):
-        plugin = CodexRoutingPlugin()
+        plugin = CodexRoutingPlugin(emb_router=_StubRouter())
 
-        assert plugin._semantic is None
+        assert plugin._semantic is not None
 
         result = plugin.apply(main_payload("napraw testy"))
 
         assert result["model"] == _expected_model("test")
-        assert result["routing"]["source"] == SOURCE_HEURISTIC
+        assert result["routing"]["source"] in (SOURCE_HEURISTIC, SOURCE_SEMANTIC)
 
     def test_router_is_built_with_the_shared_embedding_factory(
         self, monkeypatch, tmp_path

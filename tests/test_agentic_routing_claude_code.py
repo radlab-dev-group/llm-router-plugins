@@ -802,7 +802,7 @@ class TestShippedConfig:
                 "messages": [{"role": "user", "content": "hello"}],
             }
         )
-        assert result["model"] == "qwen/Qwen3.8-Flash-Next"
+        assert result["model"] == "qwen/Qwen3.8-27B"
         assert result["max_tokens"] == 4096
         assert result["messages"] == [{"role": "user", "content": "hello"}]
         assert result["routing"]["mode"] == "sonnet"
