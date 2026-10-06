@@ -1,10 +1,22 @@
 import json
+from pathlib import Path
 
 import pytest
 
 from llm_router_plugins.utils.routing.agentic_routing.codex.payload import CodexActivity
 from llm_router_plugins.utils.routing.agentic_routing.codex.phase import detect_phase
 from llm_router_plugins.utils.routing.agentic_routing.codex.phase_config import CodexPhaseConfig
+
+
+def phase_raw(overrides=None):
+    path = Path(__file__).resolve().parents[1] / "llm_router_plugins/resources/routing/agentic_routing_codex.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))["settings"]["phase"]
+    return {**raw, **(overrides or {})}
+
+
+@pytest.fixture
+def rules():
+    return CodexPhaseConfig.from_raw(phase_raw())
 
 
 def assistant(text):
@@ -46,8 +58,8 @@ def patch(*paths):
     ("Teraz przejrzę diff.", "git_review"),
     ("Now I'm reviewing the diff.", "git_review"),
 ])
-def test_explicit_current_announcements(text, expected):
-    assert detect_phase((assistant(text),)) == expected
+def test_explicit_current_announcements(text, expected, rules):
+    assert detect_phase((assistant(text),), rules) == expected
 
 
 @pytest.mark.parametrize("text", [
@@ -74,8 +86,8 @@ def test_explicit_current_announcements(text, expected):
     "Now I will review the diff finished.",
     "Now I will run ```pytest```.",
 ])
-def test_noncurrent_uncertain_or_quoted_announcements(text):
-    assert detect_phase((assistant(text),)) is None
+def test_noncurrent_uncertain_or_quoted_announcements(text, rules):
+    assert detect_phase((assistant(text),), rules) is None
 
 
 @pytest.mark.parametrize("text, expected", [
@@ -111,25 +123,25 @@ def test_noncurrent_uncertain_or_quoted_announcements(text):
     ("pytest --help", None),
     ("git diff --help", None),
 ])
-def test_executed_command_signals(text, expected):
-    assert detect_phase((command(text),)) == expected
+def test_executed_command_signals(text, expected, rules):
+    assert detect_phase((command(text),), rules) == expected
     activity = (command(text, name="shell_command", key="command"),)
-    assert detect_phase(activity) == expected
+    assert detect_phase(activity, rules) == expected
 
 
 @pytest.mark.parametrize("text", [
     "pytest", "[]", "null", '{"cmd": 123}',
     '{"cmd": "pytest", "command": "git diff"}',
 ])
-def test_invalid_command_arguments(text):
+def test_invalid_command_arguments(text, rules):
     item = CodexActivity(kind="function_call", name="exec_command", text=text)
-    assert detect_phase((item,)) is None
+    assert detect_phase((item,), rules) is None
 
 
-def test_advertised_and_unrecognized_tools_are_not_execution():
+def test_advertised_and_unrecognized_tools_are_not_execution(rules):
     activity = (assistant("Available tools: exec_command pytest apply_patch"),)
-    assert detect_phase(activity) is None
-    assert detect_phase((command("pytest", name="tool_description"),)) is None
+    assert detect_phase(activity, rules) is None
+    assert detect_phase((command("pytest", name="tool_description"),), rules) is None
 
 
 @pytest.mark.parametrize("paths, expected", [
@@ -148,8 +160,8 @@ def test_advertised_and_unrecognized_tools_are_not_execution():
     ((".",), None),
     (("C:/tests/test_main.py",), None),
 ])
-def test_patch_paths(paths, expected):
-    assert detect_phase((patch(*paths),)) == expected
+def test_patch_paths(paths, expected, rules):
+    assert detect_phase((patch(*paths),), rules) == expected
 
 
 @pytest.mark.parametrize("text, expected", [
@@ -165,10 +177,10 @@ def test_patch_paths(paths, expected):
     ("*** Begin Patch\n*** Unknown File: src/main.py\n*** End Patch", None),
     ("I might apply *** Add File: src/main.py", None),
 ])
-def test_patch_envelope_and_operations(text, expected):
+def test_patch_envelope_and_operations(text, expected, rules):
     for arguments in (text, json.dumps({"patch": text}), json.dumps({"input": text})):
         item = CodexActivity(kind="function_call", name="apply_patch", text=arguments)
-        assert detect_phase((item,)) == expected
+        assert detect_phase((item,), rules) == expected
 
 
 @pytest.mark.parametrize("text", [
@@ -177,8 +189,8 @@ def test_patch_envelope_and_operations(text, expected):
     '{"exit_code": -1, "output": "failed"}',
     "Traceback (most recent call last):\n  ...\nAssertionError",
 ])
-def test_linked_test_failure_is_debug(text):
-    assert detect_phase((command("pytest"), output(text))) == "debug"
+def test_linked_test_failure_is_debug(text, rules):
+    assert detect_phase((command("pytest"), output(text)), rules) == "debug"
 
 
 @pytest.mark.parametrize("text", [
@@ -192,24 +204,24 @@ def test_linked_test_failure_is_debug(text):
     '{"exit_code": false}',
     '{"exit_code": "1"}',
 ])
-def test_output_words_and_uncertain_failure_do_not_change_phase(text):
-    assert detect_phase((command("pytest"), output(text))) == "test"
+def test_output_words_and_uncertain_failure_do_not_change_phase(text, rules):
+    assert detect_phase((command("pytest"), output(text)), rules) == "test"
 
 
-def test_output_requires_matching_executed_test_call():
+def test_output_requires_matching_executed_test_call(rules):
     failure = "Process exited with code 1"
-    assert detect_phase((output(failure),)) is None
-    assert detect_phase((command("pytest"), output(failure, name=""))) == "test"
-    assert detect_phase((command("pytest"), output(failure, call_id="other"))) == "test"
+    assert detect_phase((output(failure),), rules) is None
+    assert detect_phase((command("pytest"), output(failure, name="")), rules) == "test"
+    assert detect_phase((command("pytest"), output(failure, call_id="other")), rules) == "test"
     activity = (command("pytest"), output(failure, name="shell_command"))
-    assert detect_phase(activity) == "test"
-    assert detect_phase((command("git diff"), output(failure))) == "git_review"
-    assert detect_phase((output(failure), command("pytest"))) == "test"
+    assert detect_phase(activity, rules) == "test"
+    assert detect_phase((command("git diff"), output(failure)), rules) == "git_review"
+    assert detect_phase((output(failure), command("pytest")), rules) == "test"
     activity = (command("pytest", call_id=""), output(failure, call_id=""))
-    assert detect_phase(activity) == "test"
+    assert detect_phase(activity, rules) == "test"
 
 
-def test_latest_clear_signal_wins_and_neutral_activity_preserves_it():
+def test_latest_clear_signal_wins_and_neutral_activity_preserves_it(rules):
     activity = (
         assistant("Teraz dodam CHANGELOG."),
         command("git status"),
@@ -220,36 +232,36 @@ def test_latest_clear_signal_wins_and_neutral_activity_preserves_it():
         command("git diff && pytest"),
         assistant("Summary: pytest failed."),
     )
-    assert detect_phase(activity) == "git_review"
-    assert detect_phase(activity[:3]) == "implement"
-    assert detect_phase(activity[:5]) == "debug"
-    assert detect_phase(()) is None
+    assert detect_phase(activity, rules) == "git_review"
+    assert detect_phase(activity[:3], rules) == "implement"
+    assert detect_phase(activity[:5], rules) == "debug"
+    assert detect_phase((), rules) is None
 
 
-def test_no_cross_turn_memory():
-    assert detect_phase((command("pytest"),)) == "test"
-    assert detect_phase((output("Exit code: 1"),)) is None
+def test_no_cross_turn_memory(rules):
+    assert detect_phase((command("pytest"),), rules) == "test"
+    assert detect_phase((output("Exit code: 1"),), rules) is None
 
 
 def test_phase_can_be_disabled_without_disabling_keywords():
-    rules = CodexPhaseConfig.from_raw({"enabled": False})
+    rules = CodexPhaseConfig.from_raw(phase_raw({"enabled": False}))
     assert detect_phase((command("pytest"),), rules) is None
 
 
 def test_custom_announcements_replace_defaults():
-    rules = CodexPhaseConfig.from_raw({
+    rules = CodexPhaseConfig.from_raw(phase_raw({
         "announcement_prefix": r"^Next:\s+",
         "announcements": {"review": "inspect configuration"},
-    })
+    }))
     assert detect_phase((assistant("Next: inspect configuration"),), rules) == "review"
     assert detect_phase((assistant("Teraz uruchomię pytest."),), rules) is None
 
 
 def test_custom_command_and_tool_rules_replace_defaults():
-    rules = CodexPhaseConfig.from_raw({
+    rules = CodexPhaseConfig.from_raw(phase_raw({
         "command_tools": ["run_shell"],
         "commands": [{"executable": "cargo", "args_prefix": ["test"], "mode": "test"}],
-    })
+    }))
     assert detect_phase((command("cargo test", name="run_shell"),), rules) == "test"
     assert detect_phase((command("cargo build", name="run_shell"),), rules) is None
     assert detect_phase((command("pytest", name="run_shell"),), rules) is None
@@ -258,20 +270,20 @@ def test_custom_command_and_tool_rules_replace_defaults():
 
 
 def test_conflicting_command_rules_do_not_pick_by_order():
-    rules = CodexPhaseConfig.from_raw({"commands": [
+    rules = CodexPhaseConfig.from_raw(phase_raw({"commands": [
         {"executable": "cargo", "args_prefix": [], "mode": "implement"},
         {"executable": "cargo", "args_prefix": ["test"], "mode": "test"},
-    ]})
+    ]}))
     assert detect_phase((command("cargo test"),), rules) is None
 
 
 def test_custom_test_paths_and_failure_mode():
-    rules = CodexPhaseConfig.from_raw({
+    rules = CodexPhaseConfig.from_raw(phase_raw({
         "test_directories": ["checks"],
         "test_filename_prefixes": ["check_"],
         "test_filename_pattern": r"\.check\.rs$",
         "failure_mode": "review",
-    })
+    }))
     assert detect_phase((patch("checks/main.rs"),), rules) == "test"
     assert detect_phase((patch("src/check_main.rs"),), rules) == "test"
     assert detect_phase((patch("src/main.check.rs"),), rules) == "test"
@@ -280,7 +292,7 @@ def test_custom_test_paths_and_failure_mode():
 
 
 def test_empty_rule_collections_disable_only_their_signals():
-    rules = CodexPhaseConfig.from_raw({"announcements": {}, "commands": []})
+    rules = CodexPhaseConfig.from_raw(phase_raw({"announcements": {}, "commands": []}))
     assert detect_phase((assistant("Teraz uruchomię pytest."), command("pytest")), rules) is None
     assert detect_phase((patch("src/main.py"),), rules) == "implement"
 
@@ -299,29 +311,26 @@ def test_empty_rule_collections_disable_only_their_signals():
 ])
 def test_invalid_phase_configuration_is_rejected(raw):
     with pytest.raises(ValueError, match=r"settings\.phase"):
-        CodexPhaseConfig.from_raw(raw)
+        CodexPhaseConfig.from_raw(phase_raw(raw) if isinstance(raw, dict) else raw)
 
 
-def test_explicit_rules_require_configured_modes_but_defaults_allow_subsets():
-    CodexPhaseConfig.from_raw({}, mode_names=["implement"])
+def test_explicit_rules_require_configured_modes():
     with pytest.raises(ValueError, match="Unknown settings.phase modes"):
-        CodexPhaseConfig.from_raw({"failure_mode": "missing"}, mode_names=["implement"])
+        CodexPhaseConfig.from_raw(phase_raw({"failure_mode": "missing"}), mode_names=["implement"])
 
 
-def test_routing_config_loads_phase_overrides_and_legacy_defaults():
+def test_routing_config_uses_only_supplied_phase_rules():
     from llm_router_plugins.utils.routing.agentic_routing.codex.config import CodexRoutingConfig
 
-    raw = {
-        "settings": {"trigger_model": "auto_codex", "fallback_mode": "implement"},
-        "codex_modes": [{"name": "implement", "model_name": "model", "description": "Edit code"}],
-    }
-    legacy = CodexRoutingConfig._from_raw(raw)
-    assert legacy.phase.enabled is True
-    raw["settings"]["phase"] = {"enabled": False}
+    path = Path(__file__).resolve().parents[1] / "llm_router_plugins/resources/routing/agentic_routing_codex.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["settings"]["phase"]["enabled"] = False
     config = CodexRoutingConfig._from_raw(raw)
     assert config.phase.enabled is False
     assert config.heuristic_enabled is True
-    assert legacy.phase.enabled is True
+    raw["settings"]["phase"] = {"enabled": False}
+    with pytest.raises(ValueError, match="Missing settings.phase fields"):
+        CodexRoutingConfig._from_raw(raw)
     raw["settings"]["phase"] = None
     with pytest.raises(ValueError, match=r"settings\.phase"):
         CodexRoutingConfig._from_raw(raw)

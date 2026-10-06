@@ -173,7 +173,7 @@ def _failed_test(text: str) -> bool:
 
 
 def detect_phase(
-    activity: Tuple[CodexActivity, ...], rules: Optional[CodexPhaseConfig] = None,
+    activity: Tuple[CodexActivity, ...], rules: CodexPhaseConfig,
 ) -> Optional[str]:
     """Return the latest unambiguous phase, without retaining cross-turn state.
 
@@ -181,8 +181,6 @@ def detect_phase(
     patch envelopes count. Test failures require a matching call in this turn.
     Neutral or ambiguous activity leaves the previous clear signal intact.
     """
-    if rules is None:
-        rules = CodexPhaseConfig.from_raw()
     if not rules.enabled:
         return None
     phase = None

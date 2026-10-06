@@ -1,21 +1,8 @@
-"""Validated phase rules; defaults live in the packaged Codex routing JSON."""
+"""Validated phase rules from the configuration supplied to the router."""
 
-import json
 import re
 from dataclasses import dataclass
-from functools import lru_cache
-from pathlib import Path
 from typing import Optional, Pattern, Tuple
-
-
-@lru_cache(maxsize=1)
-def _default_rules():
-    path = (
-        Path(__file__).resolve().parents[4]
-        / "resources/routing/agentic_routing_codex.json"
-    )
-    with path.open(encoding="utf-8") as stream:
-        return json.load(stream)["settings"]["phase"]
 
 
 @dataclass(frozen=True)
@@ -42,17 +29,18 @@ class CodexPhaseConfig:
     failure_mode: str
 
     @classmethod
-    def from_raw(cls, raw=None, mode_names=None):
-        """Override individual default fields; empty rule lists disable signals."""
-        if raw is None:
-            raw = {}
+    def from_raw(cls, raw, mode_names=None):
+        """Validate supplied rules; never read or merge another configuration."""
         if not isinstance(raw, dict):
             raise ValueError("settings.phase must be an object")
-        defaults = _default_rules()
-        unknown = raw.keys() - defaults.keys()
+        fields = set(cls.__dataclass_fields__)
+        unknown = raw.keys() - fields
         if unknown:
             raise ValueError(f"Unknown settings.phase fields: {sorted(unknown)}")
-        data = {**defaults, **raw}
+        missing = fields - raw.keys()
+        if missing:
+            raise ValueError(f"Missing settings.phase fields: {sorted(missing)}")
+        data = raw
 
         def strings(value, label):
             if not isinstance(value, list) or any(
@@ -129,7 +117,6 @@ class CodexPhaseConfig:
             failure_mode=mode(data["failure_mode"], "failure_mode"),
         )
         if mode_names is not None:
-            # Defaults remain usable with configs that define only a subset of modes.
             references = set()
             if "announcements" in raw:
                 references.update(name for name, _ in result.announcements)

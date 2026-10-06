@@ -6,6 +6,13 @@
     "fallback_mode": "implement",
     "heuristic_enabled": true,
     "heuristic_min_score": 3.0,
+    "heuristic_min_margin": 1.0,
+    "heuristic_weights": {
+      "keyword": 1.0,
+      "phrase": 2.0,
+      "pattern": 3.0
+    },
+    "heuristic_negation_pattern": "\\b(?:nie\\s+(?:uruchamiaj|uruchom|wykonuj|wykonaj|pisz|napisz|dodawaj|dodaj|rób|rob|przeglądaj|przegladaj|przejrzyj|sprawdzaj|sprawdz|sprawdź|testuj|commituj|pushuj)|(?:do\\s+not|don't|don’t|never)\\s+(?:run|execute|write|add|create|review|inspect|check|test|commit|push)|(?:bez|without)\\s+(?:uruchamiania|wykonywania|pisania|dodawania|testów|testow|running|executing|writing|adding|tests?))\\b[^.;!?\\n,]*?(?=[.;!?\\n,]|\\b(?:ale|but|zamiast|instead)\\b|\\b(?:i|and)\\s+(?:napisz|dodaj|przygotuj|uruchom|napraw|popraw|przejrzyj|sprawdź|sprawdz|zrób|zrob|write|add|create|run|fix|review|check|inspect|implement)\\b|$)",
     "classify_max_chars": 4000,
     "vector_store_path": "",
     "phase": {

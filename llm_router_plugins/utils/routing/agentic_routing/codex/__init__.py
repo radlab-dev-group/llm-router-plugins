@@ -22,8 +22,8 @@ Mode                    Routed by                                   Model
 Modules
 -------
 - :mod:`~codex.payload` — payload → normalized :class:`CodexRequest` via
-+  :class:`CodexPayloadParser`
-- :mod:`~codex.scoring` — keyword, phrase and regex scoring
+  :class:`CodexPayloadParser`
+- :mod:`~codex.scoring` — deduplicated keyword, phrase and regex scoring
   (:class:`CodexModeScorer`)
 - :mod:`~codex.classifier` — the deterministic mode cascade
   (:class:`CodexModeClassifier`)
@@ -50,6 +50,34 @@ contributes embedding cosine similarity over the mode descriptions and
 examples through the shared BiEncoder + FAISS router
 (``llm_router_plugins.utils.routing.embedder``); without it — or without
 ``faiss`` installed — the layer steps aside and nothing else changes.
+
+Within each mode, scoring keeps the strongest non-overlapping matches, preferring
+longer spans at equal weights; each declared rule contributes at most once.
+Each rule supplies only its first non-negated match, without retrying a later
+occurrence after losing deduplication.
+``rank_modes(text, modes)`` returns ``ModeScore(mode, score, matches)`` values
+whose matches are ``SignalMatch(signal, start, end, weight)`` values with offsets
+in lower-cased text (exclusive end). These types live in ``codex.scoring``.
+``detect_mode()`` returns ``(None, top_score)`` for a tied top score.
+The classifier requires both ``settings.heuristic_min_score`` and a lead over the
+runner-up of at least ``settings.heuristic_min_margin`` (default ``1.0``); ties
+are rejected even at margin zero and continue to semantic routing or fallback.
+Heuristic routing similarity remains ``score / (score + 1)`` for API compatibility:
+it is heuristic strength, not a calibrated probability.
+
+``settings.heuristic_negation_pattern`` configures local PL/EN action prohibitions
+such as ``nie uruchamiaj`` / ``do not run``, ``nie pisz`` / ``do not write`` and
+``bez uruchamiania`` / ``without running``, not every ``nie`` (``nie działa`` is
+debugging evidence). The regex matches the entire prohibited fragment and defines
+its own boundaries, without a separate parser. The default scope ends at sentence/semicolon/comma boundaries,
+contrastive ``ale`` / ``but``, or a new positive action after ``i`` / ``and``:
+prohibiting test execution does not suppress a separate request to write tests.
+An empty regex disables filtering; zero-width spans are ignored.
+This is not full NLP or a semantic veto. Negation, margin, weights and complete phase
+rules must be supplied in the loaded config; missing fields are reported, not
+filled from another JSON file.
+``settings.heuristic_weights`` supplies default keyword, phrase and pattern weights;
+per-keyword weights and phrase suffixes retain precedence.
 
 The plugin is registered as ``"agentic_routing_codex"`` and answers only its own
 trigger; ``"auto"`` traffic stays with the semantic routing plugins.

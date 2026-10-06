@@ -101,11 +101,8 @@ SOURCE_FALLBACK = "fallback"
 
 #: Modes eligible for keyword scoring.  ``plan`` is decided by the
 #: collaboration block and ``implement`` is the fallback, so neither needs
-#: keywords; ``aux_title``/``compaction`` are class-routed.  ``git_review``
-#: precedes ``review`` so a message that is both a review and a version
-#: control question is routed to the git-aware mode on a tied score.  Candidates
-#: are built in **this** order, not in config order, so the tie-break does not
-#: depend on how the JSON lists its modes.
+#: keywords; ``aux_title``/``compaction`` are class-routed. Candidate order
+#: never resolves conflicts: tied or insufficiently separated scores abstain.
 HEURISTIC_MODES: Tuple[str, ...] = ("test", "git_review", "review", "debug")
 
 #: Modes the request-class layer decides on its own.  The names match the
@@ -139,7 +136,8 @@ class RoutingDecision:
         Raw heuristic score.  ``1.0`` for the deterministic layers that are
         not scored, ``0.0`` for the fallback layer.
     similarity : float
-        Confidence in ``[0.0, 1.0]`` reported in ``payload["routing"]``.
+        Value in ``[0.0, 1.0]`` reported in ``payload["routing"]``. For heuristics
+        this is score strength, not a calibrated probability of correctness.
 
     Raises
     ------
@@ -211,7 +209,10 @@ class CodexModeClassifier:
         """
         self._config = config
         self._semantic = semantic
-        self._scorer = scorer if scorer is not None else CodexModeScorer()
+        self._scorer = scorer if scorer is not None else CodexModeScorer(
+            negation_pattern=config.heuristic_negation_pattern,
+            weights=config.heuristic_weights,
+        )
 
     def classify(
         self, payload: Dict[str, Any], request: CodexRequest
@@ -369,10 +370,9 @@ class CodexModeClassifier:
         -------
         Optional[RoutingDecision]
             A :data:`SOURCE_HEURISTIC` decision when a candidate scores at
-            least ``config.heuristic_min_score``, otherwise ``None``.
-            Candidates are scanned in :data:`HEURISTIC_MODES` order, so ties go
-            to the mode that comes first there; the confidence is
-            ``score / (score + 1)``.
+            least ``config.heuristic_min_score`` and leads the runner-up by
+            ``config.heuristic_min_margin``. Ties always abstain. Reported
+            similarity is heuristic strength, not calibrated probability.
 
         Raises
         ------
@@ -385,12 +385,20 @@ class CodexModeClassifier:
         if not candidates:
             return None
 
-        best_mode, score = self._scorer.detect_mode(text, candidates)
-        if best_mode is None or score < self._config.heuristic_min_score:
+        ranking = self._scorer.rank_modes(text, candidates)
+        best = ranking[0]
+        runner_up = ranking[1].score if len(ranking) > 1 else 0.0
+        score = best.score
+        if (
+            score <= 0
+            or score < self._config.heuristic_min_score
+            or score <= runner_up
+            or score - runner_up < self._config.heuristic_min_margin
+        ):
             return None
 
         return RoutingDecision(
-            mode=best_mode.name,
+            mode=best.mode.name,
             source=SOURCE_HEURISTIC,
             score=score,
             similarity=self._scorer.score_to_similarity(score),

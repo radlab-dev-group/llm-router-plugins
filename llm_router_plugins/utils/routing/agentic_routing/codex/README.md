@@ -211,13 +211,13 @@ agent turn advertises tools, so it can never match that shape.
 `CodexModeClassifier.classify()` tries layers in a fixed order; the **first layer that can answer wins**. A main turn never falls below the
 fallback mode: the keyword and semantic layers can specialise the decision, never weaken it.
 
-| # | Layer                                          | `routing.source`     | Confidence                          |
+| # | Layer                                          | `routing.source`     | Routing similarity                  |
 |---|------------------------------------------------|----------------------|-------------------------------------|
 | 1 | Explicit `agent_mode` / `codex_mode` / `metadata.agent_mode` in the payload | `explicit`           | `1.0`             |
 | 2 | Request class — `compaction`, then `aux_title` | `class`              | `1.0`                               |
 | 3 | `<collaboration_mode>` Plan block from the CLI  | `collaboration_mode` | `1.0`                               |
 | 4 | Clear current assistant action or actual tool activity | `phase`         | `1.0` (rule strength, not calibrated probability) |
-| 5 | Keyword scoring of the current user intent      | `heuristic`          | `score / (score + 1)`               |
+| 5 | Keyword scoring of the current user intent      | `heuristic`          | `score / (score + 1)` (heuristic strength, not calibrated probability) |
 | 6 | Embedding cosine similarity over the modes      | `semantic`           | cosine of the matched mode          |
 | 7 | Configured `fallback_mode` (`implement`)        | `fallback`           | cosine of that mode, else `0.0`     |
 
@@ -226,7 +226,7 @@ Notes:
 - An explicit override must name a **configured** mode, otherwise it is ignored and the cascade continues;
   `agent_mode` is checked before `codex_mode`, and both before `metadata.agent_mode`. This is the escape hatch for
   "route this one request by hand": send `"agent_mode": "debug"` in the request body.
-- Only four modes compete in the keyword layer, scanned in the order `test`, `git_review`, `review`, `debug`
+- Only four modes compete in the keyword layer: `test`, `git_review`, `review`, `debug`
   (`HEURISTIC_MODES`). `plan` is declared by the CLI and `implement` is the fallback, so their `keywords` / `phrases` /
   `patterns` are never scored — only their `description` and `examples` feed the embedding index. `aux_title` and
   `compaction` are class-routed and are left out of the index too.
@@ -254,17 +254,13 @@ Phase signals live in `settings.phase` in `agentic_routing_codex.json`, not in P
 - `test_mode`, `implement_mode`, `failure_mode`: modes for test-only patches, other patches and linked test failures.
   Failure transitions apply only to command calls routed to `test_mode`, never to unrelated tool outputs.
 
-Missing fields inherit the packaged JSON defaults, so older configurations remain compatible. Supplied maps/lists
-replace the entire corresponding field (they are not merged); empty maps/lists disable those signals. Regexes are
-compiled when configuration is loaded. Invalid types, regexes, unknown fields or explicitly referenced unknown modes
-reject configuration loading. Defaults referencing modes omitted from a legacy config are ignored by the classifier.
+All phase fields must be supplied in the loaded configuration. No fields are inherited from another JSON file.
+Empty maps/lists disable those signals. Regexes are compiled when configuration is loaded. Missing fields,
+invalid types, regexes, unknown fields or referenced unknown modes reject configuration loading.
 Apply configuration changes by reloading/recreating the plugin; rules are not read from disk per request.
 
-For example, a custom configuration can disable phase routing without affecting the keyword layer:
-
-```json
-"phase": {"enabled": false}
-```
+To disable phase routing without affecting the keyword layer, set `settings.phase.enabled` to `false` in the
+complete phase object.
 
 Shell/patch syntax validation, rejected unsafe shell constructs, Git option parsing and call/output linkage remain
 in code. They are parser safeguards, not configurable routing signals. Extending the command list cannot bypass them.
@@ -281,24 +277,40 @@ declared stem therefore also hits inflected forms — `test` matches `testy` and
 |-----------|--------------------------------------------|----------------------------------|
 | `keywords`| `weights[keyword]`, else `1.0`             | `"debug": 3`                     |
 | `phrases` | `":weight"` suffix, else `2.0`             | `"napraw błąd:3"`                |
-| `patterns`| `3.0` per match                            | `"\broot\s+cause\b"`             |
+| `patterns`| `3.0` per declared rule                    | `"\broot\s+cause\b"`             |
 
-Scores of all matched signals are summed per mode; `CodexModeScorer.detect_mode()` uses strictly-greater-than while
-scanning `HEURISTIC_MODES` in order, so **ties go to the earlier mode** (`test` over `git_review`, `git_review` over
-`review`).  The best score is accepted only when it reaches `heuristic_min_score` (`3.0` by default), and is reported as
-`similarity = score / (score + 1)`.
+Matches are deduplicated **within each mode**: strongest weight first, then longest span for equal weights,
+keeping only non-overlapping matches. A single declared rule contributes its weight **at most once**; repeating
+the same keyword, phrase or regex match does not inflate the score. The retained weights are summed per mode.
+Each rule supplies only its first non-negated match and never retries a later occurrence after losing
+deduplication, so repeated text cannot inflate scores through keyword/phrase/pattern aliases.
 
-Measured against the shipped configuration:
+`CodexModeScorer.rank_modes(text, modes)` returns a score-descending ranking of `ModeScore(mode, score, matches)`.
+Each retained match is a `SignalMatch(signal, start, end, weight)`; offsets refer to the lower-cased text, with
+`end` exclusive. `detect_mode()` returns `(None, top_score)` on a tied top score rather than choosing by mode order.
+These result types live in `codex.scoring`.
 
-| Text                                        | Mode        | Score | Accepted (`≥ 3.0`) |
-|---------------------------------------------|-------------|-------|--------------------|
-| `napraw testy w tests/`                      | `test`      | 14.0  | yes → `0.933`      |
-| `testy`                                      | `test`      | 8.0   | yes → `0.889`      |
-| `Dlaczego nie działa ta funkcja?`            | `debug`     | 9.0   | yes → `0.900`      |
-| `review this PR`                             | `review`    | 9.0   | yes → `0.900`      |
-| `git review przed merge`                     | `git_review`| 9.0   | yes → `0.900`      |
-| `Przygotuj plan refactoru`                   | `review`    | 2.0   | no → semantic/fallback |
-| `Dodaj nowy endpoint do API`                 | —           | 0.0   | no → semantic/fallback |
+The classifier accepts a heuristic winner only when its score reaches `settings.heuristic_min_score` (`3.0` by
+default) **and** its lead over the second-best score is at least `settings.heuristic_min_margin` (`1.0` by default).
+Ties are always rejected, even with a zero minimum margin. A conflict, insufficient margin or insufficient score
+continues to the optional semantic layer, then fallback; it does not force a heuristic choice.
+
+For API compatibility, heuristic `routing.similarity` remains `score / (score + 1)`: this expresses **heuristic
+strength, not a calibrated probability**. For a simple example, `testy` scores `3.0`, hence similarity `0.75`.
+This is illustrative score arithmetic, not a report of measurements.
+
+#### Local negation
+
+`settings.heuristic_negation_pattern` is a configurable regex identifying explicit prohibitions of actions in
+Polish and English, such as `nie uruchamiaj` / `do not run`, `nie pisz` / `do not write`, and
+`bez uruchamiania` / `without running`. It does **not** treat every `nie` as negation: `nie działa` still supplies
+debugging evidence.
+
+The regex matches the **entire prohibited fragment** and defines its own scope and boundaries; there is no
+separate boundary parser. The default regex ends the span at a sentence boundary, semicolon, comma,
+contrastive `ale` / `but`, or a new positive action after `i` / `and`. Thus `nie uruchamiaj testów i napisz testy`
+does not suppress the separate request to write tests. An empty regex disables filtering; zero-width spans
+are ignored. This is a bounded heuristic, not full NLP and not a veto on semantic routing.
 
 The shipped `test` signals deliberately exclude standalone `spec`, `mock`, `assertion`, `fixture`, `suite` and
 `coverage`: these can describe production code rather than testing. Test patterns match bounded test nouns rather
@@ -308,9 +320,9 @@ Test-framework names and explicit phrases such as `unit tests` and `test fixture
 Likewise, repository and hosting names, generic descriptions of changes and configuration conflicts do not by
 themselves establish `git_review`. Branch mentions are weak signals; reviewing or comparing a branch supplies the
 stronger evidence. Git commands, commit history and pull/merge requests remain explicit Git signals. These are
-heuristic safeguards, not a veto on the optional semantic layer or a general negation/history parser.
+heuristic safeguards, not a veto on the optional semantic layer or a general-purpose NLP/history parser.
 
-The last two rows are the point of the design: **`plan` is never decided by keywords** (the CLI tells you, in Plan
+**`plan` is never decided by keywords** (the CLI tells you, in Plan
 Mode, and a planning *sentence* in Default mode is not enough), and a plain imperative like "add an endpoint" is left to
 the semantic layer or to `fallback_mode` — which is exactly what `implement` means.
 
@@ -417,6 +429,10 @@ it after logging — the plugin itself only guarantees that the request shape Co
     "fallback_mode": "implement",        // required, must name a mode below
     "heuristic_enabled": true,
     "heuristic_min_score": 3.0,
+    "heuristic_min_margin": 1.0,
+    // heuristic_negation_pattern: required; use the desired regex or "" to disable
+    "heuristic_weights": {"keyword": 1.0, "phrase": 2.0, "pattern": 3.0},
+    // phase: required complete object; see the bundled config for an example
     "classify_max_chars": 4000,
     "vector_store_path": "",             // "" = index lives in memory only
     "semantic": {
@@ -442,10 +458,23 @@ it after logging — the plugin itself only guarantees that the request shape Co
 }
 ```
 
-Required keys: top-level `settings` and `codex_modes`; inside `settings`, `trigger_model` and `fallback_mode`; inside
-each mode, `name`, `model_name` and `description`. Everything else has a default (see
+Required keys: top-level `settings` and `codex_modes`; inside `settings`, `trigger_model`, `fallback_mode`,
+`heuristic_min_margin`, `heuristic_negation_pattern`, `heuristic_weights` and complete `phase`; inside
+each mode, `name`, `model_name` and `description`. Other settings retain their existing defaults (see
 [Defaults at a glance](#defaults-at-a-glance)). `description` and `examples` are not decoration — with the semantic
 layer enabled they *are* the classifier's training set.
+
+`settings.heuristic_min_margin` is the required score lead over the runner-up, not a similarity difference;
+zero permits any strictly positive lead but never a tie. `settings.heuristic_negation_pattern` replaces the
+local-prohibition regex (escape regex backslashes in JSON). `heuristic_min_margin`, `heuristic_negation_pattern`,
+`heuristic_weights` and the complete `phase` object are required in the supplied config. Older custom configs
+must add them explicitly; no rules are silently copied from the bundled file. The plugin's standard config
+loading chooses the bundled file only when no custom config is supplied.
+
+`settings.heuristic_weights` configures default signal weights: `keyword: 1.0`, `phrase: 2.0`, `pattern: 3.0`.
+Per-keyword `weights` and phrase `:weight` suffixes still take precedence. All three weights must be supplied;
+values must be finite, nonnegative numbers. Changing them requires only changes to the loaded JSON, not edits
+to the scorer.
 
 ### Environment variables
 
@@ -462,6 +491,7 @@ construction** (so after a restart, never mid-session).
 | `…_FALLBACK_MODE`                                                   | Mode used when nothing matches                        |
 | `…_HEURISTIC_ENABLED`                                               | `1/0`, `true/false`, `yes/no`, `on/off`               |
 | `…_HEURISTIC_MIN_SCORE`                                             | Minimum keyword score to accept a heuristic hit       |
+| `…_HEURISTIC_MIN_MARGIN`                                            | Minimum score lead over the runner-up (default `1.0`; ties always rejected) |
 | `…_CLASSIFY_MAX_CHARS`                                              | Separate history budget and total semantic-query cap  |
 | `…_MODEL`                                                           | **Embedding** model for the semantic layer            |
 | `…_SEMANTIC_ENABLED`                                                | Toggle the embedding layer                            |
@@ -590,6 +620,11 @@ export LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_MODELS="implement=qwen/A|debug=
 - **`heuristic_min_score` is the false-positive dial.** One plain keyword is `1.0`, so the default `3.0` needs a strong
   keyword (`"debug": 3`), a phrase (`2.0`+), or a pattern (`3.0`). Lower it and generic words start stealing turns;
   raise it and specialised modes go quiet. Score math is visible in the logs via `similarity = score/(score+1)`.
+- **`heuristic_min_margin` guards ambiguous intent.** The default requires a lead of `1.0` over the runner-up;
+  ties always continue to semantic/fallback, even at margin `0`. Repeated rules and overlapping matches do not
+  multiply the score. Heuristic similarity is rule strength, not calibrated probability.
+- **Negations are local action prohibitions.** Tune `heuristic_negation_pattern` for your phrasing, not for every
+  occurrence of `nie` / `not`; a failure report such as `nie działa` must remain debugging evidence.
 - **`plan` and `implement` signals are dead by design.** Their keyword lists exist in the JSON for the embedding layer
   only. To route planning by text you would have to change `HEURISTIC_MODES` in code — prefer Plan Mode in the CLI, or
   an explicit `"agent_mode": "plan"` override.
@@ -664,7 +699,7 @@ def turn(text, collaboration=DEFAULT, **turn_meta):
 plugin = CodexRoutingPlugin(logger=None)
 cases = {
     "plan mode turn": turn("Zaplanuj migrację bazy danych.", PLAN),
-    "keyword turn": turn("napraw testy w tests/"),
+    "keyword turn": turn("testy"),
     "plain turn": turn("Dodaj endpoint zwracający status usługi."),
     "title generation": turn("Summarize this thread in one line.", None, thread_source="system"),
     "compaction": turn("Compact the conversation.", DEFAULT, request_kind="compaction"),
@@ -676,11 +711,11 @@ for name, payload in cases.items():
           f"class={out['routing']['codex_class']}")
 ```
 
-Expected output with the shipped config:
+Illustrative expected output with the shipped config (not a measurement report):
 
 ```text
 plan mode turn       -> model=qwen/Qwen3.8-Flash-Next    agent_mode=plan        source=collaboration_mode  sim=1.000 class=main
-keyword turn         -> model=qwen/Qwen3.8-27B           agent_mode=test        source=heuristic           sim=0.933 class=main
+keyword turn         -> model=qwen/Qwen3.8-27B           agent_mode=test        source=heuristic           sim=0.750 class=main
 plain turn           -> model=qwen/Qwen3.8-Flash-Next    agent_mode=implement   source=fallback            sim=0.000 class=main
 title generation     -> model=qwen/Qwen3.8-27B           agent_mode=aux_title   source=class               sim=1.000 class=aux_title
 compaction           -> model=qwen/Qwen3.8-27B           agent_mode=compaction  source=class               sim=1.000 class=compaction
@@ -717,10 +752,10 @@ title, compaction) the payload builders mirror.
 | Symptom                                                     | Likely cause                                                     | Fix                                                                    |
 |--------------------------------------------------------------|------------------------------------------------------------------|-------------------------------------------------------------------------|
 | Nothing is ever rerouted                                      | plugin not in `LLM_ROUTER_UTILS_PLUGINS_PIPELINE`, or trigger mismatch | check the `[utils] Registered utility plugin` log line, then `…_TRIGGER` |
-| Every turn is `implement` / `source=fallback`                 | signals too narrow, `heuristic_min_score` too high, semantic off   | lower `…_HEURISTIC_MIN_SCORE`, add phrases, check `…_SEMANTIC_ENABLED`   |
+| Every turn is `implement` / `source=fallback`                 | signals too narrow, score/margin too high, tied scores, semantic off | inspect scores and local negations; tune score/margin and phrases; check `…_SEMANTIC_ENABLED` |
 | `plan` never selected in Plan Mode                            | no `<collaboration_mode>` block reached the plugin (stripped/rewritten) | verify the `developer` message survives to the router; `"agent_mode": "plan"` as override |
 | Titles or compaction on the coding model                      | `client_metadata` / `x-codex-turn-metadata` missing or unparsable   | stop stripping metadata; `routing.codex_class` in the logs tells you what was seen |
-| Wrong specialised mode                                        | overlapping keywords; ties go to `test` → `git_review` → `review` → `debug` | re-weight, or move the ambiguous phrase to a `phrases` entry with a weight |
+| Ambiguous intent reaches semantic/fallback                     | tied heuristic scores or insufficient lead over the runner-up    | add specific signals or re-weight; lowering the margin never accepts a tie |
 | `similarity` just under `0.51` on good matches                 | embedding model / threshold mismatch for your phrasing              | lower `…_SIMILARITY_THRESHOLD` gradually (0.45–0.5 is the usual band)     |
 | `model not found` after a routing decision                     | `model_name` not declared in the router model config                | add/fix the model in `LLM_ROUTER_MODELS_CONFIG`                            |
 | Agent stops calling tools on some turns                        | routed model/provider without tool parsing                          | `tool_calling: true` + a server with tool parsing for that model           |
@@ -738,7 +773,7 @@ title, compaction) the payload builders mirror.
 | Module            | Responsibility                                                             |
 |-------------------|----------------------------------------------------------------------------|
 | `payload.py`      | Codex wire format → immutable `CodexRequest`; request classes; user-text assembly |
-| `scoring.py`      | `CodexModeScorer`: keyword / phrase / regex scoring, cached per-mode plans  |
+| `scoring.py`      | `CodexModeScorer`: deduplicated keyword / phrase / regex scoring, local negations, `ModeScore` / `SignalMatch` ranking |
 | `classifier.py`   | `CodexModeClassifier` cascade, `HEURISTIC_MODES`, `CLASS_ROUTED_MODES`, `RoutingDecision` |
 | `semantic.py`     | optional cosine-similarity layer, acceptance threshold, fail-open lookups   |
 | `config.py`       | JSON loading, env overrides, `validate_args`, `lint_signals`                |
@@ -752,6 +787,9 @@ title, compaction) the payload builders mirror.
 | `settings.fallback_mode`     | `implement`                           |
 | `settings.heuristic_enabled` | `true`                                |
 | `settings.heuristic_min_score` | `3.0`                               |
+| `settings.heuristic_min_margin` | `1.0`                              |
+| `settings.heuristic_weights` | `keyword: 1.0`, `phrase: 2.0`, `pattern: 3.0` |
+| `settings.heuristic_negation_pattern` | packaged explicit PL/EN action-prohibition regex |
 | `settings.classify_max_chars`| `4000`                                |
 | `settings.semantic.enabled`  | `true`                                |
 | `settings.semantic.threshold`| `0.51`                                |

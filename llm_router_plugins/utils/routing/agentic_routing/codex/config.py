@@ -37,6 +37,7 @@ JSON structure::
 """
 
 import logging
+import math
 import os
 import re
 import pathlib
@@ -114,8 +115,13 @@ class CodexRoutingConfig(RoutingConfigBase):
         newest user message is always kept whole, older ones are appended while
         the budget holds.
     phase : CodexPhaseConfig
-        Validated current-activity rules from ``settings.phase``. Missing fields
-        inherit defaults from the packaged JSON configuration.
+        Validated current-activity rules from the supplied ``settings.phase``.
+    heuristic_min_margin : float
+        Minimum lead over the second candidate; ties always abstain.
+    heuristic_negation_pattern : str
+        Regex matching locally forbidden action clauses, not generic negation.
+    heuristic_weights : Dict[str, float]
+        Default keyword, phrase and pattern weights from the supplied config.
     """
 
     # RoutingConfigBase hooks (ClassVar — not dataclass fields)
@@ -139,8 +145,11 @@ class CodexRoutingConfig(RoutingConfigBase):
     chunk_overlap: int
     embedding_model: str
     codex_modes: Tuple["CodexMode", ...]
+    heuristic_min_margin: float
+    heuristic_negation_pattern: str
+    heuristic_weights: Dict[str, float]
+    phase: CodexPhaseConfig
     classify_max_chars: int = DEFAULT_CLASSIFY_MAX_CHARS
-    phase: CodexPhaseConfig = field(default_factory=CodexPhaseConfig.from_raw)
 
     @property
     def mode_names(self) -> List[str]:
@@ -183,7 +192,10 @@ class CodexRoutingConfig(RoutingConfigBase):
                 )
 
         settings = raw["settings"]
-        for setting_key in ("trigger_model", "fallback_mode"):
+        for setting_key in (
+            "trigger_model", "fallback_mode", "heuristic_min_margin",
+            "heuristic_negation_pattern", "heuristic_weights", "phase",
+        ):
             if setting_key not in settings:
                 raise KeyError(
                     f"Missing required field '{setting_key}' in settings. "
@@ -238,9 +250,27 @@ class CodexRoutingConfig(RoutingConfigBase):
                 settings.get("classify_max_chars", DEFAULT_CLASSIFY_MAX_CHARS)
             ),
             phase=CodexPhaseConfig.from_raw(
-                settings.get("phase"), mode_names=[mode.name for mode in codex_modes]
+                settings["phase"], mode_names=[mode.name for mode in codex_modes]
             ),
+            heuristic_min_margin=float(settings["heuristic_min_margin"]),
+            heuristic_negation_pattern=settings["heuristic_negation_pattern"],
+            heuristic_weights=cls._heuristic_weights(settings["heuristic_weights"]),
         )
+
+    @staticmethod
+    def _heuristic_weights(raw):
+        if not isinstance(raw, dict):
+            raise ValueError("settings.heuristic_weights must be an object")
+        if set(raw) != {"keyword", "phrase", "pattern"}:
+            raise ValueError("settings.heuristic_weights requires keyword, phrase and pattern")
+        result = dict(raw)
+        for name, value in result.items():
+            if (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0
+            ):
+                raise ValueError(f"settings.heuristic_weights.{name} must be finite and >= 0")
+        return result
 
     def _override_from_env(self, logger: Optional[logging.Logger] = None) -> None:
         """
@@ -359,6 +389,10 @@ class CodexRoutingConfig(RoutingConfigBase):
         min_score = env_float(AGENTIC_CODEX_ROUTING_PREFIX, "HEURISTIC_MIN_SCORE")
         if min_score is not None:
             self.heuristic_min_score = min_score
+
+        min_margin = env_float(AGENTIC_CODEX_ROUTING_PREFIX, "HEURISTIC_MIN_MARGIN")
+        if min_margin is not None:
+            self.heuristic_min_margin = min_margin
 
         classify_max_chars = env_int(
             AGENTIC_CODEX_ROUTING_PREFIX, "CLASSIFY_MAX_CHARS"
@@ -539,6 +573,18 @@ class CodexRoutingConfig(RoutingConfigBase):
         if self.top_k < 1:
             raise ValueError(f"CodexRouting: top_k must be >= 1, got {self.top_k}")
 
+        for name in ("heuristic_min_score", "heuristic_min_margin"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"CodexRouting: {name} must be finite and >= 0")
+        self._heuristic_weights(self.heuristic_weights)
+        if not isinstance(self.heuristic_negation_pattern, str):
+            raise ValueError("CodexRouting: heuristic_negation_pattern must be a string")
+        try:
+            re.compile(self.heuristic_negation_pattern, re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError("CodexRouting: invalid heuristic_negation_pattern") from exc
+
     def lint_signals(self, logger: Optional[logging.Logger] = None) -> None:
         """
         Report configured signals that can never score, as warnings.
@@ -627,7 +673,8 @@ class CodexMode(RoutingTarget):
         Multi-word expressions for the scorer, optionally suffixed with
         ``":weight"`` (default weight 2.0).
     patterns : Tuple[str, ...]
-        Regex patterns for the scorer (each match adds 3.0).
+        Regex signals (weight 3.0); overlaps are deduplicated and each rule
+        contributes at most once, outside locally forbidden action clauses.
     weights : Dict[str, Any]
         Per-keyword weights overriding the default keyword weight of 1.0.
     """
