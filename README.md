@@ -215,7 +215,7 @@ optional embedding cosine-similarity lookup — and falls back to `implement`:
 | `git_review` | `qwen/Qwen3.8-27B`        | Keywords in the classified user text           |
 | `review`     | `qwen/Qwen3.8-Flash-Next` | Keywords in the classified user text           |
 | `debug`      | `qwen/Qwen3.8-Flash-Next` | Keywords in the classified user text           |
-| `aux_title`  | `qwen/Qwen3.8-27B`        | Request class — system-thread title generation |
+| `aux_title`  | `qwen/Qwen3.8-27B`        | Request class — system thread or title shape    |
 | `compaction` | `qwen/Qwen3.8-27B`        | Request class — context compaction             |
 
 Modes ship in

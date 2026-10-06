@@ -648,7 +648,7 @@ labelled with a class, in strict priority order **compaction → aux_title → m
 | Class        | `request_class` | Detected from                                                                                   | Routed as    |
 |--------------|-----------------|-------------------------------------------------------------------------------------------------|--------------|
 | Compaction   | `compaction`    | `request_kind == "compaction"` in the turn metadata                                              | `compaction` |
-| Title        | `aux_title`     | `request_kind == "turn"` **and** `thread_source == "system"`, corroborated by `tools == []` and a `codex_output_schema` JSON-schema output | `aux_title`  |
+| Title        | `aux_title`     | `thread_source == "system"`, or — when the metadata does not declare it — the shape of the call: `tools == []`, a `json_schema` output format and the CLI title instruction as the first sentence of the user text | `aux_title`  |
 | Main turn    | `main`          | everything else                                                                                  | mode layers  |
 
 Notes on the wire format:
@@ -859,7 +859,7 @@ With the same plugin and a Default-mode collaboration block, the latest user mes
 | `"napraw testy w tests/"`                                      | `qwen/Qwen3.8-27B`     | `test`       | `heuristic`          | 0.9333333333333333 |
 | `"Przejrzyj ten katalog i zaproponuj poprawki do modułów"`     | `qwen/Qwen3.8-Flash-Next` | `review`     | `heuristic`          | 0.9333333333333333 |
 | `"hello world"`                                                | `qwen/Qwen3.8-Flash-Next` | `implement`  | `fallback`           | 0.0          |
-| Title generation (`thread_source="system"`, `tools: []`)       | `qwen/Qwen3.8-27B`     | `aux_title` | `class`             | 1.0          |
+| Title generation (`thread_source="system"` or no tools + `json_schema` title prompt) | `qwen/Qwen3.8-27B` | `aux_title` | `class` | 1.0      |
 | `request_kind="compaction"`                                    | `qwen/Qwen3.8-27B`     | `compaction` | `class`            | 1.0          |
 | Any payload with `model="gpt-4"`                               | the payload object itself (identity) | — | —            | —            |
 

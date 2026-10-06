@@ -14,9 +14,10 @@ compaction
     ``request_kind == "compaction"`` — the CLI summarizes the conversation so
     far, so the request carries the whole (huge) transcript.
 aux_title
-    ``request_kind == "turn"`` with ``thread_source == "system"`` — the
-    auto-generated one-line thread title: no tools at all and a
-    ``codex_output_schema`` JSON schema in ``text``.
+    The auto-generated one-line thread title: no tools at all and a
+    ``codex_output_schema`` JSON schema in ``text``.  Declared by the CLI as
+    ``thread_source == "system"``, and — CLI releases disagree on that header —
+    recognized from that shape alone when the metadata stays silent.
 main
     Everything else — a regular agent turn, running in Plan or in Default
     collaboration mode.
@@ -62,6 +63,17 @@ _MESSAGE_SEPARATOR_CHARS = 2
 
 #: The turn-metadata header of the Codex CLI is a JSON-encoded string.
 _TURN_METADATA_KEY = "x-codex-turn-metadata"
+
+#: ``thread_source`` of the helper calls the CLI emits on its own behalf.
+_THREAD_SOURCE_SYSTEM = "system"
+
+#: Opening of the instruction the CLI sends to generate the thread title.  The
+#: instruction is always the first sentence of the user text of the request,
+#: which is why the pattern is anchored there instead of searched for.
+_AUX_TITLE_PROMPT_RE = re.compile(
+    r"^(?:generate|produce|create|write|draft|suggest)\b[^\n]{0,120}\btitle\b",
+    re.IGNORECASE,
+)
 
 REQUEST_CLASS_MAIN = "main"
 REQUEST_CLASS_AUX_TITLE = "aux_title"
@@ -234,6 +246,9 @@ class CodexPayloadParser:
         context_chars = self._content_length(body.get("instructions"))
         context_chars += self._content_length(items)
         tool_names = self._tool_names(body.get("tools"))
+        has_tools = bool(tool_names)
+        structured_output = self._is_structured_output(body.get("text"))
+        latest_user_text = self._latest_user_text(items, body)
 
         return CodexRequest(
             session_id=self._text(client_metadata.get("session_id"))
@@ -252,16 +267,22 @@ class CodexPayloadParser:
             request_kind=request_kind,
             context_window_id=self._text(turn_metadata.get("context_window_id")),
             tool_names=tool_names,
-            has_tools=bool(tool_names),
-            structured_output=self._is_structured_output(body.get("text")),
+            has_tools=has_tools,
+            structured_output=structured_output,
             reasoning_effort=self._reasoning_effort(body.get("reasoning")),
             parallel_tool_calls=bool(body.get("parallel_tool_calls", False)),
             context_chars=context_chars,
             context_tokens=context_chars // _CHARS_PER_TOKEN,
             collaboration_mode=self._collaboration_mode(items),
-            latest_user_text=self._latest_user_text(items, body),
+            latest_user_text=latest_user_text,
             assistant_messages=self._assistant_messages(items),
-            request_class=self._request_class(request_kind, thread_source),
+            request_class=self._request_class(
+                request_kind,
+                thread_source,
+                has_tools,
+                structured_output,
+                latest_user_text,
+            ),
         )
 
     @staticmethod
@@ -630,9 +651,57 @@ class CodexPayloadParser:
         return messages if messages else None
 
     @staticmethod
-    def _request_class(request_kind: str, thread_source: str) -> str:
+    def _is_title_call(
+        has_tools: bool, structured_output: bool, latest_user_text: str
+    ) -> bool:
+        """
+        Recognize the title request from its shape, ignoring the metadata.
+
+        CLI releases do not agree on what they declare in
+        ``x-codex-turn-metadata`` — recent ones emit the title on a ``user``
+        thread — so the call is also recognized by what makes it unmistakable:
+        no advertised tools, a ``json_schema`` response, and the title
+        instruction as the first sentence of the user text.  A regular agent
+        turn advertises tools, so it can never match here.
+
+        Parameters
+        ----------
+        has_tools : bool
+            Whether the request advertises at least one tool.
+        structured_output : bool
+            Whether the request asks for a ``json_schema`` response.
+        latest_user_text : str
+            The assembled user text, newest message first.
+
+        Returns
+        -------
+        bool
+            ``True`` when all three properties of the title call are met.
+
+        Raises
+        ------
+        None
+        """
+        if has_tools or not structured_output or not latest_user_text:
+            return False
+        return _AUX_TITLE_PROMPT_RE.match(latest_user_text) is not None
+
+    @classmethod
+    def _request_class(
+        cls,
+        request_kind: str,
+        thread_source: str,
+        has_tools: bool,
+        structured_output: bool,
+        latest_user_text: str,
+    ) -> str:
         """
         Classify the request, with ``compaction`` ranked above ``aux_title``.
+
+        The ``system`` thread source is enough on its own — every helper call
+        the CLI emits for itself belongs on the auxiliary model — and the shape
+        of the title call (:meth:`_is_title_call`) covers the CLI releases that
+        do not mark it in the metadata at all.
 
         Parameters
         ----------
@@ -640,6 +709,12 @@ class CodexPayloadParser:
             The decoded ``request_kind`` of the turn metadata.
         thread_source : str
             The decoded ``thread_source`` of the turn metadata.
+        has_tools : bool
+            Whether the request advertises tools.
+        structured_output : bool
+            Whether the request asks for a ``json_schema`` response.
+        latest_user_text : str
+            The assembled user text, newest message first.
 
         Returns
         -------
@@ -652,7 +727,9 @@ class CodexPayloadParser:
         """
         if request_kind == REQUEST_CLASS_COMPACTION:
             return REQUEST_CLASS_COMPACTION
-        if request_kind == "turn" and thread_source == "system":
+        if thread_source == _THREAD_SOURCE_SYSTEM:
+            return REQUEST_CLASS_AUX_TITLE
+        if cls._is_title_call(has_tools, structured_output, latest_user_text):
             return REQUEST_CLASS_AUX_TITLE
         return REQUEST_CLASS_MAIN
 

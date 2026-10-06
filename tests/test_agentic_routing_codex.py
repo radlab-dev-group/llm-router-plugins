@@ -163,6 +163,13 @@ DEFAULT_BLOCK = (
     "<collaboration_mode># Collaboration Mode: Default\n\n"
     "Execute the task.</collaboration_mode>"
 )
+#: The title-generation instruction, captured verbatim from the Codex CLI.
+TITLE_INSTRUCTION = (
+    "Generate a concise, single-line task title of at most 36 characters and "
+    "under five words where possible. Start with an imperative verb. Write in "
+    "the user's language. Do not answer the request.\n\n"
+    "User prompt:\nRefaktoryzuj mapping.py na klasę"
+)
 
 
 def _turn_metadata(**overrides):
@@ -244,9 +251,17 @@ def plan_payload(text="Zaplanuj migrację bazy danych."):
     return main_payload(text, collaboration=PLAN_BLOCK)
 
 
-def title_payload():
-    """Build a system title-generation request (no tools, JSON schema)."""
-    payload = main_payload("Summarize this thread in one line.", collaboration=None)
+def title_payload(text=TITLE_INSTRUCTION, **metadata_overrides):
+    """
+    Build a title-generation request: no tools, JSON-schema output, system thread.
+
+    The turn metadata defaults to the ``thread_source == "system"`` declaration
+    of the CLI; *metadata_overrides* replace any single entry of it, so the
+    releases that emit this call on another thread stay reproducible.
+    """
+    metadata = {"thread_source": "system"}
+    metadata.update(metadata_overrides)
+    payload = main_payload(text, collaboration=None, **metadata)
     payload["tools"] = []
     payload["text"] = {
         "format": {
@@ -256,9 +271,7 @@ def title_payload():
             "strict": True,
         },
     }
-    payload["client_metadata"]["x-codex-turn-metadata"] = _turn_metadata(
-        thread_source="system",
-    )
+    payload["client_metadata"]["x-codex-turn-metadata"] = _turn_metadata(**metadata)
     return payload
 
 
@@ -674,6 +687,46 @@ class TestRequestClassRouting:
         assert decision.mode == "aux_title"
         assert decision.source == SOURCE_CLASS
         assert decision.similarity == 1.0
+
+    @pytest.mark.parametrize("thread_source", ["system", "user", ""])
+    def test_title_call_is_recognized_from_its_shape(self, thread_source):
+        payload = title_payload(thread_source=thread_source)
+        request = _parse(payload)
+
+        assert request.request_class == REQUEST_CLASS_AUX_TITLE
+        decision = _decide(request, payload)
+        assert decision.mode == "aux_title"
+        assert decision.source == SOURCE_CLASS
+
+    def test_title_call_without_client_metadata_is_still_aux_title(self):
+        payload = title_payload()
+        del payload["client_metadata"]
+
+        assert _parse(payload).request_class == REQUEST_CLASS_AUX_TITLE
+
+    def test_system_thread_without_a_request_kind_is_aux_title(self):
+        payload = title_payload(thread_source="system", request_kind="")
+
+        assert _parse(payload).request_class == REQUEST_CLASS_AUX_TITLE
+
+    def test_title_prompt_on_an_agent_turn_stays_a_main_turn(self):
+        payload = main_payload("Generate a title for this module.")
+
+        assert _parse(payload).request_class == REQUEST_CLASS_MAIN
+
+    def test_structured_output_without_a_title_prompt_is_a_main_turn(self):
+        payload = title_payload(
+            "Podsumuj ten wątek w jednym zdaniu.", thread_source="user"
+        )
+        request = _parse(payload)
+
+        assert request.structured_output is True
+        assert request.request_class == REQUEST_CLASS_MAIN
+
+    def test_compaction_outranks_the_title_shape(self):
+        payload = title_payload(request_kind="compaction")
+
+        assert _parse(payload).request_class == REQUEST_CLASS_COMPACTION
 
     def test_compaction_routes_to_compaction(self):
         payload = compaction_payload()

@@ -20,7 +20,6 @@ same text twice.
 """
 
 import logging
-from email.mime import text
 
 from typing import Any, Dict, Mapping, Optional, Tuple
 

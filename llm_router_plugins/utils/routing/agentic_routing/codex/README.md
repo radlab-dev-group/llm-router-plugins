@@ -188,11 +188,18 @@ Details that matter when you debug routing:
 Codex mixes three kinds of request on one endpoint. The structural ones are recognised *before* any prompt text is
 read, with strict priority `compaction > aux_title > main`:
 
-| Class        | Condition                                                     | Why it matters                                                    |
-|--------------|---------------------------------------------------------------|-------------------------------------------------------------------|
-| `compaction` | `request_kind == "compaction"`                                | Carries the whole transcript; wins over every keyword signal       |
-| `aux_title`  | `request_kind == "turn"` **and** `thread_source == "system"`   | CLI-generated one-line thread title, no tools, JSON-schema output  |
-| `main`       | everything else                                               | A regular agent turn (Plan or Default collaboration mode)          |
+| Class        | Condition                                                       | Why it matters                                                    |
+|--------------|-----------------------------------------------------------------|-------------------------------------------------------------------|
+| `compaction` | `request_kind == "compaction"`                                  | Carries the whole transcript; wins over every keyword signal       |
+| `aux_title`  | `thread_source == "system"` **or** the title-call shape below    | CLI-generated one-line thread title, no tools, JSON-schema output  |
+| `main`       | everything else                                                 | A regular agent turn (Plan or Default collaboration mode)          |
+
+The title call is recognised in two ways on purpose. Codex releases disagree about what they declare in
+`x-codex-turn-metadata` — some emit the title on a `user` thread, or send no `client_metadata` at all — so when the
+`system` thread source is missing the parser falls back to the *shape* of the call, which is what actually makes it
+unmistakable: no tool advertised, a `json_schema` response format, and the CLI title instruction as the first
+sentence of the user text (`generate` / `produce` / `create` / `write` / `draft` / `suggest` … `title`). A regular
+agent turn advertises tools, so it can never match that shape.
 
 ### Step 3 — resolution cascade
 
@@ -447,7 +454,7 @@ discover dead signals.
 | `git_review` | `qwen/Qwen3.8-27B`         | Keywords                                        | Diff/`git log` analysis: precision over speed              |
 | `review`     | `qwen/Qwen3.8-Flash-Next`  | Keywords                                        | Mostly reading and describing; short answers               |
 | `debug`      | `qwen/Qwen3.8-Flash-Next`  | Keywords                                        | Long traces + hypothesis chains                            |
-| `aux_title`  | `qwen/Qwen3.8-27B`         | Request class (system thread)                  | Tiny prompt, structured JSON-schema output                 |
+| `aux_title`  | `qwen/Qwen3.8-27B`         | Request class (system thread / title shape)    | Tiny prompt, structured JSON-schema output                 |
 | `compaction` | `qwen/Qwen3.8-27B`         | Request class (`request_kind == "compaction"`) | Whole-transcript summarization: capacity matters          |
 
 The names are what this deployment uses today; the plugin is agnostic to them, it just rewrites strings.
@@ -545,9 +552,11 @@ export LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_MODELS="implement=qwen/A|debug=
 - **Write Polish signals in both spellings.** There is no diacritic folding and no stemming beyond word-start prefixes:
   `błąd` never matches `blad`. Every signal users may type without Polish characters needs its ASCII twin — as the
   shipped lists already do.
-- **Class routing needs Codex metadata.** If a proxy or middleware strips `client_metadata` (or the JSON string in
-  `x-codex-turn-metadata`), `compaction` and `aux_title` degrade to `main` and get heuristic/fallback routing — the
-  classic "why is my title generation on the coding model" symptom.
+- **Class routing needs Codex metadata — except the title.** `compaction` is decided by `request_kind` alone, so a
+  proxy that strips `client_metadata` (or the JSON string in `x-codex-turn-metadata`) degrades it to `main` and to
+  heuristic/fallback routing. `aux_title` survives that: the title-call shape (no tools + `json_schema` output + the
+  title instruction) is read from the body, which is also why a title request that reaches the keyword layer is a bug
+  in the shape match, not in the metadata.
 - **A persisted FAISS index is not invalidated when you edit the config.** With `PERSIST_DIR` / `vector_store_path`
   set, `index.faiss` and `docstore.pkl` are reloaded as-is. After changing modes, descriptions or examples, delete both
   files (or point at a new directory) or you keep routing against the old index.
