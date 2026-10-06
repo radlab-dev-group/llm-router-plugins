@@ -68,11 +68,11 @@ from llm_router_plugins.utils.routing.agentic_routing.claude_code.mapping import
     MATCH_WILDCARD,
     ModelMatcher,
     ModelMatch,
+    ModelNameMapper,
     find_ambiguous_wildcards,
     find_duplicate_literals,
     is_wildcard,
     model_family,
-    normalize_model_name,
     validate_pattern,
 )
 from llm_router_plugins.utils.routing.agentic_routing.claude_code.plugin import (
@@ -92,10 +92,10 @@ __all__ = [
     "ClaudeCodeRoutingPlugin",
     "ModelMatch",
     "ModelMatcher",
+    "ModelNameMapper",
     "find_ambiguous_wildcards",
     "find_duplicate_literals",
     "is_wildcard",
     "model_family",
-    "normalize_model_name",
     "validate_pattern",
 ]

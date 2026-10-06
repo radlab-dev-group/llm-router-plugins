@@ -16,7 +16,7 @@ Name seen by the gateway                    Tier        Spelling artefact
 ``claude-3-5-haiku-20241022``               haiku       legacy name ordering
 ==========================================  ==========  ======================
 
-:func:`normalize_model_name` reduces a name to its comparable core so the
+:class:`ModelNameMapper` reduces a name to its comparable core so the
 spellings above collapse to one key, and :class:`ModelMatcher` resolves a name
 to the mode that configured it through four deterministic layers, most specific
 first: literal exact, normalized exact, longest wildcard prefix, family token.
@@ -70,57 +70,95 @@ _FAMILY_ALTERNATIVES = "|".join(re.escape(family) for family in KNOWN_MODEL_FAMI
 _FAMILY_RE = re.compile(rf"(?:^|[-.])(?:{_FAMILY_ALTERNATIVES})(?:[-.]|$)")
 
 
-def normalize_model_name(
-    value: Any,
-    provider_prefixes: Tuple[str, ...] = DEFAULT_PROVIDER_PREFIXES,
-) -> str:
+class ModelNameMapper:
     """
-    Reduce a model name to the key the matcher compares.
+    Reduce model names to the key the matcher compares.
 
-    The reduction is deliberately lossy: it removes what an operator should not
-    have to repeat per tier in the configuration, and nothing else.  After
-    lower-casing it strips, in order, a trailing ``[...]`` window suffix, a
-    provider version suffix (``:0``, ``:v2``), an ``@YYYYMMDD`` revision, a
-    known vendor prefix, any leading path (``models/…``), a ``-vN`` revision
-    and a ``-YYYYMMDD`` release date.
+    One mapper per set of vendor prefixes: the prefix list is stored once and
+    every normalization reuses it, so a configuration that customizes
+    ``provider_prefixes`` keeps the same reduction across its matcher and its
+    lint helpers.
 
     Parameters
     ----------
-    value : Any
-        The model name to normalize.  Anything that is not a string yields an
-        empty result.
     provider_prefixes : Tuple[str, ...]
         Vendor prefixes to strip, compared case-insensitively.
-
-    Returns
-    -------
-    str
-        The normalized name, or an empty string when nothing is left to
-        compare.
-
-    Examples
-    --------
-    >>> normalize_model_name("us.anthropic.claude-sonnet-4-5-20250929-v1:0")
-    'claude-sonnet-4-5'
-    >>> normalize_model_name("claude-opus-5-5[1m]")
-    'claude-opus-5-5'
     """
-    if not isinstance(value, str):
-        return ""
 
-    name = value.strip().lower()
-    if not name:
-        return ""
+    def __init__(
+        self,
+        provider_prefixes: Tuple[str, ...] = DEFAULT_PROVIDER_PREFIXES,
+    ) -> None:
+        """
+        Store the vendor prefixes used by :meth:`normalize`.
 
-    name = _WINDOW_SUFFIX_RE.sub("", name)
-    name = _PROVIDER_VERSION_RE.sub("", name)
-    name = _VERTEX_REVISION_RE.sub("", name)
-    name = _strip_provider_prefix(name, provider_prefixes)
-    name = name.rsplit("/", 1)[-1]
-    name = _REVISION_RE.sub("", name)
-    name = _DATE_SUFFIX_RE.sub("", name)
+        Parameters
+        ----------
+        provider_prefixes : Tuple[str, ...]
+            Vendor prefixes to strip.
 
-    return name.strip()
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        None
+        """
+        self._provider_prefixes = tuple(provider_prefixes)
+
+    def normalize(
+        self, value: Any, provider_prefixes: Optional[Tuple[str, ...]] = None
+    ) -> str:
+        """
+        Reduce a model name to the key the matcher compares.
+
+        The reduction is deliberately lossy: it removes what an operator should not
+        have to repeat per tier in the configuration, and nothing else.  After
+        lower-casing it strips, in order, a trailing ``[...]`` window suffix, a
+        provider version suffix (``:0``, ``:v2``), an ``@YYYYMMDD`` revision, a
+        known vendor prefix, any leading path (``models/…``), a ``-vN`` revision
+        and a ``-YYYYMMDD`` release date.
+
+        Parameters
+        ----------
+        value : Any
+            The model name to normalize.  Anything that is not a string yields an
+            empty result.
+        provider_prefixes : Tuple[str, ...]
+            Vendor prefixes to strip, compared case-insensitively.
+
+        Returns
+        -------
+        str
+            The normalized name, or an empty string when nothing is left to
+            compare.
+
+        Examples
+        --------
+        >>> ModelNameMapper().normalize("us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+        'claude-sonnet-4-5'
+        >>> ModelNameMapper().normalize("claude-opus-5-5[1m]")
+        'claude-opus-5-5'
+        """
+        if provider_prefixes is None:
+            provider_prefixes = self._provider_prefixes
+        if not isinstance(value, str):
+            return ""
+
+        name = value.strip().lower()
+        if not name:
+            return ""
+
+        name = _WINDOW_SUFFIX_RE.sub("", name)
+        name = _PROVIDER_VERSION_RE.sub("", name)
+        name = _VERTEX_REVISION_RE.sub("", name)
+        name = _strip_provider_prefix(name, provider_prefixes)
+        name = name.rsplit("/", 1)[-1]
+        name = _REVISION_RE.sub("", name)
+        name = _DATE_SUFFIX_RE.sub("", name)
+
+        return name.strip()
 
 
 def model_family(value: Any) -> Optional[str]:
@@ -264,7 +302,7 @@ class ModelMatcher:
     family:
 
     1. **literal** — the lower-cased, trimmed name equals a configured entry;
-    2. **exact** — the :func:`normalize_model_name` reduction equals the
+    2. **exact** — the :meth:`ModelNameMapper.normalize` reduction equals the
        reduction of a configured entry, which is what makes
        ``us.anthropic.claude-sonnet-4-5-20250929-v1:0`` hit
        ``claude-sonnet-4-5``;
@@ -306,6 +344,7 @@ class ModelMatcher:
             validates.
         """
         self._provider_prefixes = tuple(provider_prefixes)
+        self._mapper = ModelNameMapper(provider_prefixes)
         self._families_enabled = bool(families_enabled)
         self._literal: Dict[str, ModelMatch] = {}
         self._normalized: Dict[str, ModelMatch] = {}
@@ -326,7 +365,7 @@ class ModelMatcher:
                 self._wildcards.append(
                     (
                         prefix,
-                        normalize_model_name(prefix, self._provider_prefixes),
+                        self._mapper.normalize(prefix),
                         match,
                     )
                 )
@@ -336,9 +375,7 @@ class ModelMatcher:
                 continue
 
             self._literal.setdefault(match.pattern.lower(), match)
-            normalized = normalize_model_name(
-                cleaned, provider_prefixes=self._provider_prefixes
-            )
+            normalized = self._mapper.normalize(cleaned)
             if normalized:
                 self._normalized.setdefault(normalized, match)
 
@@ -379,9 +416,7 @@ class ModelMatcher:
         if found is not None:
             return _as_kind(found, MATCH_LITERAL)
 
-        normalized = normalize_model_name(
-            value, provider_prefixes=self._provider_prefixes
-        )
+        normalized = self._mapper.normalize(value)
         if not normalized:
             return None
 
@@ -493,6 +528,7 @@ def find_duplicate_literals(
         it.  One exact model name claimed by two modes is a configuration
         mistake: only one of the two targets can ever be reached.
     """
+    mapper = ModelNameMapper(provider_prefixes)
     seen: Dict[str, str] = {}
     duplicates: Dict[str, Tuple[str, str]] = {}
     for mode_name, pattern in entries:
@@ -504,7 +540,7 @@ def find_duplicate_literals(
             continue
         keys = (
             cleaned.lower(),
-            normalize_model_name(cleaned, provider_prefixes),
+            mapper.normalize(cleaned),
         )
         for key in keys:
             if not key:

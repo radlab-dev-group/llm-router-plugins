@@ -38,11 +38,11 @@ from llm_router_plugins.utils.routing.agentic_routing.claude_code import (
     ClaudeCodeRoutingConfig,
     ClaudeCodeRoutingPlugin,
     ModelMatcher,
+    ModelNameMapper,
     find_ambiguous_wildcards,
     find_duplicate_literals,
     is_wildcard,
     model_family,
-    normalize_model_name,
     validate_pattern,
 )
 from llm_router_plugins.utils.routing.constants import (
@@ -75,6 +75,9 @@ def clean_claude_code_env(monkeypatch):
     for key in list(__import__("os").environ):
         if key.startswith(_PREFIX):
             monkeypatch.delenv(key)
+
+
+_mapper = ModelNameMapper()
 
 
 @pytest.fixture(name="logger")
@@ -146,21 +149,21 @@ class TestNormalizeModelName:
         ],
     )
     def test_spellings_collapse(self, raw, expected):
-        assert normalize_model_name(raw) == expected
+        assert _mapper.normalize(raw) == expected
 
     @pytest.mark.parametrize("raw", ["", "   ", None, 12, ["claude-opus-5-5"]])
     def test_nothing_to_compare(self, raw):
-        assert normalize_model_name(raw) == ""
+        assert _mapper.normalize(raw) == ""
 
     def test_provider_prefixes_are_configurable(self):
         assert (
-            normalize_model_name(
+            _mapper.normalize(
                 "us.anthropic.claude-opus-5-5", provider_prefixes=("anthropic.",)
             )
             == "us.anthropic.claude-opus-5-5"
         )
         assert (
-            normalize_model_name(
+            _mapper.normalize(
                 "us.anthropic.claude-opus-5-5", provider_prefixes=()
             )
             == "us.anthropic.claude-opus-5-5"
@@ -168,7 +171,7 @@ class TestNormalizeModelName:
 
     def test_longest_prefix_wins(self):
         assert (
-            normalize_model_name(
+            _mapper.normalize(
                 "us.anthropic.claude-opus-5-5",
                 provider_prefixes=("anthropic.", "us.anthropic."),
             )

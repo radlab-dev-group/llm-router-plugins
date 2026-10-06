@@ -109,13 +109,15 @@ running router, see [Verifying the plugin](#verifying-the-plugin).
 ### Step 1 — normalize the requested name
 
 Claude Code resolves its own `fable` / `opus` / `sonnet` / `haiku` aliases before sending, so the gateway sees a
-versioned ID — and the same tier arrives under several spellings. `normalize_model_name()` reduces all of them to one
-key by lower-casing and stripping, in order: a `[1m]`-style window suffix, a provider version (`:0`, `:v2`) or
+versioned ID — and the same tier arrives under several spellings. `ModelNameMapper().normalize()` reduces all of them
+to one key by lower-casing and stripping, in order: a `[1m]`-style window suffix, a provider version (`:0`, `:v2`) or
 `@YYYYMMDD` revision, a vendor prefix (`us.anthropic.`, `anthropic/`), a leading path (`models/…`), a `-vN` revision and
-a `-YYYYMMDD` release date.
+a `-YYYYMMDD` release date. One mapper per set of vendor prefixes: the configuration's `provider_prefixes` are passed
+at construction, so the same reduction is reused by the matcher and the config audits.
 
 ```python
->>> from llm_router_plugins.utils.routing.agentic_routing.claude_code import normalize_model_name as n
+>>> from llm_router_plugins.utils.routing.agentic_routing.claude_code import ModelNameMapper
+>>> n = ModelNameMapper().normalize
 >>> n("us.anthropic.claude-sonnet-4-5-20250929-v1:0")
 'claude-sonnet-4-5'
 >>> n("claude-opus-5-5[1m]")
@@ -312,7 +314,7 @@ nothing at all.
 
 | Module         | Responsibility                                                                |
 | -------------- | ----------------------------------------------------------------------------- |
-| `mapping.py`   | `normalize_model_name`, `model_family`, `validate_pattern`, `ModelMatcher`, config audits |
+| `mapping.py`   | `ModelNameMapper`, `model_family`, `validate_pattern`, `ModelMatcher`, config audits            |
 | `config.py`    | `ClaudeCodeMode`, `ClaudeCodeRoutingConfig` (loading, env overrides, linting) |
 | `plugin.py`    | `ClaudeCodeRoutingPlugin` — resolve, rewrite, annotate                        |
 
