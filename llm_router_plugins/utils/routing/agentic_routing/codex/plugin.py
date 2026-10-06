@@ -40,7 +40,7 @@ from typing import Any, Optional
 from llm_router_plugins.plugin_interface import PluginInterface
 from llm_router_plugins.utils.routing.agentic_routing.codex.classifier import (
     CLASS_ROUTED_MODES,
-    classify,
+    CodexModeClassifier,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.config import (
     CodexRoutingConfig,
@@ -145,6 +145,10 @@ class CodexRoutingPlugin(PluginInterface):
                     logger=self._logger,
                 )
 
+        self._classifier = CodexModeClassifier(
+            config=self._config, semantic=self._semantic
+        )
+
     def apply(
         self,
         payload: Any,
@@ -184,9 +188,7 @@ class CodexRoutingPlugin(PluginInterface):
 
         try:
             request = self._parser.parse(payload)
-            decision = classify(
-                payload, request, self._config, semantic=self._semantic
-            )
+            decision = self._classifier.classify(payload, request)
         except Exception as exc:  # routing must never break a request
             self._warn("Codex routing failed, passing the request through: %s", exc)
             return payload

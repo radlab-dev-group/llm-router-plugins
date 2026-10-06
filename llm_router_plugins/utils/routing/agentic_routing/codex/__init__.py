@@ -25,6 +25,7 @@ Modules
 +  :class:`CodexPayloadParser`
 - :mod:`~codex.scoring` — keyword, phrase and regex scoring
 - :mod:`~codex.classifier` — the deterministic mode cascade
+  (:class:`CodexModeClassifier`)
 - :mod:`~codex.semantic` — embedding cosine similarity (optional, fail-open)
 - :mod:`~codex.config` — configuration loading, validation and env overrides
 - :mod:`~codex.plugin` — the plugin rewriting ``payload["model"]``
@@ -63,7 +64,7 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.classifier import (
     SOURCE_HEURISTIC,
     SOURCE_SEMANTIC,
     RoutingDecision,
-    classify,
+    CodexModeClassifier,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.config import (
     CodexMode,
@@ -107,13 +108,13 @@ __all__ = [
     "CLASS_ROUTED_MODES",
     "DEFAULT_CLASSIFY_MAX_CHARS",
     "CodexMode",
+    "CodexModeClassifier",
     "CodexRequest",
     "CodexPayloadParser",
     "CodexRoutingConfig",
     "CodexRoutingPlugin",
     "CodexSemanticLayer",
     "RoutingDecision",
-    "classify",
     "detect_mode",
     "score_mode",
     "score_to_similarity",

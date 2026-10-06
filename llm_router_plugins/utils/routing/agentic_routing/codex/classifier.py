@@ -1,12 +1,12 @@
 """
 Work-mode resolution cascade for the Codex routing plugin.
 
-The classifier turns a parsed
-:class:`~llm_router_plugins.utils.routing.agentic_routing.codex.
-payload.CodexRequest` into a :class:`RoutingDecision`.  It is fully
-deterministic whenever no semantic layer is injected: layers are tried in a
-fixed order, the first layer that can answer wins, and every cheap layer runs
-before the optional embedding lookup.
+:class:`CodexModeClassifier` turns a parsed
+:class:`~llm_router_plugins.utils.routing.agentic_routing.codex.payload.CodexRequest`
+into a :class:`RoutingDecision`.  It is fully deterministic whenever no
+semantic layer is injected: layers are tried in a fixed order, the first
+layer that can answer wins, and every cheap layer runs before the optional
+embedding lookup.
 
 Cascade
 -------
@@ -37,7 +37,7 @@ Example
 ::
 
     request = CodexPayloadParser().parse(payload)
-    decision = classify(payload, request, config)
+    decision = CodexModeClassifier(config).classify(payload, request)
     decision.mode        # "plan"
     decision.source      # "collaboration_mode"
     decision.similarity  # 1.0
@@ -72,8 +72,8 @@ __all__ = [
     "SOURCE_FALLBACK",
     "HEURISTIC_MODES",
     "CLASS_ROUTED_MODES",
+    "CodexModeClassifier",
     "RoutingDecision",
-    "classify",
 ]
 
 #: The caller named the mode in the payload itself.
@@ -147,22 +147,23 @@ class RoutingDecision:
     similarity: float
 
 
-def classify(
-    payload: Dict[str, Any],
-    request: CodexRequest,
-    config: CodexRoutingConfig,
-    semantic: Optional[CodexSemanticLayer] = None,
-) -> RoutingDecision:
+class CodexModeClassifier:
     """
-    Resolve the Codex work mode for *request*.
+    Resolve the Codex work mode of a request through the cascade.
+
+    The classifier owns the *order* of the layers, not their data: the request
+    comes from :class:`~codex.payload.CodexPayloadParser`, the mode table and
+    the thresholds from :class:`~codex.config.CodexRoutingConfig`, and the
+    optional embedding lookup from
+    :class:`~codex.semantic.CodexSemanticLayer`.  Layers are tried in a fixed
+    order and the first one that can answer wins, so an identical request is
+    always decided identically.
+
+    The instance holds no per-request state, so one classifier is safely shared
+    by every request a plugin handles.
 
     Parameters
     ----------
-    payload : Dict[str, Any]
-        The raw request payload, source of the explicit override keys.
-    request : CodexRequest
-        The parsed payload, source of the request class, collaboration mode
-        and latest user text.
     config : CodexRoutingConfig
         Routing configuration providing the modes, the fallback and the
         heuristic settings.
@@ -170,167 +171,209 @@ def classify(
         Embedding similarity layer, consulted only after every deterministic
         layer has stayed silent.  When omitted or unavailable the cascade stays
         fully deterministic.
-
-    Returns
-    -------
-    RoutingDecision
-        The selected mode and the layer that selected it.  A mode that is not
-        configured is skipped, so the cascade always returns a decision.
-
-    Raises
-    ------
-    None
     """
-    body: Dict[str, Any] = payload if isinstance(payload, dict) else {}
-    modes = config.mode_by_name
 
-    explicit = _explicit_mode(body, modes)
-    if explicit is not None:
-        return RoutingDecision(explicit, SOURCE_EXPLICIT, 1.0, 1.0)
+    def __init__(
+        self,
+        config: CodexRoutingConfig,
+        semantic: Optional[CodexSemanticLayer] = None,
+    ) -> None:
+        """
+        Store the configuration and the optional semantic layer.
 
-    if (
-        request.request_class in CLASS_ROUTED_MODES
-        and request.request_class in modes
-    ):
-        return RoutingDecision(request.request_class, SOURCE_CLASS, 1.0, 1.0)
+        Parameters
+        ----------
+        config : CodexRoutingConfig
+            Routing configuration used by every layer of the cascade.
+        semantic : CodexSemanticLayer, optional
+            Embedding similarity layer, or ``None`` for a purely
+            deterministic cascade.
 
-    if request.collaboration_mode == COLLABORATION_MODE_PLAN and "plan" in modes:
-        return RoutingDecision("plan", SOURCE_COLLABORATION_MODE, 1.0, 1.0)
+        Returns
+        -------
+        None
 
-    if config.heuristic_enabled:
-        decision = _heuristic_mode(request.latest_user_text, config, modes)
-        if decision is not None:
-            return decision
+        Raises
+        ------
+        None
+        """
+        self._config = config
+        self._semantic = semantic
 
-    routed = (
-        semantic.route(request.latest_user_text)
-        if semantic is not None and semantic.available
-        else None
-    )
-    mode, similarity = (
-        semantic.accept(routed) if semantic is not None else (None, 0.0)
-    )
-    if mode is not None:
-        return RoutingDecision(mode.name, SOURCE_SEMANTIC, similarity, similarity)
+    def classify(
+        self, payload: Dict[str, Any], request: CodexRequest
+    ) -> RoutingDecision:
+        """
+        Resolve the Codex work mode for *request*.
 
-    fallback_similarity = 0.0
-    if semantic is not None:
-        cosine = semantic.similarity_for(config.fallback_mode, routed)
-        if cosine is not None:
-            fallback_similarity = cosine
-    return RoutingDecision(
-        config.fallback_mode,
-        SOURCE_FALLBACK,
-        0.0,
-        fallback_similarity,
-    )
+        Parameters
+        ----------
+        payload : Dict[str, Any]
+            The raw request payload, source of the explicit override keys.
+        request : CodexRequest
+            The parsed payload, source of the request class, collaboration mode
+            and latest user text.
 
+        Returns
+        -------
+        RoutingDecision
+            The selected mode and the layer that selected it.  A mode that is
+            not configured is skipped, so the cascade always returns a
+            decision.
 
-def _explicit_mode(
-    body: Dict[str, Any],
-    modes: Dict[str, Any],
-) -> Optional[str]:
-    """
-    Return the mode explicitly requested by the caller, if any.
+        Raises
+        ------
+        None
+        """
+        body: Dict[str, Any] = payload if isinstance(payload, dict) else {}
+        config = self._config
+        semantic = self._semantic
+        modes = config.mode_by_name
 
-    Parameters
-    ----------
-    body : Dict[str, Any]
-        The raw payload.
-    modes : Dict[str, Any]
-        Mapping of configured mode names.
+        explicit = self._explicit_mode(body, modes)
+        if explicit is not None:
+            return RoutingDecision(explicit, SOURCE_EXPLICIT, 1.0, 1.0)
 
-    Returns
-    -------
-    Optional[str]
-        The named mode when it is configured, otherwise ``None``.
+        if (
+            request.request_class in CLASS_ROUTED_MODES
+            and request.request_class in modes
+        ):
+            return RoutingDecision(request.request_class, SOURCE_CLASS, 1.0, 1.0)
 
-    Raises
-    ------
-    None
-    """
-    for value in (
-        body.get(_AGENT_MODE_KEY),
-        body.get(_CODEX_MODE_KEY),
-        _metadata_mode(body),
-    ):
-        if isinstance(value, str):
-            name = value.strip()
-            if name in modes:
-                return name
-    return None
+        if request.collaboration_mode == COLLABORATION_MODE_PLAN and "plan" in modes:
+            return RoutingDecision("plan", SOURCE_COLLABORATION_MODE, 1.0, 1.0)
 
+        if config.heuristic_enabled:
+            decision = self._heuristic_mode(request.latest_user_text, modes)
+            if decision is not None:
+                return decision
 
-def _metadata_mode(body: Dict[str, Any]) -> Any:
-    """
-    Return ``payload["metadata"]["agent_mode"]`` when present.
+        routed = (
+            semantic.route(request.latest_user_text)
+            if semantic is not None and semantic.available
+            else None
+        )
+        mode, similarity = (
+            semantic.accept(routed) if semantic is not None else (None, 0.0)
+        )
+        if mode is not None:
+            return RoutingDecision(mode.name, SOURCE_SEMANTIC, similarity, similarity)
 
-    Parameters
-    ----------
-    body : Dict[str, Any]
-        The raw payload.
+        fallback_similarity = 0.0
+        if semantic is not None:
+            cosine = semantic.similarity_for(config.fallback_mode, routed)
+            if cosine is not None:
+                fallback_similarity = cosine
+        return RoutingDecision(
+            config.fallback_mode,
+            SOURCE_FALLBACK,
+            0.0,
+            fallback_similarity,
+        )
 
-    Returns
-    -------
-    Any
-        The metadata override value, or ``None`` when the metadata block is
-        missing or is not a mapping.
+    @staticmethod
+    def _explicit_mode(
+        body: Dict[str, Any],
+        modes: Dict[str, Any],
+    ) -> Optional[str]:
+        """
+        Return the mode explicitly requested by the caller, if any.
 
-    Raises
-    ------
-    None
-    """
-    metadata = body.get("metadata")
-    if not isinstance(metadata, dict):
-        return None
-    return metadata.get(_AGENT_MODE_KEY)
+        Parameters
+        ----------
+        body : Dict[str, Any]
+            The raw payload.
+        modes : Dict[str, Any]
+            Mapping of configured mode names.
 
+        Returns
+        -------
+        Optional[str]
+            The named mode when it is configured, otherwise ``None``.
 
-def _heuristic_mode(
-    text: str,
-    config: CodexRoutingConfig,
-    modes: Dict[str, Any],
-) -> Optional[RoutingDecision]:
-    """
-    Score the latest user text against the heuristic candidate modes.
-
-    Parameters
-    ----------
-    text : str
-        The latest user message of the request.
-    config : CodexRoutingConfig
-        Routing configuration providing the candidate modes and the minimum
-        score required to accept a match.
-    modes : Dict[str, Any]
-        Configured modes by name, normally ``config.mode_by_name``, reused
-        from the cascade so the lookup is built once per request.
-
-    Returns
-    -------
-    Optional[RoutingDecision]
-        A :data:`SOURCE_HEURISTIC` decision when a candidate scores at least
-        ``config.heuristic_min_score``, otherwise ``None``.  Candidates are
-        scanned in :data:`HEURISTIC_MODES` order, so ties go to the mode that
-        comes first there; the confidence is ``score / (score + 1)``.
-
-    Raises
-    ------
-    None
-    """
-    if not text:
+        Raises
+        ------
+        None
+        """
+        for value in (
+            body.get(_AGENT_MODE_KEY),
+            body.get(_CODEX_MODE_KEY),
+            CodexModeClassifier._metadata_mode(body),
+        ):
+            if isinstance(value, str):
+                name = value.strip()
+                if name in modes:
+                    return name
         return None
 
-    candidates = [modes[name] for name in HEURISTIC_MODES if name in modes]
-    if not candidates:
-        return None
+    @staticmethod
+    def _metadata_mode(body: Dict[str, Any]) -> Any:
+        """
+        Return ``payload["metadata"]["agent_mode"]`` when present.
 
-    best_mode, score = detect_mode(text, candidates)
-    if best_mode is None or score < config.heuristic_min_score:
-        return None
+        Parameters
+        ----------
+        body : Dict[str, Any]
+            The raw payload.
 
-    return RoutingDecision(
-        mode=best_mode.name,
-        source=SOURCE_HEURISTIC,
-        score=score,
-        similarity=score_to_similarity(score),
-    )
+        Returns
+        -------
+        Any
+            The metadata override value, or ``None`` when the metadata block is
+            missing or is not a mapping.
+
+        Raises
+        ------
+        None
+        """
+        metadata = body.get("metadata")
+        if not isinstance(metadata, dict):
+            return None
+        return metadata.get(_AGENT_MODE_KEY)
+
+    def _heuristic_mode(
+        self,
+        text: str,
+        modes: Dict[str, Any],
+    ) -> Optional[RoutingDecision]:
+        """
+        Score the latest user text against the heuristic candidate modes.
+
+        Parameters
+        ----------
+        text : str
+            The latest user message of the request.
+        modes : Dict[str, Any]
+            Configured modes by name, normally ``config.mode_by_name``, reused
+            from the cascade so the lookup is built once per request.
+
+        Returns
+        -------
+        Optional[RoutingDecision]
+            A :data:`SOURCE_HEURISTIC` decision when a candidate scores at
+            least ``config.heuristic_min_score``, otherwise ``None``.
+            Candidates are scanned in :data:`HEURISTIC_MODES` order, so ties go
+            to the mode that comes first there; the confidence is
+            ``score / (score + 1)``.
+
+        Raises
+        ------
+        None
+        """
+        if not text:
+            return None
+
+        candidates = [modes[name] for name in HEURISTIC_MODES if name in modes]
+        if not candidates:
+            return None
+
+        best_mode, score = detect_mode(text, candidates)
+        if best_mode is None or score < self._config.heuristic_min_score:
+            return None
+
+        return RoutingDecision(
+            mode=best_mode.name,
+            source=SOURCE_HEURISTIC,
+            score=score,
+            similarity=score_to_similarity(score),
+        )

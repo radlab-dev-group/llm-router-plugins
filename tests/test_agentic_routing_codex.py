@@ -45,13 +45,13 @@ from llm_router_plugins.utils.routing.agentic_routing.codex import (
     SOURCE_HEURISTIC,
     SOURCE_SEMANTIC,
     CodexMode,
+    CodexModeClassifier,
     CodexRequest,
     CodexPayloadParser,
     CodexSemanticLayer,
     CodexRoutingConfig,
     CodexRoutingPlugin,
     RoutingDecision,
-    classify,
     detect_mode,
     score_mode,
     score_to_similarity,
@@ -127,11 +127,8 @@ def _parse(payload, max_chars=DEFAULT_CLASSIFY_MAX_CHARS):
 
 def _decide(request, payload=None, config=None):
     """Run the classifier cascade for an already parsed request."""
-    return classify(
-        payload if payload is not None else {},
-        request,
-        config if config is not None else _config(),
-    )
+    classifier = CodexModeClassifier(config if config is not None else _config())
+    return classifier.classify(payload if payload is not None else {}, request)
 
 
 def _rebuild(config, **changes):
@@ -842,9 +839,15 @@ class TestPassthrough:
 
     def test_unclassified_mode_is_a_no_op(self, monkeypatch):
         unknown = RoutingDecision("ghost", SOURCE_CLASS, 1.0, 1.0)
-        monkeypatch.setattr(
-            plugin_module, "classify", lambda *args, **kwargs: unknown
-        )
+
+        class GhostClassifier:
+            def __init__(self, *args, **kwargs):
+                return None
+
+            def classify(self, payload, request):
+                return unknown
+
+        monkeypatch.setattr(plugin_module, "CodexModeClassifier", GhostClassifier)
         payload = main_payload()
         before = copy.deepcopy(payload)
 
@@ -855,10 +858,14 @@ class TestPassthrough:
         assert "routing" not in payload
 
     def test_classifier_failure_is_swallowed(self, monkeypatch):
-        def boom(*args, **kwargs):
-            raise RuntimeError("classifier exploded")
+        class ExplodingClassifier:
+            def __init__(self, *args, **kwargs):
+                return None
 
-        monkeypatch.setattr(plugin_module, "classify", boom)
+            def classify(self, payload, request):
+                raise RuntimeError("classifier exploded")
+
+        monkeypatch.setattr(plugin_module, "CodexModeClassifier", ExplodingClassifier)
         payload = main_payload()
         before = copy.deepcopy(payload)
 
@@ -896,10 +903,14 @@ class TestPassthrough:
             def info(self, message, *args):
                 return None
 
-        def boom(*args, **kwargs):
-            raise RuntimeError("classifier exploded")
+        class ExplodingClassifier:
+            def __init__(self, *args, **kwargs):
+                return None
 
-        monkeypatch.setattr(plugin_module, "classify", boom)
+            def classify(self, payload, request):
+                raise RuntimeError("classifier exploded")
+
+        monkeypatch.setattr(plugin_module, "CodexModeClassifier", ExplodingClassifier)
 
         result = CodexRoutingPlugin(logger=RecordingLogger()).apply(main_payload())
 
@@ -1840,12 +1851,10 @@ def _semantic_layer(router, threshold=0.5, modes=None, logger=None):
 def _classify_semantic(payload, router, threshold=0.5, logger=None):
     """Classify *payload* with a stub-backed semantic layer attached."""
     request = _parse(payload)
-    return classify(
-        payload,
-        request,
-        _config(),
-        semantic=_semantic_layer(router, threshold, logger=logger),
+    classifier = CodexModeClassifier(
+        _config(), semantic=_semantic_layer(router, threshold, logger=logger)
     )
+    return classifier.classify(payload, request)
 
 
 class TestSemanticSimilarity:

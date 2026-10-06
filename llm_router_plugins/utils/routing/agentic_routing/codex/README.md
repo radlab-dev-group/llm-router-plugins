@@ -192,7 +192,7 @@ read, with strict priority `compaction > aux_title > main`:
 
 ### Step 3 — resolution cascade
 
-`classify()` tries layers in a fixed order; the **first layer that can answer wins**. A main turn never falls below the
+`CodexModeClassifier.classify()` tries layers in a fixed order; the **first layer that can answer wins**. A main turn never falls below the
 fallback mode: the keyword and semantic layers can specialise the decision, never weaken it.
 
 | # | Layer                                          | `routing.source`     | Confidence                          |
@@ -670,7 +670,7 @@ title, compaction) the payload builders mirror.
 |-------------------|----------------------------------------------------------------------------|
 | `payload.py`      | Codex wire format → immutable `CodexRequest`; request classes; user-text assembly |
 | `scoring.py`      | keyword / phrase / regex scoring, `score / (score + 1)` confidence mapping  |
-| `classifier.py`   | the six-layer cascade, `HEURISTIC_MODES`, `CLASS_ROUTED_MODES`, `RoutingDecision` |
+| `classifier.py`   | `CodexModeClassifier` cascade, `HEURISTIC_MODES`, `CLASS_ROUTED_MODES`, `RoutingDecision` |
 | `semantic.py`     | optional cosine-similarity layer, acceptance threshold, fail-open lookups   |
 | `config.py`       | JSON loading, env overrides, `validate_args`, `lint_signals`                |
 | `plugin.py`       | `CodexRoutingPlugin`: trigger gate, router construction, payload annotation  |
