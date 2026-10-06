@@ -1513,9 +1513,11 @@ class TestSignalLint:
     def _with_patterns(patterns):
         """Return the bundled config with *patterns* added to the ``plan`` mode."""
         modes = tuple(
-            dataclasses.replace(mode, patterns=mode.patterns + patterns)
-            if mode.name == "plan"
-            else mode
+            (
+                dataclasses.replace(mode, patterns=mode.patterns + patterns)
+                if mode.name == "plan"
+                else mode
+            )
             for mode in _config().codex_modes
         )
         return _rebuild(_config(), codex_modes=modes)
