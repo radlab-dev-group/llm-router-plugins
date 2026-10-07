@@ -231,6 +231,13 @@ validation fails at startup.
 selection and its pitfalls, tuning, a verification recipe and a troubleshooting table — lives in the
 [Codex CLI Routing README](llm_router_plugins/utils/routing/agentic_routing/codex/README.md).
 
+**Calibration and evaluation guides** live in the same `llm_router_plugins/utils/routing/agentic_routing/codex/`
+directory: [Polski — CODEX_EVAL_HOWTO_PL.md](llm_router_plugins/utils/routing/agentic_routing/codex/CODEX_EVAL_HOWTO_PL.md)
+and [English — CODEX_EVAL_HOWTO_EN.md](llm_router_plugins/utils/routing/agentic_routing/codex/CODEX_EVAL_HOWTO_EN.md).
+They explain configuration roles, heuristic scores and embedding similarity, threshold/margin tuning, calibration/holdout
+datasets, the evaluation CLI and report metrics, and deployment/index rebuilding. They also document the automated
+[`scripts/codex-tune-eval.sh`](scripts/codex-tune-eval.sh) workflow; quality is evaluated by work mode, independently of model assignments.
+
 ### 2.7.4 Claude Code Model Swap (`claude-*` → configured models)
 
 The **Claude Code Model Swap plugin** (`agentic_routing_claude_code`, `utils/routing/agentic_routing/claude_code/`)

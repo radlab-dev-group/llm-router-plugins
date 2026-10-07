@@ -15,6 +15,23 @@ contributes cosine similarity over the mode descriptions and examples only when 
 - **Default config:** `llm_router_plugins/resources/routing/agentic_routing_codex.json`
 - **Env prefix:** `LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_`
 
+## Calibration and evaluation guides (PL / EN)
+
+The full guides are stored alongside this README in `llm_router_plugins/utils/routing/agentic_routing/codex/`:
+
+- [CODEX_EVAL_HOWTO_PL.md — Polski](CODEX_EVAL_HOWTO_PL.md)
+- [CODEX_EVAL_HOWTO_EN.md — English](CODEX_EVAL_HOWTO_EN.md)
+
+They cover configuration files and ENV overrides, heuristic scoring versus embedding similarity, descriptions/examples
+and threshold/margin calibration, session-separated calibration/holdout datasets, the evaluation CLI, report variants,
+precision/recall and mode-transition metrics, and safe deployment with index rebuilding. The goal is better **work-mode
+selection**, not tuning for particular response-model names.
+
+For automated threshold/margin tuning and evaluation, see
+[`scripts/codex-tune-eval.sh`](../../../../../scripts/codex-tune-eval.sh) in the repository root and section 6 of either guide.
+The script selects candidates on calibration, then compares source and selected configurations on holdout; it does not
+overwrite production configuration or use production Redis. Use `--no-semantic` for deterministic evaluation without tuning.
+
 ---
 
 ## What the plugin changes
