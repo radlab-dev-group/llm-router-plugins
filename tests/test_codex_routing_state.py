@@ -609,6 +609,43 @@ def test_state_diagnostics_never_include_exception_credentials(caplog):
     assert "secret-password" not in status.detail + caplog.text
 
 
+@pytest.mark.parametrize("startup", [True, False])
+def test_redis_tracebacks_mask_credentials_in_exception_chains(startup, monkeypatch, caplog):
+    policy = CodexMemoryConfig(
+        enabled=True, backend="redis",
+        connection=RedisConnectionSettings(
+            host="cache", username="configured-user", password="configured-password",
+        ),
+    )
+
+    def fail(*args, **kwargs):
+        try:
+            raise ValueError("rediss://url-user:url-password@cache invalid reply")
+        except ValueError as exc:
+            raise ConnectionError("configured-user configured-password connection failed") from exc
+
+    client = Mock()
+    client.ping.side_effect = fail
+    client.get.side_effect = fail
+    monkeypatch.setitem(sys.modules, "redis", SimpleNamespace(Redis=Mock(return_value=client)))
+    with caplog.at_level(logging.WARNING):
+        if startup:
+            store, status = build_state_store(policy, client=client)
+            assert store is None
+        else:
+            _, status = RedisRoutingStateStore(policy, client).read("key")
+
+    assert status.state == "unavailable"
+    for secret in ("url-user", "url-password", "configured-user", "configured-password"):
+        assert secret not in caplog.text
+    assert "[REDACTED]" in caplog.text
+    assert "ValueError" in caplog.text
+    assert "ConnectionError" in caplog.text
+    assert "invalid reply" in caplog.text
+    assert "connection failed" in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
+
+
 def test_large_wire_identifiers_are_bounded_but_still_link_outputs(config, policy):
     call_id, event_id = "c" * 10000, "e" * 10000
     request, initial = _preview(config, policy, None, dict(command("pytest tests/test_a.py", call_id), id=event_id))
@@ -994,6 +1031,11 @@ def test_plugin_warns_at_startup_when_redis_is_unreachable(
     client.ping.assert_called_once_with()
     assert "Codex routing memory disabled" in caplog.text
     assert type(failure).__name__ in caplog.text
+    record = next(record for record in caplog.records if "memory disabled" in record.message)
+    assert "state.py" in record.message
+    assert "redis_client.ping()" in record.message
+    assert str(failure) in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
     assert plugin._memory is None
     assert plugin.apply(payload())["agent_mode"] in config.mode_by_name
 
@@ -1060,6 +1102,45 @@ def test_redis_write_registers_and_reuses_atomic_script(reply, expected):
         assert args[1] == expected_version
         assert args[2] == policy.ttl_seconds
         assert args[4] == policy.max_sessions
+
+
+@pytest.mark.parametrize("operation", ["read", "write", "clear", "cleanup"])
+@pytest.mark.parametrize("with_logger", [True, False])
+def test_redis_failures_log_traceback(operation, with_logger, caplog):
+    class ResponseError(Exception):
+        pass
+
+    failure = ResponseError("ERR syntax error in atomic memory script")
+    client = Mock()
+    client.get.side_effect = failure
+    client.eval.side_effect = failure
+    client.register_script.return_value = Mock(side_effect=failure)
+    policy = CodexMemoryConfig(enabled=True, backend="redis")
+    logger = logging.getLogger("codex-memory-test") if with_logger else None
+    store = RedisRoutingStateStore(policy, client, logger=logger)
+    key = session_key(policy.key_prefix, "s", "t", "a")
+
+    with caplog.at_level(logging.WARNING):
+        if operation == "read":
+            state, status = store.read(key)
+            assert state is None
+        elif operation == "write":
+            status = store.write(key, SessionRoutingState(mode="git_review"), 0)
+        elif operation == "clear":
+            status = store.clear(key)
+        else:
+            client.get.side_effect = None
+            client.get.return_value = "invalid record"
+            state, status = store.read(key)
+            assert state is None
+
+    assert status.state == ("miss" if operation == "cleanup" else "unavailable")
+    record = next(record for record in caplog.records if "Codex routing memory" in record.message)
+    assert operation in record.message
+    assert "state.py" in record.message
+    assert "ResponseError" in record.message
+    assert str(failure) in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
 
 
 # --- Redis integration (skipped unless a server is reachable) -----------------
@@ -1141,6 +1222,44 @@ def test_ttl_actually_expires_the_record():
         assert client.get(key) is None
     finally:
         store.clear(key)
+
+
+@redis_store
+@pytest.mark.parametrize("ttl_ms", [500, 5000])
+@pytest.mark.parametrize("changed_phase", [False, True])
+def test_redis_updates_preserve_deadline_only_for_unchanged_evidence(ttl_ms, changed_phase):
+    namespace = _namespace()
+    policy = CodexMemoryConfig(enabled=True, backend="redis", key_prefix=namespace)
+    client = _redis_client()
+    store = RedisRoutingStateStore(policy, client)
+    key = session_key(namespace, "s", "t", "a")
+    index = f"{namespace}:v1:sessions"
+    state = SessionRoutingState(mode="git_review", generation="g")
+    try:
+        assert store.write(key, state, 0).state == "written"
+        before = store.read(key)[0]
+        client.pexpire(key, ttl_ms)
+        deadline = time.time() + client.pttl(key) / 1000
+        time.sleep(0.02)
+        incoming = replace(before, mode="test") if changed_phase else before
+
+        assert store.write(key, incoming, before.version).state == "written"
+
+        after, status = store.read(key)
+        assert status.state == "hit"
+        assert after.version == before.version + 1
+        assert after.mode == incoming.mode
+        if changed_phase:
+            assert after.updated_at > before.updated_at
+            assert client.pttl(key) > ttl_ms
+            assert client.zscore(index, key) > deadline
+        else:
+            assert after.updated_at == before.updated_at
+            assert 0 < client.pttl(key) <= ttl_ms
+            assert client.zscore(index, key) == pytest.approx(deadline, abs=0.05)
+    finally:
+        store.clear(key)
+        client.delete(index)
 
 
 @redis_store
@@ -1368,6 +1487,7 @@ def test_real_fork_reopens_connection_and_replaces_inherited_locked_mutex():
     settings = RedisConnectionSettings(
         host=kwargs["host"], port=kwargs["port"], db=kwargs.get("db", 0),
         username=kwargs.get("username"), password=kwargs.get("password"),
+        protocol=kwargs.get("protocol"),
     )
     policy = CodexMemoryConfig(enabled=True, key_prefix=namespace, connection=settings)
     store = RedisRoutingStateStore(policy)

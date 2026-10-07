@@ -620,8 +620,11 @@ identifier there is nothing to isolate, so routing stays stateless instead of gu
 `routing.memory` distinguishes `unconfigured` (invalid memory policy/ENV, missing host or Redis client), `unavailable`
 (failed connection/read/write), `hit`, `miss`, `expired`, `conflict` and `not consulted`; disabled memory may omit the
 field. Startup status is retained even when no store exists. Failed writes do not undo a successful routing decision.
-Diagnostics include a reason and evidence kind, but do not log raw configuration values, exception messages,
-credentials or full session/event/call identifiers. A damaged record, an unknown
+Routing diagnostics include a reason and evidence kind, but do not log raw configuration values,
+credentials or full session/event/call identifiers. Redis startup, read, write, clear and cleanup failures
+also emit a `WARNING` with the exception message and full traceback, even without a supplied logger.
+Redis URL credentials and configured Redis username/password are masked in these tracebacks; exception
+messages can still contain other operational details, so treat logs as sensitive. A damaged record, an unknown
 schema version or a value written by another format is dropped and treated as a miss. Connection and socket timeouts
 default to one second per operation; multiple operations/retries can take longer. Restarting a worker keeps the state;
 restarting Redis without persistence loses it, which costs only the carried phase.

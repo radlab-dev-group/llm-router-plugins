@@ -47,6 +47,7 @@ import os
 import re
 import threading
 import time
+import traceback
 
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -1062,7 +1063,7 @@ def build_state_store(
         Pre-built Redis client.  Injected clients are used as-is, which is how
         a test or an embedding application supplies its own connection.
     logger : Any, optional
-        Logger for a one-line, credential-free explanation.
+        Logger for explanations and credential-masked failure tracebacks.
 
     Returns
     -------
@@ -1111,7 +1112,10 @@ def build_state_store(
     except Exception as exc:  # a bad deployment must not break routing
         status = MemoryStatus("unavailable", _reason(exc))
         if logger is not None:
-            logger.warning("Codex routing memory disabled: %s", _reason(exc))
+            logger.warning(
+                "Codex routing memory disabled: %s\n%s", _reason(exc),
+                _failure_traceback(exc, config.connection),
+            )
         return None, status
     finally:
         if client is None and redis_client is not None:
@@ -1129,6 +1133,16 @@ def build_state_store(
 def _reason(exc: BaseException) -> str:
     """Return a short, credential-free description of an exception."""
     return type(exc).__name__
+
+
+def _failure_traceback(exc: BaseException, connection: RedisConnectionSettings) -> str:
+    """Format the exception chain and stack without Redis connection credentials."""
+    text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    text = re.sub(r"(rediss?://)[^\s/@]+@", r"\1[REDACTED]@", text)
+    for secret in (connection.password, connection.username):
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    return text.rstrip()
 
 
 #: Compare-and-set executed server-side, so two workers cannot interleave a
@@ -1163,12 +1177,12 @@ end
 local expires = tonumber(ARGV[4])
 if preserve then
   local remaining = redis.call('PTTL', KEYS[1])
-  if remaining < 0 then
+  if remaining <= 0 then
     return {'conflict', tostring(version)}
   end
   local timestamp = string.match(current, '"ts"%s*:%s*([^,}]+)')
   payload = string.gsub(payload, '"ts":[^,}]+', '"ts":' .. timestamp, 1)
-  redis.call('SET', KEYS[1], payload, 'KEEPTTL')
+  redis.call('SET', KEYS[1], payload, 'PX', remaining)
   expires = tonumber(ARGV[6]) + remaining / 1000
 else
   redis.call('SET', KEYS[1], payload, 'EX', ttl)
@@ -1212,7 +1226,7 @@ class RedisRoutingStateStore(RoutingStateStore):
         owns its connections).  When omitted, one is built lazily from the
         connection settings.
     logger : Any, optional
-        Logger for a one-line reason per distinct failure; never a credential.
+        Logger for failures with exception tracebacks; defaults to this module's logger.
     """
 
     def __init__(
@@ -1225,7 +1239,7 @@ class RedisRoutingStateStore(RoutingStateStore):
         self._config = config
         self._client = client
         self._pid = os.getpid()
-        self._logger = logger
+        self._logger = logger if logger is not None else logging.getLogger(__name__)
         self._lock = threading.Lock()
         self._script: Any = None
         self._factory: Optional[Callable[[], Any]] = None
@@ -1378,14 +1392,17 @@ class RedisRoutingStateStore(RoutingStateStore):
                 "redis.call('ZREM', KEYS[2], KEYS[1]); return 1 end; return 0",
                 2, key, self._session_index(), raw,
             )
-        except Exception:  # a cleanup must never surface on the routing path
-            pass
+        except Exception as exc:  # a cleanup must never surface on the routing path
+            self._unavailable("cleanup", exc)
 
     def _unavailable(self, operation: str, exc: BaseException) -> MemoryStatus:
         """Log and wrap an infrastructure failure as an ``unavailable`` status."""
         status = MemoryStatus(STATUS_UNAVAILABLE.state, f"{operation}: {_reason(exc)}")
         if self._logger is not None:
-            self._logger.warning("Codex routing memory %s", status.detail)
+            self._logger.warning(
+                "Codex routing memory %s\n%s", status.detail,
+                _failure_traceback(exc, self._config.connection),
+            )
         return status
 
 
