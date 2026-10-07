@@ -1173,7 +1173,11 @@ class RedisRoutingStateStore(RoutingStateStore):
         now = time.time()
         payload = state.set_version(expected_version + 1, now).to_json()
         try:
-            result = self._script()(
+            client = self._connection()
+            with self._lock:
+                if self._script is None:
+                    self._script = client.register_script(_ATOMIC_WRITE_SCRIPT)
+            result = self._script(
                 keys=[key, self._session_index()],
                 args=[
                     payload,
@@ -1200,12 +1204,6 @@ class RedisRoutingStateStore(RoutingStateStore):
         except Exception as exc:
             return self._unavailable("clear", exc)
         return MemoryStatus("written" if removed else "miss")
-
-    def _script(self) -> Any:
-        """Return the registered compare-and-set script, registering it once."""
-        if self._script is None:
-            self._script = self._connection().register_script(_ATOMIC_WRITE_SCRIPT)
-        return self._script
 
     def _drop(self, key: str) -> None:
         """Best-effort removal of a record this version cannot read."""

@@ -641,6 +641,35 @@ def test_build_state_store_reports_a_missing_client_loudly(monkeypatch, caplog):
     assert status.state == "unconfigured"
 
 
+@pytest.mark.parametrize("reply, expected", [
+    ([b"written", b"1"], "written"), ([b"conflict", b"1"], "conflict"),
+])
+def test_redis_write_registers_and_reuses_atomic_script(reply, expected):
+    policy = CodexMemoryConfig(enabled=True, backend="redis")
+    script = Mock(return_value=reply)
+    client = Mock()
+    client.register_script.return_value = script
+    store = RedisRoutingStateStore(policy, client)
+    key = session_key(policy.key_prefix, "s", "t", "a")
+    state = SessionRoutingState(mode="git_review", generation="g")
+
+    assert store.write(key, state, 0).state == expected
+    assert store.write(key, state, 1).state == expected
+
+    client.register_script.assert_called_once()
+    assert "redis.call" in client.register_script.call_args.args[0]
+    assert script.call_count == 2
+    for expected_version, call in enumerate(script.call_args_list):
+        assert call.kwargs["keys"] == [key, f"{policy.key_prefix}:v1:sessions"]
+        args = call.kwargs["args"]
+        saved = SessionRoutingState.from_json(args[0])
+        assert saved.mode == "git_review"
+        assert saved.version == expected_version + 1
+        assert args[1] == expected_version
+        assert args[2] == policy.ttl_seconds
+        assert args[4] == policy.max_sessions
+
+
 # --- Redis integration (skipped unless a server is reachable) -----------------
 
 REDIS_URL = os.environ.get("CODEX_ROUTING_REDIS_URL")
