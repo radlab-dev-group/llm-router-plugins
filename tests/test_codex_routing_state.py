@@ -569,6 +569,7 @@ def test_plugin_checks_redis_connection_at_startup(config, monkeypatch):
     monkeypatch.setenv(f"{PREFIX}MEMORY_ENABLED", "1")
     monkeypatch.setenv(f"{PREFIX}REDIS_HOST", "cache")
     monkeypatch.setenv(f"{PREFIX}REDIS_PROTOCOL", "2")
+    config.memory = memory_config_from_raw(None, PREFIX)
 
     plugin = CodexRoutingPlugin(config=config)
 
@@ -592,6 +593,7 @@ def test_plugin_warns_at_startup_when_redis_is_unreachable(
     monkeypatch.setitem(sys.modules, "redis", SimpleNamespace(Redis=Mock(return_value=client)))
     monkeypatch.setenv(f"{PREFIX}MEMORY_ENABLED", "1")
     monkeypatch.setenv(f"{PREFIX}REDIS_HOST", "wrong-address")
+    config.memory = memory_config_from_raw(None, PREFIX)
     logger = logging.getLogger("codex-startup-test") if with_logger else None
 
     with caplog.at_level(logging.WARNING):
@@ -613,6 +615,7 @@ def test_plugin_does_not_connect_when_redis_memory_is_not_enabled(
     monkeypatch.setenv(f"{PREFIX}MEMORY_ENABLED", "1" if enabled else "0")
     monkeypatch.setenv(f"{PREFIX}MEMORY_BACKEND", backend)
     monkeypatch.setenv(f"{PREFIX}REDIS_HOST", "wrong-address")
+    config.memory = memory_config_from_raw(None, PREFIX)
 
     CodexRoutingPlugin(config=config)
 
