@@ -1,11 +1,13 @@
 """Shared session memory: key isolation, contract, wiring and ENV configuration."""
 
 import json
+import logging
 import os
 import pathlib
 import sys
 import time
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -547,6 +549,8 @@ def test_build_state_store_explains_why_there_is_none():
 
 
 def test_build_state_store_honours_the_backend(monkeypatch):
+    client = Mock()
+    monkeypatch.setitem(sys.modules, "redis", SimpleNamespace(Redis=Mock(return_value=client)))
     monkeypatch.setenv(f"{PREFIX}REDIS_HOST", "cache")
     store, status = build_state_store(
         memory_config_from_raw({"enabled": True, "backend": "memory"}, PREFIX)
@@ -556,6 +560,63 @@ def test_build_state_store_honours_the_backend(monkeypatch):
         memory_config_from_raw({"enabled": True, "backend": "redis"}, PREFIX)
     )
     assert isinstance(built, RedisRoutingStateStore)
+
+
+def test_plugin_checks_redis_connection_at_startup(config, monkeypatch):
+    client = Mock()
+    factory = Mock(return_value=client)
+    monkeypatch.setitem(sys.modules, "redis", SimpleNamespace(Redis=factory))
+    monkeypatch.setenv(f"{PREFIX}MEMORY_ENABLED", "1")
+    monkeypatch.setenv(f"{PREFIX}REDIS_HOST", "cache")
+    monkeypatch.setenv(f"{PREFIX}REDIS_PROTOCOL", "2")
+
+    plugin = CodexRoutingPlugin(config=config)
+
+    client.ping.assert_called_once_with()
+    assert isinstance(plugin._memory, RedisRoutingStateStore)
+    assert factory.call_args.kwargs["host"] == "cache"
+    assert factory.call_args.kwargs["protocol"] == 2
+    assert factory.call_args.kwargs["socket_connect_timeout"] == 1.0
+    assert factory.call_args.kwargs["socket_timeout"] == 1.0
+
+
+@pytest.mark.parametrize("failure", [
+    ConnectionError("Connection refused"), TimeoutError("Connection timed out"),
+])
+@pytest.mark.parametrize("with_logger", [True, False])
+def test_plugin_warns_at_startup_when_redis_is_unreachable(
+    config, monkeypatch, caplog, failure, with_logger,
+):
+    client = Mock()
+    client.ping.side_effect = failure
+    monkeypatch.setitem(sys.modules, "redis", SimpleNamespace(Redis=Mock(return_value=client)))
+    monkeypatch.setenv(f"{PREFIX}MEMORY_ENABLED", "1")
+    monkeypatch.setenv(f"{PREFIX}REDIS_HOST", "wrong-address")
+    logger = logging.getLogger("codex-startup-test") if with_logger else None
+
+    with caplog.at_level(logging.WARNING):
+        plugin = CodexRoutingPlugin(logger=logger, config=config)
+
+    client.ping.assert_called_once_with()
+    assert "Codex routing memory disabled" in caplog.text
+    assert str(failure) in caplog.text
+    assert plugin._memory is None
+    assert plugin.apply(payload())["agent_mode"] in config.mode_by_name
+
+
+@pytest.mark.parametrize("enabled, backend", [(False, "redis"), (True, "memory")])
+def test_plugin_does_not_connect_when_redis_memory_is_not_enabled(
+    config, monkeypatch, enabled, backend,
+):
+    factory = Mock()
+    monkeypatch.setitem(sys.modules, "redis", SimpleNamespace(Redis=factory))
+    monkeypatch.setenv(f"{PREFIX}MEMORY_ENABLED", "1" if enabled else "0")
+    monkeypatch.setenv(f"{PREFIX}MEMORY_BACKEND", backend)
+    monkeypatch.setenv(f"{PREFIX}REDIS_HOST", "wrong-address")
+
+    CodexRoutingPlugin(config=config)
+
+    factory.assert_not_called()
 
 
 def test_build_state_store_reports_a_missing_client_loudly(monkeypatch, caplog):

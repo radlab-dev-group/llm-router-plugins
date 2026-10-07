@@ -40,6 +40,7 @@ Without enough identifiers to build a key, routing stays stateless.
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -942,6 +943,9 @@ def build_state_store(
     """
     Build the store the policy asks for, or explain why there is none.
 
+    Enabled Redis memory is checked with PING before returning the store.
+    A failed check logs a warning and leaves routing stateless.
+
     Parameters
     ----------
     config : CodexMemoryConfig
@@ -959,6 +963,8 @@ def build_state_store(
     """
     if not config.enabled:
         return None, STATUS_DISABLED
+    if logger is None:
+        logger = logging.getLogger(__name__)
     if config.backend == MEMORY_BACKEND_MEMORY:
         return (
             InMemoryRoutingStateStore(config),
@@ -988,6 +994,7 @@ def build_state_store(
         redis_client = client if client is not None else redis.Redis(
             **config.connection.client_kwargs()
         )
+        redis_client.ping()
     except Exception as exc:  # a bad deployment must not break routing
         status = MemoryStatus("unavailable", _reason(exc))
         if logger is not None:
