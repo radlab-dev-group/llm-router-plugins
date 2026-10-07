@@ -31,8 +31,9 @@ What it never does
 
 Identity
 --------
-A key isolates the plugin's own namespace, the installation, the session, the
-thread and the agent.  ``turn_id`` is the *generation*: it distinguishes the
+A key isolates the plugin's namespace, the session, thread and agent.
+Installations must choose distinct ``MEMORY_KEY_PREFIX`` values. ``turn_id`` is
+the *generation*: it distinguishes the
 current command from the one before it inside one thread, and it is what makes
 an older or causally incomparable update a conflict instead of an overwrite.
 Without enough identifiers to build a key, routing stays stateless.
@@ -56,6 +57,15 @@ __all__ = [
     "RedisConnectionSettings",
     "CodexMemoryConfig",
     "SessionRoutingState",
+    "PendingRoutingCall",
+    "MemoryResolution",
+    "resolve_memory",
+    "remember_decision",
+    "memory_config_from_raw",
+    "connection_from_env",
+    "validate_connection",
+    "merge_state",
+    "record_state",
     "RoutingStateStore",
     "InMemoryRoutingStateStore",
     "RedisRoutingStateStore",
@@ -590,6 +600,19 @@ def session_key(
 
 
 @dataclass(frozen=True)
+class PendingRoutingCall:
+    """Bounded structural evidence; never command text or tool output."""
+
+    call_id: str
+    name: str
+    mode: str
+    kind: str
+    reason: str
+    event_id: str
+    token: str
+
+
+@dataclass(frozen=True)
 class SessionRoutingState:
     """
     What one session currently remembers about its work phase.
@@ -617,7 +640,8 @@ class SessionRoutingState:
     version : int
         Monotonic compare-and-set counter, assigned by the store.
     updated_at : float
-        Wall-clock second of the last write, for diagnostics only.
+        Wall-clock second of the last evidence change or generation reset.
+        Metadata-only writes preserve this time and the original TTL deadline.
     """
 
     mode: str = ""
@@ -630,10 +654,17 @@ class SessionRoutingState:
     seen_events: Tuple[str, ...] = ()
     version: int = 0
     updated_at: float = 0.0
+    pending_evidence: Tuple[PendingRoutingCall, ...] = ()
+    history: Tuple[str, ...] = ()
+    action_token: str = ""
+    retired_generations: Tuple[str, ...] = ()
+    context_id: str = ""
+    reset: bool = False
+    seen_calls: Tuple[str, ...] = ()
 
     def set_version(self, version: int, updated_at: float) -> "SessionRoutingState":
         """
-        Return a copy stamped with the version and time the store assigns.
+        Return a copy stamped with the version and evidence time the store assigns.
 
         Parameters
         ----------
@@ -670,6 +701,13 @@ class SessionRoutingState:
             "seen": list(self.seen_events),
             "ver": self.version,
             "ts": self.updated_at,
+            "calls": [vars(call) for call in self.pending_evidence],
+            "history": list(self.history),
+            "action": self.action_token,
+            "retired": list(self.retired_generations),
+            "context": self.context_id,
+            "reset": self.reset,
+            "seen_calls": list(self.seen_calls),
         }, separators=(",", ":"), ensure_ascii=True)
 
     @classmethod
@@ -691,16 +729,50 @@ class SessionRoutingState:
         Optional[SessionRoutingState]
             The record, or ``None``.
         """
-        if not isinstance(raw, str) or not raw:
+        if isinstance(raw, bytes):
+            try:
+                raw = raw.decode("utf-8")
+            except UnicodeError:
+                return None
+        if not isinstance(raw, str) or not raw or len(raw) > 262144:
             return None
         try:
             data = json.loads(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError, OverflowError):
             return None
-        if not isinstance(data, dict) or data.get("v") != STATE_SCHEMA_VERSION:
+        if not isinstance(data, dict) or type(data.get("v")) is not int:
+            return None
+        if data.get("v") != STATE_SCHEMA_VERSION:
             return None
         mode = data.get("mode")
-        if not isinstance(mode, str) or not mode:
+        reset = data.get("reset", False)
+        if not isinstance(reset, bool):
+            return None
+        if not isinstance(mode, str) or (not mode and not (reset and data.get("gen"))):
+            return None
+        strings = ("mode", "kind", "reason", "gen", "ev", "fp", "action", "context")
+        if any(not isinstance(data.get(key, ""), str) for key in strings):
+            return None
+        for key in ("pending", "seen", "history", "retired", "seen_calls"):
+            values = data.get(key, [])
+            if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
+                return None
+        version = data.get("ver", 0)
+        timestamp = data.get("ts", 0.0)
+        if isinstance(version, bool) or not isinstance(version, int) or version < 0:
+            return None
+        if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
+            return None
+        try:
+            if not math.isfinite(timestamp) or timestamp < 0:
+                return None
+            calls = tuple(PendingRoutingCall(**call) for call in data.get("calls", []))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if any(
+            not isinstance(value, str)
+            for call in calls for value in vars(call).values()
+        ):
             return None
         return cls(
             mode=mode,
@@ -711,8 +783,15 @@ class SessionRoutingState:
             fingerprint=_text(data.get("fp")),
             pending_calls=_texts(data.get("pending")),
             seen_events=_texts(data.get("seen")),
-            version=int(_number(data.get("ver"))),
-            updated_at=_number(data.get("ts")),
+            version=version,
+            updated_at=timestamp,
+            pending_evidence=calls,
+            history=_texts(data.get("history")),
+            action_token=_text(data.get("action")),
+            retired_generations=_texts(data.get("retired")),
+            context_id=_text(data.get("context")),
+            reset=reset,
+            seen_calls=_texts(data.get("seen_calls")),
         )
 
 
@@ -809,6 +888,22 @@ class RoutingStateStore:
         return True
 
 
+def _limit_state(
+    state: SessionRoutingState, config: CodexMemoryConfig,
+) -> SessionRoutingState:
+    """Apply this worker's limits also to records written by older policies."""
+    return replace(
+        state, pending_calls=_bounded(state.pending_calls, config.max_calls),
+        pending_evidence=(
+            tuple(state.pending_evidence[-config.max_calls:]) if config.max_calls else ()
+        ),
+        seen_events=_bounded(state.seen_events, config.max_events),
+        history=_bounded(state.history, config.max_events),
+        retired_generations=_bounded(state.retired_generations, config.max_events),
+        seen_calls=_bounded(state.seen_calls, config.max_events),
+    )
+
+
 class InMemoryRoutingStateStore(RoutingStateStore):
     """
     Process-local store for isolated replay and for testing the contract.
@@ -900,14 +995,27 @@ class InMemoryRoutingStateStore(RoutingStateStore):
             return MemoryStatus("unavailable", "injected write failure")
         with self._lock:
             stored = self._records.get(key)
+            if stored is not None and stored[1] <= self._clock():
+                del self._records[key]
+                stored = None
             current = stored[0].version if stored else 0
             if stored is not None and current != expected_version:
                 return MemoryStatus("conflict", f"version {current}")
             if stored is None and expected_version != 0:
                 return MemoryStatus("conflict", "record disappeared")
+            preserve = stored is not None and all(
+                getattr(stored[0], name) == getattr(state, name)
+                for name in (
+                    "generation", "mode", "kind", "reason", "event_id",
+                    "fingerprint", "action_token", "reset",
+                )
+            )
+            now = self._clock()
             self._records[key] = (
-                state.set_version(current + 1, self._clock()),
-                self._clock() + self._config.ttl_seconds,
+                _limit_state(state, self._config).set_version(
+                    current + 1, stored[0].updated_at if preserve else now,
+                ),
+                stored[1] if preserve else now + self._config.ttl_seconds,
             )
             self._prune()
             return MemoryStatus("written")
@@ -966,6 +1074,10 @@ def build_state_store(
     if logger is None:
         logger = logging.getLogger(__name__)
     if config.backend == MEMORY_BACKEND_MEMORY:
+        logger.warning(
+            "Codex routing memory backend is process-local: isolated replay "
+            "and tests only; use Redis for shared production workers."
+        )
         return (
             InMemoryRoutingStateStore(config),
             MemoryStatus("written", "memory backend"),
@@ -979,6 +1091,7 @@ def build_state_store(
                 "REDIS_HOST",
             )
         return None, status
+    redis_client = None
     try:
         import redis  # noqa: PLC0415 - optional dependency, imported on demand
     except ImportError:
@@ -1000,15 +1113,22 @@ def build_state_store(
         if logger is not None:
             logger.warning("Codex routing memory disabled: %s", _reason(exc))
         return None, status
+    finally:
+        if client is None and redis_client is not None:
+            try:
+                redis_client.close()
+                redis_client.connection_pool.disconnect()
+            except Exception:
+                pass
     return (
-        RedisRoutingStateStore(config, redis_client, logger=logger),
+        RedisRoutingStateStore(config, client, logger=logger),
         MemoryStatus("written", "redis backend"),
     )
 
 
 def _reason(exc: BaseException) -> str:
     """Return a short, credential-free description of an exception."""
-    return f"{type(exc).__name__}: {exc}"[:180]
+    return type(exc).__name__
 
 
 #: Compare-and-set executed server-side, so two workers cannot interleave a
@@ -1019,9 +1139,11 @@ def _reason(exc: BaseException) -> str:
 _ATOMIC_WRITE_SCRIPT = """
 local current = redis.call('GET', KEYS[1])
 local version = 0
+local previous = nil
 if current then
   local ok, decoded = pcall(cjson.decode, current)
   if ok and type(decoded) == 'table' and decoded['ver'] then
+    previous = decoded
     version = tonumber(decoded['ver']) or 0
   end
 end
@@ -1029,15 +1151,38 @@ if version ~= tonumber(ARGV[2]) then
   return {'conflict', tostring(version)}
 end
 local ttl = tonumber(ARGV[3])
-redis.call('SET', KEYS[1], ARGV[1], 'EX', ttl)
-redis.call('ZADD', KEYS[2], tonumber(ARGV[4]), KEYS[1])
+local payload = ARGV[1]
+local incoming = cjson.decode(payload)
+local preserve = previous ~= nil
+for _, name in ipairs({'gen', 'mode', 'kind', 'reason', 'ev', 'fp', 'action', 'reset'}) do
+  if not previous or previous[name] ~= incoming[name] then
+    preserve = false
+    break
+  end
+end
+local expires = tonumber(ARGV[4])
+if preserve then
+  local remaining = redis.call('PTTL', KEYS[1])
+  if remaining < 0 then
+    return {'conflict', tostring(version)}
+  end
+  local timestamp = string.match(current, '"ts"%s*:%s*([^,}]+)')
+  payload = string.gsub(payload, '"ts":[^,}]+', '"ts":' .. timestamp, 1)
+  redis.call('SET', KEYS[1], payload, 'KEEPTTL')
+  expires = tonumber(ARGV[6]) + remaining / 1000
+else
+  redis.call('SET', KEYS[1], payload, 'EX', ttl)
+end
+redis.call('ZADD', KEYS[2], expires, KEYS[1])
 redis.call('EXPIRE', KEYS[2], ttl + 60)
 redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', tonumber(ARGV[6]))
 local overflow = redis.call('ZCARD', KEYS[2]) - tonumber(ARGV[5])
 if overflow > 0 then
   local victims = redis.call('ZRANGE', KEYS[2], 0, overflow - 1)
   for index = 1, #victims do
-    redis.call('DEL', victims[index])
+    if string.sub(victims[index], 1, string.len(ARGV[7])) == ARGV[7] then
+      redis.call('DEL', victims[index])
+    end
   end
   redis.call('ZREMRANGEBYRANK', KEYS[2], 0, overflow - 1)
 end
@@ -1079,6 +1224,7 @@ class RedisRoutingStateStore(RoutingStateStore):
         """Store the policy, the client (or the means to build one) and the logger."""
         self._config = config
         self._client = client
+        self._pid = os.getpid()
         self._logger = logger
         self._lock = threading.Lock()
         self._script: Any = None
@@ -1105,6 +1251,15 @@ class RedisRoutingStateStore(RoutingStateStore):
             Whatever the client constructor raises; callers translate it into
             an ``unavailable`` status.
         """
+        pid = os.getpid()
+        if self._pid != pid:
+            self._lock = threading.Lock()
+            self._script = None
+            if self._factory is not None:
+                self._client = None
+            elif self._client is not None:
+                self._client.connection_pool.reset()
+            self._pid = pid
         client = self._client
         if client is not None:
             return client
@@ -1142,9 +1297,9 @@ class RedisRoutingStateStore(RoutingStateStore):
         state = SessionRoutingState.from_json(raw)
         if state is None:
             # Unreadable or from another schema version: forget it and continue.
-            self._drop(key)
+            self._drop(key, raw)
             return None, MemoryStatus("miss", "unreadable record")
-        return state, MemoryStatus("hit")
+        return _limit_state(state, self._config), MemoryStatus("hit")
 
     def write(
         self,
@@ -1171,13 +1326,18 @@ class RedisRoutingStateStore(RoutingStateStore):
             ``unavailable``.
         """
         now = time.time()
-        payload = state.set_version(expected_version + 1, now).to_json()
+        payload = _limit_state(state, self._config).set_version(
+            expected_version + 1, now,
+        ).to_json()
         try:
             client = self._connection()
             with self._lock:
                 if self._script is None:
                     self._script = client.register_script(_ATOMIC_WRITE_SCRIPT)
-            result = self._script(
+                script = self._script
+            if not callable(script):
+                return STATUS_UNAVAILABLE
+            result = script(
                 keys=[key, self._session_index()],
                 args=[
                     payload,
@@ -1186,6 +1346,7 @@ class RedisRoutingStateStore(RoutingStateStore):
                     now + self._config.ttl_seconds,
                     self._config.max_sessions,
                     now,
+                    f"{self._config.key_prefix}:v{STATE_SCHEMA_VERSION}:",
                 ],
             )
         except Exception as exc:
@@ -1193,22 +1354,30 @@ class RedisRoutingStateStore(RoutingStateStore):
         status, version = _script_result(result)
         if status == "conflict":
             return MemoryStatus("conflict", f"version {version}")
-        return MemoryStatus("written")
+        return MemoryStatus(status)
 
     def clear(self, key: str) -> MemoryStatus:
         """Forget one session's record and remove it from the namespace index."""
         try:
             client = self._connection()
-            removed = client.delete(key)
-            client.zrem(self._session_index(), key)
+            removed = client.eval(
+                "local removed = redis.call('DEL', KEYS[1]); "
+                "redis.call('ZREM', KEYS[2], KEYS[1]); return removed",
+                2, key, self._session_index(),
+            )
         except Exception as exc:
             return self._unavailable("clear", exc)
         return MemoryStatus("written" if removed else "miss")
 
-    def _drop(self, key: str) -> None:
+    def _drop(self, key: str, raw: Any) -> None:
         """Best-effort removal of a record this version cannot read."""
         try:
-            self._connection().delete(key)
+            self._connection().eval(
+                "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+                "redis.call('DEL', KEYS[1]); "
+                "redis.call('ZREM', KEYS[2], KEYS[1]); return 1 end; return 0",
+                2, key, self._session_index(), raw,
+            )
         except Exception:  # a cleanup must never surface on the routing path
             pass
 
@@ -1276,7 +1445,7 @@ def merge_state(
         return None
     if not generation or not same_generation:
         return None
-    if previous.generation and previous.generation != generation:
+    if previous.generation != generation:
         return None
     return previous
 
@@ -1318,6 +1487,8 @@ def record_state(
     SessionRoutingState
         The record to store.
     """
+    event_id = _identifier(event_id)
+    generation = _identifier(generation)
     seen = tuple(previous.seen_events) if previous else ()
     if event_id:
         seen = tuple(entry for entry in seen if entry != event_id) + (event_id,)
@@ -1354,11 +1525,243 @@ def fingerprint(*parts: str) -> str:
     return digest.hexdigest()[:_FINGERPRINT_CHARS]
 
 
+def _identifier(value: str) -> str:
+    """Bound wire identifiers without silently conflating long prefixes."""
+    return value if len(value) <= 128 else "hash-" + fingerprint(value)
+
+
+@dataclass(frozen=True)
+class MemoryResolution:
+    """Pure routing preview; persist only after routing has succeeded.
+
+    ``evidence`` is safe current phase evidence, including a linked incremental
+    result. ``carried`` is absent for stale/incomparable histories. ``state`` is
+    the proposed bounded record, not a write. A conflict permits stateless
+    routing from the payload but must not contribute memory or overwrite it.
+    """
+
+    evidence: Any = None
+    carried: Optional[SessionRoutingState] = None
+    state: Optional[SessionRoutingState] = None
+    status: MemoryStatus = field(default_factory=lambda: MemoryStatus("miss"))
+
+
+def _event_token(item: Any) -> str:
+    """Identify an event without retaining its text, even without a wire ID."""
+    if item.event_id:
+        return fingerprint("event", item.event_id)
+    return fingerprint(
+        item.kind, item.event_id, item.call_id, item.name,
+        "" if item.event_id else item.text,
+    )
+
+
+def _context_id(request: Any) -> str:
+    return fingerprint(request.window_id, request.context_window_id) if (
+        request.window_id or request.context_window_id
+    ) else ""
+
+
+def resolve_memory(
+    previous: Optional[SessionRoutingState],
+    request: Any,
+    rules: Any,
+    config: CodexMemoryConfig,
+    evidence: Any = None,
+) -> MemoryResolution:
+    """Resolve bounded pending calls and prove history continuity before carry.
+
+    Call before choosing phase/memory, with the record read from the store and
+    ``config.phase`` rules. ``rules=None`` supports old writers which provide
+    only their chosen ``evidence``; new integrations should always pass rules.
+    Disjoint histories cannot be ordered using opaque event/turn identifiers.
+    Only a linked pending output or an overlap at the frontier proves an
+    incremental continuation. Structurally neutral assistant-only requests in
+    the same context may carry memory without changing the record or its TTL.
+    IDs evicted by the bound no longer prove order.
+    """
+    from .phase import (
+        EVIDENCE_COMMAND, EVIDENCE_TEST_FAILURE, PhaseEvidence,
+        _execution_status, collect_phase_evidence,
+    )
+
+    generation = _identifier(getattr(request, "turn_id", ""))
+    if not generation or getattr(request, "request_class", "main") != "main":
+        return MemoryResolution(status=MemoryStatus("miss", "no main generation"))
+    if previous and generation in previous.retired_generations:
+        return MemoryResolution(status=MemoryStatus("conflict", "retired generation"))
+    same = previous is not None and previous.generation == generation
+    base = previous if same else None
+    unique = {}
+    for item in getattr(request, "activity", ()):
+        unique.setdefault(_event_token(item), item)
+    tokens = tuple(unique)
+    activity = tuple(unique.values())
+    context = _context_id(request)
+    history = base.history if base else ()
+    pending = {call.call_id: call for call in base.pending_evidence} if base else {}
+    start = 0
+    relation = "new generation" if previous and not same else "fresh"
+    if base and history:
+        frontier = history[-1]
+        if not tokens:
+            if context != base.context_id:
+                return MemoryResolution(
+                    status=MemoryStatus("conflict", "context changed"),
+                )
+            return MemoryResolution(
+                carried=base if base.mode else None, state=base,
+                status=MemoryStatus("hit" if base.mode else "miss", "neutral"),
+            )
+        if frontier in tokens:
+            start = tokens.index(frontier) + 1
+            overlap = tuple(token for token in tokens[:start] if token in history)
+            expected = tuple(token for token in history if token in overlap)
+            if overlap != expected or any(
+                token in history for token in tokens[start:]
+            ):
+                return MemoryResolution(
+                    status=MemoryStatus("conflict", "reordered history"),
+                )
+            relation = "extension" if start < len(tokens) else "replay"
+        elif all(token in history for token in tokens):
+            return MemoryResolution(status=MemoryStatus("conflict", "stale history"))
+        elif (
+            context == base.context_id and rules is not None and evidence is None
+            and all(item.kind == "assistant" for item in activity)
+            and not any(token in history for token in tokens)
+            and not collect_phase_evidence(activity, rules)
+        ):
+            return MemoryResolution(
+                carried=base if base.mode else None, state=base,
+                status=MemoryStatus("hit" if base.mode else "miss", "neutral"),
+            )
+        elif all(
+            item.kind == "function_call_output"
+            and _identifier(item.call_id) in pending
+            and (
+                not item.name or item.name == pending[_identifier(item.call_id)].name
+            )
+            for item in activity
+        ):
+            relation = "incremental output"
+        else:
+            return MemoryResolution(
+                status=MemoryStatus("conflict", "incomparable history"),
+            )
+    elif base and not base.reset:
+        return MemoryResolution(status=MemoryStatus("conflict", "no causal frontier"))
+
+    current = base
+    fresh = None
+    seen = base.seen_events if base else ()
+    seen_calls = base.seen_calls if base else ()
+    action_token = base.action_token if base else ""
+    retired = previous.retired_generations if previous else ()
+    if previous and not same and previous.generation:
+        retired = _bounded(retired + (previous.generation,), config.max_events)
+    for item, token in zip(activity[start:], tokens[start:]):
+        if token in history:
+            continue
+        produced = None
+        if item.kind == "function_call_output":
+            linked = pending.get(_identifier(item.call_id))
+            if not linked or (item.name and item.name != linked.name):
+                continue
+            if linked:
+                succeeded = _execution_status(item.text)
+                if succeeded is not None:
+                    pending.pop(_identifier(item.call_id))
+                test_mode = rules.test_mode if rules else "test"
+                if (
+                    linked.token == action_token and linked.mode == test_mode
+                    and linked.kind == EVIDENCE_COMMAND and succeeded is False
+                ):
+                    produced = PhaseEvidence(
+                        mode=rules.failure_mode if rules else "debug",
+                        kind=EVIDENCE_TEST_FAILURE, reason="test command failed",
+                        event_id=item.event_id, call_id=linked.call_id,
+                        completed=True, succeeded=False,
+                    )
+        else:
+            call_id = _identifier(item.call_id)
+            if item.kind == "function_call" and call_id and call_id in seen_calls:
+                continue
+            found = collect_phase_evidence((item,), rules) if rules else ()
+            if found:
+                produced = found[-1]
+            elif evidence is not None and (
+                (evidence.event_id and evidence.event_id == item.event_id)
+                or (evidence.call_id and evidence.call_id == item.call_id)
+                or (
+                    not evidence.event_id and not evidence.call_id
+                    and item.kind == "assistant"
+                )
+            ):
+                produced = evidence
+            if produced is not None:
+                action_token = token
+                if produced.call_id and not produced.completed:
+                    pending[_identifier(produced.call_id)] = PendingRoutingCall(
+                        _identifier(produced.call_id), item.name,
+                        produced.mode, produced.kind,
+                        produced.reason, _identifier(produced.event_id), token,
+                    )
+                if produced.call_id:
+                    seen_calls = _bounded(
+                        seen_calls + (_identifier(produced.call_id),), config.max_events,
+                    )
+        history = _bounded(history + (token,), config.max_events)
+        if item.event_id:
+            event_id = _identifier(item.event_id)
+            seen = _bounded(
+                tuple(v for v in seen if v != event_id) + (event_id,), config.max_events,
+            )
+        if produced is not None:
+            fresh = produced
+            current = record_state(
+                produced.mode, produced.kind, produced.reason, generation,
+                produced.event_id,
+                fingerprint(
+                    produced.mode, produced.kind, produced.reason,
+                    produced.event_id, produced.call_id, str(produced.completed),
+                    str(produced.succeeded), action_token,
+                ),
+                current, config,
+            )
+        pending = (
+            dict(list(pending.items())[-config.max_calls:]) if config.max_calls else {}
+        )
+    if relation == "replay" and rules:
+        found = collect_phase_evidence(activity, rules)
+        fresh = found[-1] if found else None
+    if current is None and previous and not same:
+        current = SessionRoutingState(generation=generation, reset=True)
+    if current is not None:
+        current = replace(
+            current, history=history, seen_events=seen,
+            pending_calls=tuple(pending), pending_evidence=tuple(pending.values()),
+            action_token=action_token, retired_generations=retired,
+            context_id=(
+                context if not base or history != base.history else base.context_id
+            ),
+            version=previous.version if previous else 0,
+            updated_at=previous.updated_at if previous else 0.0,
+            seen_calls=seen_calls,
+        )
+    return MemoryResolution(
+        evidence=fresh, carried=base if base and base.mode else None, state=current,
+        status=MemoryStatus("hit" if base else "miss", relation),
+    )
+
+
 def remember_decision(
     store: Optional[RoutingStateStore],
     config: CodexMemoryConfig,
     request: Any,
     decision: Any,
+    rules: Any = None,
+    expected_version: Optional[int] = None,
 ) -> str:
     """
     Write a phase decision to the session memory, if it deserves to be written.
@@ -1369,6 +1772,8 @@ def remember_decision(
     request pin the mode for the rest of a command generation.  Replaying the
     same history is a no-op: identical evidence in the same generation does not
     bump the version, so a retry cannot make a session look fresher than it is.
+    Changes to history or pending calls alone may bump the version, but both
+    stores preserve the previous evidence time and TTL deadline atomically.
 
     Parameters
     ----------
@@ -1381,6 +1786,12 @@ def remember_decision(
     decision : Any
         The routing decision, read for ``source``, ``mode``, ``reason`` and
         ``evidence``.
+    rules : Any
+        Phase taxonomy (``routing_config.phase``). Supply it to persist all
+        recognized pending calls and resolve results using configured modes.
+    expected_version : Optional[int]
+        Version read before classification, or zero for a miss. Passing it
+        rejects a write if another request changed the record in the meantime.
 
     Returns
     -------
@@ -1388,7 +1799,7 @@ def remember_decision(
         ``"written"``, ``"unchanged"``, ``"skipped"``, ``"conflict"`` or
         ``"unavailable"`` — for diagnostics, never raised.
     """
-    if store is None or getattr(decision, "source", "") != "phase":
+    if store is None or getattr(request, "request_class", "main") != "main":
         return "skipped"
     key = session_key(
         config.key_prefix,
@@ -1396,38 +1807,48 @@ def remember_decision(
         getattr(request, "thread_id", ""),
         getattr(request, "agent_name", ""),
     )
-    generation = getattr(request, "turn_id", "")
+    generation = _identifier(getattr(request, "turn_id", ""))
     if key is None or not generation:
         return "skipped"
     evidence = getattr(decision, "evidence", None)
-    record = record_state(
-        mode=decision.mode,
-        kind=getattr(evidence, "kind", ""),
-        reason=getattr(decision, "reason", ""),
-        generation=generation,
-        event_id=getattr(evidence, "event_id", ""),
-        fingerprint=fingerprint(
-            decision.mode,
-            getattr(evidence, "kind", ""),
-            getattr(decision, "reason", ""),
-            str(getattr(evidence, "succeeded", None)),
-        ),
-        previous=None,
-        config=config,
-    )
+    reliable = getattr(decision, "source", "") in ("phase", "memory")
+    observed_generation = None
     for attempt in range(config.max_retries + 1):
         stored, status = store.read(key)
         if status.state not in ("hit", "miss", "expired"):
             return "unavailable"
-        if (
-            stored is not None
-            and stored.generation == record.generation
-            and stored.fingerprint == record.fingerprint
+        current_generation = stored.generation if stored else ""
+        if attempt and current_generation != observed_generation:
+            return "conflict"
+        observed_generation = current_generation
+        if expected_version is not None and expected_version != (
+            stored.version if stored else 0
         ):
+            return "conflict"
+        if not reliable and (stored is None or stored.generation == generation):
+            return "skipped"
+        resolved = resolve_memory(stored, request, rules, config, evidence=evidence)
+        if resolved.status.state == "conflict":
+            return "conflict"
+        record = resolved.state
+        if not reliable:
+            record = SessionRoutingState(
+                generation=generation, reset=True,
+                retired_generations=_bounded(
+                    stored.retired_generations + (stored.generation,),
+                    config.max_events,
+                ),
+                context_id=_context_id(request),
+            )
+        if record is None:
+            return "skipped"
+        if not record.reset and record.mode != decision.mode:
+            return "conflict"
+        if stored == record:
             return "unchanged"
         written = store.write(
             key,
-            replace(record, seen_events=stored.seen_events if stored else ()),
+            record,
             stored.version if stored else 0,
         )
         if written.state != "conflict":

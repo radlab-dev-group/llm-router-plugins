@@ -67,9 +67,10 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.semantic import (
     CodexSemanticLayer,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
+    MemoryResolution,
     MemoryStatus,
     RoutingStateStore,
-    merge_state,
+    resolve_memory,
     session_key,
 )
 
@@ -174,6 +175,7 @@ class RoutingDecision:
     evidence: Optional[PhaseEvidence] = None
     memory: Optional[MemoryStatus] = None
     semantic: str = ""
+    memory_version: Optional[int] = None
 
 
 class CodexModeClassifier:
@@ -300,26 +302,31 @@ class CodexModeClassifier:
         if request.collaboration_mode == COLLABORATION_MODE_PLAN and "plan" in modes:
             return RoutingDecision("plan", SOURCE_COLLABORATION_MODE, 1.0, 1.0)
 
-        memory_status: Optional[MemoryStatus] = None
+        evidence = detect_phase_evidence(request.activity, config.phase)
+        remembered, memory_status, memory_version = self._remembered(request)
+        if remembered is not None and remembered.evidence is not None:
+            evidence = remembered.evidence
+        if evidence is not None and evidence.mode in modes:
+            return RoutingDecision(
+                evidence.mode, SOURCE_PHASE, 1.0, 1.0,
+                reason=evidence.reason, evidence=evidence,
+                memory=memory_status, memory_version=memory_version,
+            )
+        if (
+            remembered is not None and remembered.carried is not None
+            and remembered.carried.mode in modes
+        ):
+            return RoutingDecision(
+                remembered.carried.mode, SOURCE_MEMORY, 1.0, 1.0,
+                reason="carried phase", memory=memory_status,
+                memory_version=memory_version,
+            )
         if config.heuristic_enabled:
-            evidence = detect_phase_evidence(request.activity, config.phase)
-            # remembered, memory_status = (None, None)
-            if evidence is not None and evidence.mode in modes:
-                return RoutingDecision(
-                    evidence.mode, SOURCE_PHASE, 1.0, 1.0,
-                    reason=evidence.reason, evidence=evidence,
-                    memory=MemoryStatus("not consulted", "fresh evidence")
-                    if self._memory is not None else None,
-                )
-            remembered, memory_status = self._remembered(request, modes)
-            if remembered is not None:
-                return RoutingDecision(
-                    remembered, SOURCE_MEMORY, 1.0, 1.0,
-                    reason="carried phase", memory=memory_status,
-                )
             decision = self._heuristic_mode(request.intent_text, modes)
             if decision is not None:
-                return replace(decision, memory=memory_status)
+                return replace(
+                    decision, memory=memory_status, memory_version=memory_version,
+                )
 
         routed = (
             semantic.route(request)
@@ -332,7 +339,8 @@ class CodexModeClassifier:
         if mode is not None:
             return RoutingDecision(
                 mode.name, SOURCE_SEMANTIC, similarity, similarity,
-                memory=memory_status,
+                memory=memory_status, memory_version=memory_version,
+                semantic="accepted",
             )
         semantic_outcome = self._semantic_outcome(semantic, routed, similarity)
 
@@ -349,11 +357,12 @@ class CodexModeClassifier:
             reason="no layer answered",
             memory=memory_status,
             semantic=semantic_outcome,
+            memory_version=memory_version,
         )
 
     def _remembered(
-        self, request: CodexRequest, modes: Dict[str, Any]
-    ) -> Tuple[Optional[str], Optional[MemoryStatus]]:
+        self, request: CodexRequest
+    ) -> Tuple[Optional[MemoryResolution], Optional[MemoryStatus], Optional[int]]:
         """
         Return the phase the session memory still vouches for, if any.
 
@@ -366,18 +375,18 @@ class CodexModeClassifier:
         ----------
         request : CodexRequest
             The request being routed.
-        modes : Dict[str, Any]
-            Configured modes by name; an unknown remembered mode is ignored.
-
         Returns
         -------
-        Tuple[Optional[str], Optional[MemoryStatus]]
-            The carried mode and what the store reported, the status being
-            ``None`` when a disabled memory was never consulted at all.
+        Tuple[Optional[MemoryResolution], Optional[MemoryStatus], Optional[int]]
+            Safe evidence/carry, diagnostic status and the version used for
+            optimistic persistence; all absent when memory was not consulted.
         """
         store = self._memory
-        if store is None:
-            return None, None
+        if (
+            store is None or self._config.phase is None
+            or not self._config.phase.enabled
+        ):
+            return None, None, None
         key = session_key(
             self._config.memory.key_prefix,
             request.session_id,
@@ -385,15 +394,22 @@ class CodexModeClassifier:
             request.agent_name,
         )
         if key is None or not request.turn_id:
-            return None, MemoryStatus("miss", "no session identity")
+            return None, MemoryStatus("miss", "no session identity"), None
         stored, status = store.read(key)
-        carried = merge_state(stored, request.turn_id, stored is not None)
-        if carried is None or carried.mode not in modes:
-            return None, status
-        return carried.mode, status
+        version = stored.version if stored is not None else 0
+        if status.state not in ("hit", "miss", "expired"):
+            return None, status, None
+        resolved = resolve_memory(
+            stored, request, self._config.phase, self._config.memory,
+        )
+        if resolved.status.state == "conflict":
+            return None, resolved.status, version
+        if status.state == "expired" and resolved.evidence is None:
+            return resolved, status, version
+        return resolved, resolved.status, version
 
-    @staticmethod
     def _semantic_outcome(
+        self,
         semantic: Optional[CodexSemanticLayer],
         routed: Any,
         similarity: float,
@@ -406,7 +422,7 @@ class CodexModeClassifier:
         is a statement about how likely the fallback is to be right.
         """
         if semantic is None:
-            return "disabled"
+            return "unavailable" if self._config.semantic_enabled else "disabled"
         if not semantic.available:
             return "unavailable"
         if not routed:

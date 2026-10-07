@@ -36,7 +36,6 @@ class CodexPhaseConfig:
     neutral_filters: Tuple[Pattern[str], ...] = ()
     announcement_followup_max_chars: int = 0
 
-    @classmethod
     @staticmethod
     def _followup_budget(value):
         """A non-negative cap on the prose that may follow an announcement."""

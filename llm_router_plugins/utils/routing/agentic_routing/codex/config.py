@@ -57,6 +57,7 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.phase_config import 
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
     CodexMemoryConfig,
+    MemoryStatus,
     memory_config_from_raw,
     validate_connection,
 )
@@ -168,6 +169,7 @@ class CodexRoutingConfig(RoutingConfigBase):
     semantic_phase_max_chars: int
     classify_max_chars: int = DEFAULT_CLASSIFY_MAX_CHARS
     memory: CodexMemoryConfig = field(default_factory=CodexMemoryConfig)
+    memory_status: Optional[MemoryStatus] = None
 
     @property
     def mode_names(self) -> List[str]:
@@ -267,6 +269,7 @@ class CodexRoutingConfig(RoutingConfigBase):
         top_k = int(semantic.get("top_k", 3))
         RoutingConfigBase.validate_semantic_params(chunk_size, chunk_overlap, top_k)
 
+        memory, memory_status = cls._resolve_memory(settings.get("memory"))
         return CodexRoutingConfig(
             trigger_model=str(settings["trigger_model"]),
             fallback_mode=str(settings["fallback_mode"]),
@@ -291,13 +294,25 @@ class CodexRoutingConfig(RoutingConfigBase):
             phase=CodexPhaseConfig.from_raw(
                 settings["phase"], mode_names=[mode.name for mode in codex_modes]
             ),
-            memory=memory_config_from_raw(
-                settings.get("memory"), AGENTIC_CODEX_ROUTING_PREFIX
-            ),
+            memory=memory,
+            memory_status=memory_status,
             heuristic_min_margin=float(settings["heuristic_min_margin"]),
             heuristic_negation_pattern=settings["heuristic_negation_pattern"],
             heuristic_weights=cls._heuristic_weights(settings["heuristic_weights"]),
         )
+
+    @staticmethod
+    def _resolve_memory(raw: Any) -> Tuple[CodexMemoryConfig, Optional[MemoryStatus]]:
+        """Resolve optional memory without exposing parser errors or raw values."""
+        try:
+            if raw is not None and not isinstance(raw, dict):
+                raise ValueError("memory must be an object")
+            memory = memory_config_from_raw(raw, AGENTIC_CODEX_ROUTING_PREFIX)
+        except (ValueError, TypeError, OverflowError):
+            return CodexMemoryConfig(), MemoryStatus(
+                "unconfigured", "invalid configuration"
+            )
+        return memory, None
 
     @staticmethod
     def _heuristic_weights(raw):
@@ -348,6 +363,22 @@ class CodexRoutingConfig(RoutingConfigBase):
         -------
         None
         """
+        if self.memory_status is None and any(
+            name.startswith((
+                f"{AGENTIC_CODEX_ROUTING_PREFIX}MEMORY_",
+                f"{AGENTIC_CODEX_ROUTING_PREFIX}REDIS_",
+            ))
+            for name in os.environ
+        ):
+            policy = {
+                name: getattr(self.memory, name)
+                for name in (
+                    "enabled", "backend", "ttl_seconds", "max_sessions",
+                    "max_events", "max_calls", "key_prefix", "max_retries",
+                )
+            }
+            self.memory, self.memory_status = self._resolve_memory(policy)
+
         trigger_env = os.getenv(f"{AGENTIC_CODEX_ROUTING_PREFIX}TRIGGER")
         if trigger_env and trigger_env.strip():
             self.trigger_model = trigger_env.strip()
@@ -629,16 +660,7 @@ class CodexRoutingConfig(RoutingConfigBase):
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"CodexRouting: {name} must be a positive integer")
 
-        if self.memory.enabled:
-            validate_connection(self.memory.connection)
-            if (
-                self.memory.backend == "redis"
-                and not self.memory.connection.configured
-            ):
-                raise ValueError(
-                    "CodexRouting: memory is enabled with the redis backend but "
-                    f"{AGENTIC_CODEX_ROUTING_PREFIX}REDIS_HOST is not set"
-                )
+        self._validate_memory()
 
         for name in ("heuristic_min_score", "heuristic_min_margin"):
             value = getattr(self, name)
@@ -651,6 +673,41 @@ class CodexRoutingConfig(RoutingConfigBase):
             re.compile(self.heuristic_negation_pattern, re.IGNORECASE)
         except re.error as exc:
             raise ValueError("CodexRouting: invalid heuristic_negation_pattern") from exc
+
+    def _validate_memory(self) -> None:
+        """A bad optional memory policy disables only memory, not the router."""
+        try:
+            if not isinstance(self.memory.enabled, bool):
+                raise ValueError("invalid enabled flag")
+            if self.memory.backend not in ("redis", "memory"):
+                raise ValueError("invalid backend")
+            for name in (
+                "ttl_seconds", "max_sessions", "max_events", "max_calls",
+                "max_retries",
+            ):
+                value = getattr(self.memory, name)
+                minimum = 0 if name == "max_retries" else 1
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise ValueError("invalid limit type")
+                if value < minimum:
+                    raise ValueError("invalid limit range")
+            prefix = self.memory.key_prefix
+            if not isinstance(prefix, str) or not prefix or any(
+                char.isspace() for char in prefix
+            ):
+                raise ValueError("invalid key prefix")
+            if self.memory.enabled and self.memory.backend == "redis":
+                validate_connection(self.memory.connection)
+                if not self.memory.connection.configured:
+                    self.memory = CodexMemoryConfig()
+                    self.memory_status = MemoryStatus(
+                        "unconfigured", "missing REDIS_HOST"
+                    )
+        except (ValueError, TypeError, OverflowError):
+            self.memory = CodexMemoryConfig()
+            self.memory_status = MemoryStatus(
+                "unconfigured", "invalid configuration"
+            )
 
     def lint_signals(self, logger: Optional[logging.Logger] = None) -> None:
         """

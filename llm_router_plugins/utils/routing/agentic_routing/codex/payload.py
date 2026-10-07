@@ -310,7 +310,7 @@ class CodexPayloadParser:
             text = self._user_text(item)
             if text:
                 user_turns.append((index, text))
-        active_items = items[user_turns[-1][0] + 1:] if user_turns else []
+        active_items = items[user_turns[-1][0] + 1:] if user_turns else items
         assistant_messages = self._assistant_messages(active_items)
 
         return CodexRequest(
@@ -688,9 +688,7 @@ class CodexPayloadParser:
                 )
             elif kind in ("function_call_output", "custom_tool_call_output"):
                 call_id = self._text(item.get("call_id"))
-                text = self._text(item.get("output"))
-                if self._max_chars > 0:
-                    text = text[:self._max_chars]
+                text = self._activity_output(item.get("output"))
                 events.append(
                     CodexActivity(
                         "function_call_output", text, calls.get(call_id, ""), call_id,
@@ -698,6 +696,24 @@ class CodexPayloadParser:
                     )
                 )
         return tuple(events)
+
+    def _activity_output(self, value: Any) -> str:
+        """Keep a structured execution status when bounding a long result."""
+        text = self._text(value)
+        if self._max_chars <= 0 or len(text) <= self._max_chars:
+            return text
+        try:
+            envelope = json.loads(text)
+        except (ValueError, RecursionError):
+            envelope = None
+        if isinstance(envelope, dict):
+            status = envelope.get("exit_code")
+            if isinstance(status, int) and not isinstance(status, bool):
+                text = (
+                    f"Exit code: {status}\nOutput:\n"
+                    + self._text(envelope.get("output"))
+                )
+        return text[:self._max_chars]
 
     @staticmethod
     def _assistant_messages(items: List[Any]) -> Optional[List[Dict[str, Any]]]:

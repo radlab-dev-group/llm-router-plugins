@@ -16,8 +16,10 @@ Variants
 ``cascade``
     The cascade with the semantic layer, i.e. what a full deployment does.
 ``semantic_only``
-    The semantic layer alone, kept as an upper bound on what the embeddings
-    contribute on their own.
+    Semantic diagnostic for main turns, not an accuracy upper bound. Special
+    requests retain class routing and never query embeddings.
+``stateful``
+    The same deterministic cascade with isolated in-memory session replay.
 
 Modes, not models, are the unit of measurement
 ----------------------------------------------
@@ -29,14 +31,16 @@ the transition counters — byte-for-byte identical.
 """
 
 import argparse
+import copy
 import hashlib
 import json
 import math
 import time
 
 from collections import Counter, defaultdict
+from dataclasses import replace as _replace_config
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from llm_router_plugins.utils.routing.agentic_routing.codex.classifier import (
     CLASS_ROUTED_MODES,
@@ -48,7 +52,6 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.semantic import Code
 from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
     InMemoryRoutingStateStore,
     remember_decision,
-    replace as _replace_config,
 )
 from llm_router_plugins.utils.routing.common import build_embedding_router
 
@@ -115,14 +118,18 @@ def load_cases(path, config, split):
     Raises
     ------
     ValueError
-        On a malformed corpus, an unknown or class-routed expected mode, an
+        On a malformed corpus, an unknown expected mode, an
         invalid split, a sequence spanning two splits, or an empty selection.
     """
     data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if split not in (*SPLITS, "all"):
+        raise ValueError(f"Invalid split selection: {split}")
     if not isinstance(data, dict) or data.get("schema_version") != 1 or not isinstance(data.get("cases"), list):
         raise ValueError("Expected schema_version=1 and a cases list")
     seen = set()
     sequence_splits = {}
+    session_splits = {}
+    parser = CodexPayloadParser(max_chars=config.classify_max_chars)
     cases = []
     for case in data["cases"]:
         if not isinstance(case, dict):
@@ -133,8 +140,6 @@ def load_cases(path, config, split):
         seen.add(identifier)
         if case.get("expected_mode") not in config.mode_by_name:
             raise ValueError(f"Unknown expected mode in {identifier}")
-        if case["expected_mode"] in CLASS_ROUTED_MODES:
-            raise ValueError("This corpus evaluates main-turn semantic work modes only")
         if case.get("split") not in SPLITS:
             raise ValueError(f"Invalid split in {identifier}")
         if not isinstance(case.get("input"), list) or not case["input"]:
@@ -145,6 +150,12 @@ def load_cases(path, config, split):
             raise ValueError(f"Invalid sequence in {identifier}")
         if "metadata" in case and not isinstance(case["metadata"], dict):
             raise ValueError(f"Invalid metadata in {identifier}")
+        if "payload" in case and not isinstance(case["payload"], dict):
+            raise ValueError(f"Invalid payload in {identifier}")
+        if "source_session" in case and (
+            not isinstance(case["source_session"], str) or not case["source_session"]
+        ):
+            raise ValueError(f"Invalid source session in {identifier}")
         if "ambiguous" in case and not isinstance(case["ambiguous"], bool):
             raise ValueError(f"Invalid ambiguous flag in {identifier}")
         sequence = case.get("sequence")
@@ -152,6 +163,14 @@ def load_cases(path, config, split):
             known = sequence_splits.setdefault(sequence, case["split"])
             if known != case["split"]:
                 raise ValueError(f"Sequence {sequence} spans two splits in {identifier}")
+        request = parser.parse(build_payload(case, config))
+        for session in (request.session_id, case.get("source_session")):
+            if session:
+                known = session_splits.setdefault(session, case["split"])
+                if known != case["split"]:
+                    raise ValueError(
+                        f"Session {session} spans two splits in {identifier}"
+                    )
         cases.append(case)
     if split != "all":
         cases = [case for case in cases if case["split"] == split]
@@ -177,10 +196,13 @@ def build_payload(case: Dict[str, Any], config: CodexRoutingConfig) -> Dict[str,
         A payload carrying the case input plus the ``client_metadata`` the
         recorded request had, so a replay reaches the same session identity.
     """
-    payload: Dict[str, Any] = {"model": config.trigger_model, "input": case["input"]}
+    payload: Dict[str, Any] = copy.deepcopy(case.get("payload", {}))
+    payload.update(model=config.trigger_model, input=copy.deepcopy(case["input"]))
     metadata = case.get("metadata")
     if isinstance(metadata, dict) and metadata:
-        payload["client_metadata"] = dict(metadata)
+        payload["client_metadata"] = {
+            **payload.get("client_metadata", {}), **copy.deepcopy(metadata),
+        }
     return payload
 
 
@@ -196,7 +218,9 @@ def _transition_metrics(
     *unnecessary* switches.  When a switch is expected, the delay counts the
     steps the prediction needed to reach the newly expected value — a
     prediction that was already right has delay ``0``, and one that never
-    catches up within that run is censored at the run's length.
+    catches up within that run is censored at the run's length. Ambiguous
+    prefixes end a labelled run; special calls do not advance main-work time.
+    ``censored_switches`` distinguishes lower bounds from observed delays.
 
     Parameters
     ----------
@@ -213,6 +237,7 @@ def _transition_metrics(
     counters: Counter = Counter({
         "pairs": 0, "expected_switches": 0, "actual_switches": 0,
         "unnecessary_switches": 0, "missed_switches": 0,
+        "censored_switches": 0,
     })
     delays: List[int] = []
     expected_key = "expected_mode" if field == "mode" else "expected_model"
@@ -243,7 +268,11 @@ def _transition_metrics(
                 delay += 1
                 cursor += 1
             delays.append(delay)
-    metrics = dict(counters)
+            counters["censored_switches"] += int(
+                cursor == len(sequence)
+                or sequence[cursor][expected_key] != target
+            )
+    metrics: Dict[str, Any] = dict(counters)
     metrics["mean_switch_delay"] = sum(delays) / len(delays) if delays else None
     return metrics
 
@@ -256,12 +285,18 @@ def _sequences(records: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     no transition: two unrelated requests that merely sit next to each other in
     the corpus must not be counted as a mode switch.
     """
-    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    grouped: Dict[Any, List[List[Dict[str, Any]]]] = defaultdict(lambda: [[]])
     for record in records:
         sequence = record.get("sequence")
         if sequence:
-            grouped[sequence].append(record)
-    return list(grouped.values())
+            runs = grouped[(record.get("split"), sequence)]
+            if record["expected_mode"] in CLASS_ROUTED_MODES:
+                continue
+            if record.get("ambiguous"):
+                runs.append([])
+            else:
+                runs[-1].append(record)
+    return [run for runs in grouped.values() for run in runs if run]
 
 
 def summarize(records, prediction):
@@ -296,6 +331,7 @@ def summarize(records, prediction):
     confusion = defaultdict(Counter)
     mode_confusion = defaultdict(Counter)
     sources = Counter()
+    fallback_reasons = Counter()
     for record in scored:
         result = record[prediction]
         expected_mode = record["expected_mode"]
@@ -310,10 +346,14 @@ def summarize(records, prediction):
         confusion[expected_model][result["model"]] += 1
         mode_confusion[expected_mode][result["mode"]] += 1
         sources[result["source"]] += 1
+        if result["source"] == "fallback":
+            fallback_reasons[result.get("reason") or "unspecified"] += 1
     for counts in modes.values():
         counts["recall"] = counts["correct"] / counts["total"] if counts["total"] else None
         counts["precision"] = counts["correct"] / counts["predicted"] if counts["predicted"] else None
     total = len(records)
+    main = [r for r in scored if r["expected_mode"] not in CLASS_ROUTED_MODES]
+    special = [r for r in scored if r["expected_mode"] in CLASS_ROUTED_MODES]
     return {
         "count": count,
         "ambiguous_count": total - count,
@@ -324,8 +364,25 @@ def summarize(records, prediction):
         "mode_confusion": dict(mode_confusion),
         "model_confusion": dict(confusion),
         "sources": dict(sources),
-        "mode_transitions": _transition_metrics(scored, prediction, "mode"),
-        "model_transitions": _transition_metrics(scored, prediction, "model"),
+        "fallback_reasons": dict(fallback_reasons),
+        "main_turn_count": len(main),
+        "main_mode_accuracy": (
+            sum(r[prediction]["mode"] == r["expected_mode"] for r in main)
+            / len(main) if main else None
+        ),
+        "special_cases": {
+            "count": len(special),
+            "correct": sum(
+                r[prediction]["mode"] == r["expected_mode"] for r in special
+            ),
+            "per_mode": {mode: dict(modes[mode]) for mode in CLASS_ROUTED_MODES
+                         if mode in modes},
+        },
+        "ambiguous_sources": dict(Counter(
+            r[prediction]["source"] for r in records if r.get("ambiguous")
+        )),
+        "mode_transitions": _transition_metrics(records, prediction, "mode"),
+        "model_transitions": _transition_metrics(records, prediction, "model"),
         "mean_routing_ms": (
             sum(r[prediction]["elapsed_ms"] for r in records) / total if total else None
         ),
@@ -381,19 +438,24 @@ def evaluate(config, cases, router=None):
     # sequence reproduces what a shared store would hold, without leaking state
     # between sequences or between runs.
     memory_policy = _replace_config(config.memory, enabled=True, backend="memory")
-    memory_classifiers: Dict[str, Any] = {}
+    memory_classifiers: Dict[Any, Any] = {}
     expected_targets = set(config.mode_by_name) - set(CLASS_ROUTED_MODES)
     records = []
     for case in cases:
         payload = build_payload(case, config)
         request = parser.parse(payload)
-        if request.request_class != "main" or not request.intent_text.strip():
+        special = request.request_class in CLASS_ROUTED_MODES
+        if not special and (
+            request.request_class != "main" or not request.intent_text.strip()
+        ):
             raise ValueError(f"Expected a non-empty main turn: {case['id']}")
+        if (case["expected_mode"] in CLASS_ROUTED_MODES) != special:
+            raise ValueError(f"Request class disagrees with label: {case['id']}")
         variants: Dict[str, Dict[str, Any]] = {}
         pairs = [(DETERMINISTIC_VARIANT, deterministic)]
         # A session sequence shares one store, exactly as one Codex session
         # shares one entry in the real one; unrelated cases start from nothing.
-        bucket = case.get("sequence") or case["id"]
+        bucket = (case["split"], case.get("sequence") or case["id"])
         pair = memory_classifiers.get(bucket)
         if pair is None:
             store = InMemoryRoutingStateStore(memory_policy)
@@ -405,17 +467,34 @@ def evaluate(config, cases, router=None):
             pairs.append(("cascade", cascade))
         for name, classifier in pairs:
             started = time.perf_counter()
+            if checked is not None:
+                checked.error = None
             decision = classifier.classify(payload, request)
-            variants[name] = _variant(config, decision.mode, decision.source, started)
+            if checked is not None and checked.error is not None:
+                raise RuntimeError(
+                    f"Semantic lookup failed: {case['id']} ({name})"
+                ) from checked.error
+            variants[name] = _variant(
+                config, decision.mode, decision.source, started, decision.reason
+            )
         started = time.perf_counter()
         memory_decision = memory_classifier.classify(payload, request)
-        remember_decision(memory_store, memory_policy, request, memory_decision)
+        remember_decision(
+            memory_store, memory_policy, request, memory_decision,
+            rules=config.phase, expected_version=memory_decision.memory_version,
+        )
         variants[STATEFUL_VARIANT] = _variant(
-            config, memory_decision.mode, memory_decision.source, started
+            config, memory_decision.mode, memory_decision.source, started,
+            memory_decision.reason,
         )
         if layer is None:
             records.append(_record(config, case, variants))
             continue
+        if special:
+            variants["semantic_only"] = dict(variants[DETERMINISTIC_VARIANT])
+            records.append(_record(config, case, variants))
+            continue
+        assert checked is not None
         checked.error = None
         started = time.perf_counter()
         routed = layer.route(request)
@@ -448,7 +527,7 @@ def evaluate(config, cases, router=None):
             "margin": scores[0] - scores[1] if len(scores) > 1 else None,
         }
         records.append(_record(config, case, variants))
-    report = {
+    report: Dict[str, Any] = {
         name: summarize(records, name)
         for name in (
             (DETERMINISTIC_VARIANT, STATEFUL_VARIANT, "cascade", "semantic_only")
@@ -460,12 +539,14 @@ def evaluate(config, cases, router=None):
     return report
 
 
-def _variant(config: CodexRoutingConfig, mode: str, source: str, started: float) -> Dict[str, Any]:
+def _variant(config: CodexRoutingConfig, mode: str, source: str, started: float,
+             reason=None) -> Dict[str, Any]:
     """Snapshot one variant's answer, with the model mapped back from the mode."""
     return {
         "mode": mode,
         "model": config.mode_by_name[mode].model_name,
         "source": source,
+        "reason": reason,
         "elapsed_ms": (time.perf_counter() - started) * 1000,
     }
 
@@ -477,9 +558,53 @@ def _record(config: CodexRoutingConfig, case: Dict[str, Any], variants: Dict[str
         "split": case["split"],
         "sequence": case.get("sequence"),
         "ambiguous": bool(case.get("ambiguous")),
+        "provenance": case.get("provenance"),
+        "source_session": case.get("source_session"),
         "expected_mode": case["expected_mode"],
         "expected_model": config.mode_by_name[case["expected_mode"]].model_name,
         **variants,
+    }
+
+
+def compare_baseline(config, records, baseline):
+    """Compare frozen predictions and live variants on exactly the same IDs.
+
+    Old aggregate figures are not reused: metric definitions can change.
+    New cases never receive an invented historical prediction. Models are
+    remapped using today's config so mode metrics remain mapping-independent.
+    """
+    if baseline.get("variant") != DETERMINISTIC_VARIANT:
+        raise ValueError("Expected a deterministic replay baseline")
+    frozen = baseline["per_case"]
+    common = []
+    for record in records:
+        previous = frozen.get(record["id"])
+        if previous is None:
+            continue
+        for key in ("expected_mode", "split", "sequence", "ambiguous"):
+            if previous.get(key) != record.get(key):
+                raise ValueError(f"Baseline case changed: {record['id']} ({key})")
+        mode = previous["mode"]
+        if mode not in config.mode_by_name:
+            raise ValueError(f"Unknown baseline mode: {mode}")
+        common.append({**record, "baseline": {
+            "mode": mode, "model": config.mode_by_name[mode].model_name,
+            "source": previous["source"], "reason": "not_recorded",
+            "elapsed_ms": 0,
+        }})
+    identifiers = {r["id"] for r in records}
+    variants = ("baseline", DETERMINISTIC_VARIANT, STATEFUL_VARIANT)
+    summaries = {name: summarize(common, name) for name in variants}
+    # Historical routing time was never captured.
+    summaries["baseline"]["mean_routing_ms"] = None
+    return {
+        "provenance": baseline.get("provenance", {}),
+        "common_count": len(common),
+        "added_case_ids": [r["id"] for r in records if r["id"] not in frozen],
+        "baseline_only_case_ids": [key for key, value in frozen.items()
+                                   if key not in identifiers and value["split"]
+                                   in {r["split"] for r in records}],
+        "variants": summaries,
     }
 
 
@@ -487,6 +612,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--dataset", type=Path, required=True)
+    parser.add_argument("--baseline", type=Path)
     parser.add_argument("--split", choices=(*SPLITS, "all"), default="holdout")
     parser.add_argument(
         "--no-semantic",
@@ -517,9 +643,20 @@ def main():
         )
     initialization_ms = (time.perf_counter() - started) * 1000
     report = evaluate(config, cases, router)
+    if args.baseline:
+        baseline = json.loads(args.baseline.read_text(encoding="utf-8"))
+        report["baseline_comparison"] = compare_baseline(
+            config, report["records"], baseline
+        )
     report["metadata"] = {
         "config_sha256": hashlib.sha256(raw).hexdigest(),
         "dataset_sha256": hashlib.sha256(args.dataset.read_bytes()).hexdigest(),
+        "baseline_sha256": (
+            hashlib.sha256(args.baseline.read_bytes()).hexdigest()
+            if args.baseline else None
+        ),
+        "metrics_version": 2,
+        "transition_policy": "ambiguous boundaries; special calls excluded",
         "embedding_model": config.embedding_model,
         "threshold": config.similarity_threshold,
         "min_margin": config.semantic_min_margin,

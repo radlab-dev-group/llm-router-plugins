@@ -32,8 +32,9 @@ unchanged. The plugin never rejects a request; it only ever picks a model.
 
 **Fail-open by design.** A payload that is not a dict, does not carry the trigger model, resolves to a mode that is not
 configured or to a mode with an empty `model_name`, or that raises anywhere during parsing or classification, is
-returned untouched with the trigger model still in place. **Fail-hard on configuration only**: an inconsistent config
-raises at plugin construction, so the router refuses to start instead of silently misrouting every request.
+returned untouched with the trigger model still in place. **Fail-hard on required routing configuration**: invalid
+triggers, modes or routing rules reject construction. Optional memory is **fail-open**, including invalid memory
+policy/ENV, a missing Redis host or client library, and connection/read/write failures: routing remains stateless.
 
 ---
 
@@ -148,8 +149,9 @@ Codex CLI ──POST /v1/responses (model=auto_codex)──▶ llm-router
                                               └── CodexRoutingPlugin.apply(payload)
 ```
 
-The plugin sees the prepared request payload as a plain `dict` and returns it. It is stateless: no session cache, no
-memory between requests, so the same request is routed identically by any replica at any time.
+The plugin sees the prepared request payload as a plain `dict` and returns it. Routing is stateless by default.
+Explicitly enabled Redis memory can carry reliable phase evidence between requests and workers; it is optional,
+and the full-history payload remains usable when memory is disabled or unavailable.
 
 ### Step 1 — payload normalization
 
@@ -186,7 +188,8 @@ Details that matter when you debug routing:
   older test/Git keywords. This is a conservative rule, not general reference resolution.
 - **`assistant_messages`** and **`activity`** include only events after the newest real command. Assistant text is
   copied, and tool outputs are linked by `call_id` only to calls in that active turn. An old final answer, old failure,
-  or advertised tool therefore cannot establish the new task's phase. No session cache is needed.
+  or advertised tool therefore cannot establish the new task's phase. Optional memory can supply bounded pending-call
+  context for incremental requests in the same identified command generation.
 
 ### Step 2 — request class
 
@@ -217,9 +220,10 @@ fallback mode: the keyword and semantic layers can specialise the decision, neve
 | 2 | Request class — `compaction`, then `aux_title` | `class`              | `1.0`                               |
 | 3 | `<collaboration_mode>` Plan block from the CLI  | `collaboration_mode` | `1.0`                               |
 | 4 | Clear current assistant action or actual tool activity | `phase`         | `1.0` (rule strength, not calibrated probability) |
-| 5 | Keyword scoring of the current user intent      | `heuristic`          | `score / (score + 1)` (heuristic strength, not calibrated probability) |
-| 6 | Embedding cosine similarity over the modes      | `semantic`           | cosine of the matched mode          |
-| 7 | Configured `fallback_mode` (`implement`)        | `fallback`           | cosine of that mode, else `0.0`     |
+| 5 | Fresh reliable phase carried by optional session memory | `memory`        | `1.0` (rule strength, not calibrated probability) |
+| 6 | Keyword scoring of the current user intent      | `heuristic`          | `score / (score + 1)` (heuristic strength, not calibrated probability) |
+| 7 | Embedding cosine similarity over the modes      | `semantic`           | cosine of the matched mode          |
+| 8 | Configured `fallback_mode` (`implement`)        | `fallback`           | cosine of that mode, else `0.0`     |
 
 Notes:
 
@@ -233,10 +237,17 @@ Notes:
 - The phase layer recognises explicit current-action announcements and concrete executed commands/patches, rather
   than arbitrary mentions of tests or Git. Thus commit inspection can route to `git_review`, then editing `CHANGELOG`
   to `implement`; helper commands such as `git status` do not create a Git phase. The newest clear action wins.
-  Unknown or ambiguous activity leaves the remaining cascade to decide. Rule-based phase detection is disabled along
-  with keyword scoring by `heuristic_enabled=false`, and a phase must name a configured mode.
-  `settings.phase.enabled=false` disables only the phase layer, leaving keyword scoring active.
-- Layers 1–5 never touch the embedding stack. The vector store is queried **at most once per request**, and only after
+  Unknown or ambiguous activity leaves the remaining cascade to decide. `heuristic_enabled=false` disables only
+  keyword scoring, not phase detection or memory. A phase must name a configured mode.
+  `settings.phase.enabled=false` disables phase evidence and carried phases, leaving keyword scoring active.
+- Incremental payloads without a user message retain tool events. A result linked to
+  a pending test call may produce fresh `test_failure` evidence; unknown execution
+  status does not settle the call, and an older test result cannot replace a newer
+  recognized action. Bounding a long structured result preserves its exit status.
+- A memory decision uses the version read before classification when persisting.
+  A concurrent update is reported as a conflict rather than silently overwriting
+  a phase selected by another request.
+- Layers 1–6 never touch the embedding stack. The vector store is queried **at most once per request**, and only after
   the deterministic layers have stayed silent.
 
 #### Phase configuration
@@ -343,7 +354,8 @@ Enabled with `settings.semantic.enabled`, disabled for a single process with
   abstain. A single configured semantic mode needs only the threshold. Margin `0.05` is a starting setting,
   not a measured or calibrated optimum.
 - `CodexSemanticLayer._build_semantic_parts` separately budgets current `request.intent_text` and phase context
-  (last active-turn utterance plus latest linked tool call/result). `intent_max_chars` and `phase_max_chars`
+  (last active-turn utterance plus bounded tool action descriptions and linked execution status,
+  never the raw content of files or tool output). `intent_max_chars` and `phase_max_chars`
   are both `2000` in the shipped JSON and are independent of the parser's `classify_max_chars` history budget.
   Earlier assistant turns never cross a new user-command boundary. Empty context does not call the router.
 - The shared router's `route_context(parts)` encodes those sections separately, then averages and normalizes their
@@ -419,6 +431,9 @@ it after logging — the plugin itself only guarantees that the request shape Co
 | resolved mode has `model_name: ""`                                 | same object, untouched + `warning` log  |
 | FAISS / sentence-transformers missing while semantic is enabled     | plugin loads, semantic layer off, `warning` log |
 | semantic lookup raises at query time                               | that request continues without semantic  |
+| invalid memory policy/ENV, missing Redis host/client                | plugin loads, stateless routing, `routing.memory=unconfigured` |
+| memory connection/read/write fails                                 | stateless routing or preserved decision, `routing.memory=unavailable` |
+| memory write exhausts version-conflict retries                      | decision preserved, `routing.memory=conflict` |
 | empty trigger, no modes, duplicate mode names, unknown `fallback_mode`, semantic on with no embedding model, `chunk_size <= 0`, `chunk_overlap < 0`, `top_k < 1`, `classify_max_chars <= 0` | `ValueError` at construction — router refuses to start |
 
 ---
@@ -523,7 +538,7 @@ construction** (so after a restart, never mid-session).
 | `…_MEMORY_TTL_SECONDS`                                      | Lifetime of one session record (default `900`)         |
 | `…_MEMORY_MAX_SESSIONS`                                     | Sessions kept in this plugin's namespace (default `10000`) |
 | `…_MEMORY_MAX_EVENTS` / `…_MEMORY_MAX_CALLS`                 | Per-session identifier caps (defaults `64` / `32`)     |
-| `…_MEMORY_KEY_PREFIX`                                       | Key namespace owned by the plugin                       |
+| `…_MEMORY_KEY_PREFIX`                                       | Installation-specific namespace (default `llm-router:codex-routing`) |
 | `…_MEMORY_MAX_RETRIES`                                      | Attempts after a version conflict (default `1`)         |
 | `…_REDIS_HOST`                                              | **Empty by default — no connection, memory stays off**  |
 | `…_REDIS_PORT` / `…_REDIS_DB` / `…_REDIS_PROTOCOL`           | `6379` / `0` / `3`                                      |
@@ -533,8 +548,12 @@ construction** (so after a restart, never mid-session).
 | `…_REDIS_SSL_CERT_REQS`                                     | `required` (default), `optional` or `none`              |
 | `…_REDIS_SOCKET_CONNECT_TIMEOUT` / `…_REDIS_SOCKET_TIMEOUT`  | Short positive timeouts, seconds (default `1.0`)        |
 
-Booleans accept `1/0`, `true/false`, `yes/no`, `on/off`; numeric values are parsed as `int`/`float` and a malformed
-value is ignored (with a warning where a logger is present). Unknown mode names in `MODELS`, `MODES`, `MODEL_<MODE>` or
+Booleans accept `1/0`, `true/false`, `yes/no`, `on/off`. Memory policy resolves **ENV → explicit JSON → defaults**;
+Redis connection settings come exclusively from the plugin's own fixed `…_REDIS_*` variables, never from JSON,
+Redis URLs, `AUTH_REDIS_*`, `LLM_ROUTER_AUTH_REDIS_*`, `LLM_ROUTER_REDIS_*` or generic `REDIS_*` variables.
+Malformed memory/Redis values disable memory with `unconfigured` diagnostics rather than choosing a guessed value
+or interrupting startup. Other numeric routing overrides retain their existing `int`/`float` parsing behaviour.
+Unknown mode names in `MODELS`, `MODES`, `MODEL_<MODE>` or
 `MODE_<name>_KEYWORDS` are logged as warnings and otherwise ignored — a typo silently does nothing rather than breaking
 routing.
 
@@ -553,11 +572,17 @@ The session memory carries a **reliable** phase from one request of a command ge
 local-process cache**, because two workers holding two ideas of the same session's phase is worse than no memory.
 
 ```bash
-pip install redis            # optional dependency; without it the plugin stays stateless
+pip install -e ".[memory]"   # optional Redis client; without it the plugin stays stateless
 export LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_REDIS_HOST=cache.internal
 export LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_REDIS_PASSWORD=…   # or leave unset
+export LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_MEMORY_KEY_PREFIX=installation-a:codex-routing
 export LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_MEMORY_ENABLED=true
 ```
+
+For ACL, set `…_REDIS_USERNAME` and provide `…_REDIS_PASSWORD` through the deployment's secret mechanism.
+For TLS, set `…_REDIS_SSL=true` and `…_REDIS_SSL_CA_CERTS` as needed; client certificate/key paths support mutual
+TLS. Certificate verification defaults to `required`; enabling TLS does not disable it. `optional`/`none` are
+explicit insecure overrides, not production defaults. Connection settings and credentials do not belong in JSON.
 
 **Lifecycle.** A key isolates the plugin's namespace, the session, the thread and the agent; `turn_id` is the
 *generation* — the current user command. A new command resets the phase. A record holds the mode, the kind and reason
@@ -574,20 +599,29 @@ stayed silent, and a phase decided from evidence always wins. It never stores a 
 title request or a compaction, because those are not facts about what the agent is doing. Without a session and thread
 identifier there is nothing to isolate, so routing stays stateless instead of guessing.
 
-**Failure behaviour.** A memory error is a miss, never a failed request. `routing.memory` in the annotation says which
-case you are in: `hit`, `miss`, `expired`, `conflict`, `not consulted`, `unavailable` (Redis unreachable — check the
-host, the credentials and the timeouts) or absent/`disabled` when no store is configured. A damaged record, an unknown
+**Failure behaviour.** A memory error never fails a request and never activates a process-local fallback.
+`routing.memory` distinguishes `unconfigured` (invalid memory policy/ENV, missing host or Redis client), `unavailable`
+(failed connection/read/write), `hit`, `miss`, `expired`, `conflict` and `not consulted`; disabled memory may omit the
+field. Startup status is retained even when no store exists. Failed writes do not undo a successful routing decision.
+Diagnostics include a reason and evidence kind, but do not log raw configuration values, exception messages,
+credentials or full session/event/call identifiers. A damaged record, an unknown
 schema version or a value written by another format is dropped and treated as a miss. Connection and socket timeouts
-default to one second so a dead Redis costs at most that, not a stalled request. Restarting a worker keeps the state;
+default to one second per operation; multiple operations/retries can take longer. Restarting a worker keeps the state;
 restarting Redis without persistence loses it, which costs only the carried phase.
 
-When Redis memory is enabled, plugin construction checks the connection with `PING`, using the configured
-connection and socket timeouts. If the check fails, it logs `Codex routing memory disabled: …` at `WARNING`
-(also when no logger was supplied) and routing stays stateless until the plugin is recreated. Disabled memory
-and the in-memory backend do not connect to Redis.
+When Redis memory is enabled, construction checks connectivity with `PING` on a temporary client and closes it.
+The operational client is initialized lazily per worker process, avoiding inherited open connections when the
+application is preloaded before fork. A failed startup check leaves routing stateless until plugin recreation;
+subsequent operation failures also fail open, using the configured short timeouts. Disabled memory and the in-memory
+replay backend do not connect to Redis; the latter emits a warning because its state is process-local and cannot
+provide production multi-worker consistency. Injected Redis clients are caller-owned and require caller-managed
+fork safety and lifecycle.
 
-**Isolation.** `MEMORY_KEY_PREFIX` is the plugin's own space. To reset it: `redis-cli --scan --pattern '<prefix>*' | xargs redis-cli del` —
-with the prefix you chose, and only that one.
+**Installation isolation.** There is no automatic installation identifier in a session key. Set a distinct,
+non-overlapping `MEMORY_KEY_PREFIX` for each independent installation sharing Redis; use the same prefix only for
+workers intentionally sharing routing state. The default prefix alone does **not** isolate installations.
+To reset memory, remove only that installation's exact versioned session keys and session index, using the correct
+Redis DB, ACL and TLS settings. Never flush the database or use a broad prefix that can include another namespace.
 
 ### Precedence and linting
 
@@ -860,11 +894,14 @@ The report measures four variants of the same replay:
 | `deterministic` | the cascade with no embedding layer — what `semantic.enabled=false` runs |
 | `stateful`      | the same cascade plus the session memory, one fresh store per session sequence |
 | `cascade`       | the cascade with the semantic layer                                    |
-| `semantic_only` | the semantic layer alone, as an upper bound on what embeddings add     |
+| `semantic_only` | semantic ranking for main turns; request-class routing for helpers; not an upper bound |
 
 Every routing metric is computed on the **mode**, not the model: mode accuracy, the per-mode confusion matrix, and
 per-sequence mode transitions (`pairs`, `expected_switches`, `actual_switches`, `missed_switches`,
-`unnecessary_switches`, `mean_switch_delay`). Reassigning `model_name` in the configuration moves the auxiliary model
+`unnecessary_switches`, `mean_switch_delay`, `censored_switches`). Special requests are
+measured separately and never create main-phase transitions. Ambiguous prefixes break
+the labeled transition run; unresolved switch delays are censored at its boundary.
+Reassigning `model_name` in the configuration moves the auxiliary model
 metrics and leaves the mode metrics byte-for-byte identical, which is what makes a routing change measurable at all.
 Cases marked `ambiguous` — those where nothing before the decision determines a mode — are counted separately and
 excluded from accuracy, so an unlabeled prefix can neither inflate nor pollute a number. Expected models always come
@@ -873,18 +910,20 @@ cache warm-up mean these are not a production latency benchmark. Config/dataset 
 
 Tune descriptions/examples and threshold/margin only on `calibration`, then compare an untouched `holdout` run with
 the previous configuration using the same embedding weights and dataset. Do not copy evaluation prompts into indexed
-examples; if tuning against holdout, retire it and create a new independent set. Prioritize wrong **model** selections
+examples; if tuning against holdout, retire it and create a new independent set. Prioritize wrong **mode** selections
 and false switches, then per-mode recall and abstention. This small corpus is a regression starting point, not proof
 of statistical quality. No measured improvement or optimal threshold is claimed by adding it. The embedding model,
 model mapping and acceptance thresholds remain unchanged; measuring answer quality, token cost and provider latency
 requires a separate generation experiment on both target models. Rebuild any production persisted index after changing
 examples/descriptions. `tests/test_codex_routing_quality.py` covers evaluation plumbing only, without loading a model.
-`tests/data/codex_routing_baseline.json` records the stateless cascade case by case, as it stood on 2026-10-06 before
-the phase-evidence and memory work; `test_no_case_loses_a_mode_it_had_right_at_the_baseline` turns a regression on any
-individually correct case red, per case rather than in aggregate, so one fix cannot pay for one regression. Recorded
-on the untouched holdout: the stateless cascade resolves 20/27 and misses one mode switch while making one it should
-not have; the memory variant resolves 22/27 with neither, the difference coming entirely from the incremental-session
-cases. Neither number is a quality claim about production traffic — it is a regression floor.
+`tests/data/codex_routing_baseline.json` is a frozen replay snapshot with unverified
+provenance, not proof of the implementation before all phase/memory changes. Use
+`--baseline tests/data/codex_routing_baseline.json` to compare all variants only on
+shared case IDs and unchanged labels, with the same current metric definitions.
+New cases never receive invented historical predictions. The per-case regression
+test prevents an aggregate gain from hiding a loss on a formerly correct case.
+The final audit results and limits of this small, previously known holdout are in
+`improve-codex-work-mode-routing-verification.md`; they are not production-quality claims.
 
 ---
 

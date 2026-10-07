@@ -49,6 +49,7 @@ __all__ = [
     "collect_phase_evidence",
     "detect_phase_evidence",
     "detect_phase",
+    "describe_activity",
 ]
 
 #: An announcement of the current action by the assistant.
@@ -570,10 +571,14 @@ def collect_phase_evidence(
                 continue
             settled = evidence[linked[1]]
             status = _execution_status(item.text)
+            if status is None:
+                continue
+            calls.pop(item.call_id)
             evidence[linked[1]] = settled.settle(status)
             if (
                 settled.mode == rules.test_mode and status is False
                 and settled.kind == EVIDENCE_COMMAND
+                and linked[1] == len(evidence) - 1
             ):
                 evidence.append(PhaseEvidence(
                     mode=rules.failure_mode, kind=EVIDENCE_TEST_FAILURE,
@@ -683,7 +688,10 @@ def describe_activity(
             clause = f"ran {evidence.reason}"
         else:
             clause = f"called {item.name or 'a tool'}"
-        if evidence is not None and evidence.completed:
+        if (
+            evidence is not None and evidence.completed
+            and evidence.succeeded is not None
+        ):
             clause += ": succeeded" if evidence.succeeded else ": failed"
         clauses.append(clause)
     if limit > 0:

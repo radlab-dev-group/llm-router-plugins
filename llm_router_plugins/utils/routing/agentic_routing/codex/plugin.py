@@ -35,6 +35,7 @@ Example
 
 import logging
 
+from dataclasses import replace
 from typing import Any, Dict, Optional
 
 from llm_router_plugins.plugin_interface import PluginInterface
@@ -53,6 +54,7 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.semantic import (
     CodexSemanticLayer,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
+    MemoryStatus,
     RoutingStateStore,
     build_state_store,
     remember_decision,
@@ -100,8 +102,8 @@ class CodexRoutingPlugin(PluginInterface):
         ``sentence_transformers`` dependency or an unloadable model disables
         it and nothing else.  Configuration stays authoritative: with
         ``semantic.enabled`` ``false`` no layer is built and an injected
-        *emb_router* is ignored.  An unusable configuration is not fail-open —
-        ``validate_args`` rejects it before the layer is ever built.
+        *emb_router* is ignored. Required routing configuration is fail-hard;
+        invalid optional memory configuration only disables memory.
 
         Parameters
         ----------
@@ -139,14 +141,18 @@ class CodexRoutingPlugin(PluginInterface):
         self._triggers = frozenset({self._config.trigger_model})
         self._parser = CodexPayloadParser(max_chars=self._config.classify_max_chars)
 
-        self._semantic: Optional[CodexSemanticLayer] = semantic
+        self._semantic: Optional[CodexSemanticLayer] = (
+            semantic if self._config.semantic_enabled else None
+        )
         if self._semantic is None and self._config.semantic_enabled:
             router = emb_router
             if router is None:
                 try:
                     router = self._build_router()
                 except Exception as exc:
-                    self._warn("Codex semantic routing disabled: %s", exc)
+                    self._warn(
+                        "Codex semantic routing disabled: %s", type(exc).__name__
+                    )
                     router = None
             if router is not None:
                 self._semantic = CodexSemanticLayer(
@@ -161,9 +167,27 @@ class CodexRoutingPlugin(PluginInterface):
                 )
 
         self._memory: Optional[RoutingStateStore] = memory
+        self._memory_status = self._config.memory_status
         if memory is None:
-            self._memory, _ = build_state_store(
-                self._config.memory, logger=self._logger
+            if self._memory_status is not None:
+                self._warn(
+                    "Codex routing memory disabled: %s", self._memory_status.detail
+                )
+            else:
+                try:
+                    self._memory, self._memory_status = build_state_store(
+                        self._config.memory, logger=self._logger
+                    )
+                except Exception as exc:
+                    self._memory = None
+                    self._memory_status = MemoryStatus("unavailable")
+                    self._warn(
+                        "Codex routing memory disabled: %s", type(exc).__name__
+                    )
+        if self._memory is not None and self._config.memory.backend == "memory":
+            self._warn(
+                "Codex routing memory backend is for isolated tests/replay only; "
+                "it is process-local, not shared across workers"
             )
 
         self._classifier = CodexModeClassifier(
@@ -209,10 +233,26 @@ class CodexRoutingPlugin(PluginInterface):
 
         try:
             request = self._parser.parse(payload)
-            decision = self._classifier.classify(payload, request)
+            try:
+                decision = self._classifier.classify(payload, request)
+            except Exception:
+                if self._memory is None:
+                    raise
+                decision = CodexModeClassifier(
+                    config=self._config, semantic=self._semantic
+                ).classify(payload, request)
+                decision = replace(decision, memory=MemoryStatus("unavailable"))
+                self._warn("Codex routing memory read failed; routing statelessly")
         except Exception as exc:  # routing must never break a request
-            self._warn("Codex routing failed, passing the request through: %s", exc)
+            self._warn(
+                "Codex routing failed, passing the request through: %s",
+                type(exc).__name__,
+            )
             return payload
+
+        if self._memory is None and self._memory_status is not None:
+            if self._memory_status.state != "disabled":
+                decision = replace(decision, memory=self._memory_status)
 
         mode = self._config.mode_by_name.get(decision.mode)
         if mode is None:
@@ -230,17 +270,20 @@ class CodexRoutingPlugin(PluginInterface):
             )
             return payload
 
-        self._remember(request, decision)
+        outcome = self._remember(request, decision)
+        if outcome in ("conflict", "unavailable"):
+            decision = replace(decision, memory=MemoryStatus(outcome))
 
         self._info(
             "Codex routing: mode=%s source=%s model=%s similarity=%.3f "
-            "class=%s reason=%s memory=%s semantic=%s",
+            "class=%s reason=%s evidence=%s memory=%s semantic=%s",
             mode.name,
             decision.source,
             mode.model_name,
             decision.similarity,
             request.request_class,
             decision.reason or "-",
+            decision.evidence.kind if decision.evidence else "-",
             decision.memory.state if decision.memory else "-",
             decision.semantic or "-",
         )
@@ -279,18 +322,20 @@ class CodexRoutingPlugin(PluginInterface):
         Returns
         -------
         Dict[str, str]
-            Zero or more of ``reason``, ``memory`` and ``semantic``.
+            Zero or more of ``reason``, ``evidence``, ``memory`` and ``semantic``.
         """
         fields: Dict[str, str] = {}
         if decision.reason:
             fields["reason"] = decision.reason
+        if decision.evidence is not None:
+            fields["evidence"] = decision.evidence.kind
         if decision.memory is not None:
             fields["memory"] = decision.memory.state
         if decision.semantic:
             fields["semantic"] = decision.semantic
         return fields
 
-    def _remember(self, request: Any, decision: RoutingDecision) -> None:
+    def _remember(self, request: Any, decision: RoutingDecision) -> str:
         """
         Carry a reliable phase into the next request of the same command.
 
@@ -306,13 +351,22 @@ class CodexRoutingPlugin(PluginInterface):
 
         Returns
         -------
-        None
+        str
+            Write outcome; failures never interrupt routing.
         """
-        outcome = remember_decision(
-            self._memory, self._config.memory, request, decision
-        )
+        try:
+            outcome = remember_decision(
+                self._memory, self._config.memory, request, decision,
+                rules=self._config.phase, expected_version=decision.memory_version,
+            )
+        except Exception as exc:
+            self._warn(
+                "Codex routing memory write failed: %s", type(exc).__name__
+            )
+            return "unavailable"
         if outcome == "conflict":
             self._info("Codex routing memory not written: version conflict")
+        return outcome
 
     def _build_router(self) -> Any:
         """
