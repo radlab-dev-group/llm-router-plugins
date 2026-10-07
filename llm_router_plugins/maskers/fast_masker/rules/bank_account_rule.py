@@ -30,7 +30,6 @@ from typing import Optional, Callable, Tuple, List
 from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
 from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_iban
 
-
 # ── Country-code alternation (sorted to ensure longest match first) ───────
 
 _IbanCountryAlt = "|".join(

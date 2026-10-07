@@ -16,6 +16,10 @@ JSON structure::
         "semantic": {
           "enabled": true,
           "threshold": 0.51,
+          "aggregation": "per_target_top_k",
+          "min_margin": 0.05,
+          "intent_max_chars": 2000,
+          "phase_max_chars": 2000,
           "top_k": 3,
           "chunk_size": 256,
           "chunk_overlap": 64
@@ -37,6 +41,7 @@ JSON structure::
 """
 
 import logging
+import math
 import os
 import re
 import pathlib
@@ -46,6 +51,14 @@ from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
     DEFAULT_CLASSIFY_MAX_CHARS,
+)
+from llm_router_plugins.utils.routing.agentic_routing.codex.phase_config import (
+    CodexPhaseConfig,
+)
+from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
+    CodexMemoryConfig,
+    memory_config_from_raw,
+    validate_connection,
 )
 from llm_router_plugins.utils.routing.constants import AGENTIC_CODEX_ROUTING_PREFIX
 from llm_router_plugins.utils.routing.common import (
@@ -97,7 +110,7 @@ class CodexRoutingConfig(RoutingConfigBase):
     similarity_threshold : float
         Minimum cosine similarity required for a semantic match to be accepted.
     top_k : int
-        Number of nearest neighbours to retrieve during routing queries.
+        Maximum fragment count per mode with per-target aggregation.
     chunk_size : int
         Number of tokens per chunk when splitting mode text.
     chunk_overlap : int
@@ -107,9 +120,21 @@ class CodexRoutingConfig(RoutingConfigBase):
     codex_modes : Tuple[CodexMode, ...]
         Immutable sequence of :class:`CodexMode` dataclasses, one per work mode.
     classify_max_chars : int
-        Character budget of the text the keyword and semantic layers see: the
-        newest user message is always kept whole, older ones are appended while
-        the budget holds.
+        Parser's optional history budget. Semantic section budgets are separate.
+    phase : CodexPhaseConfig
+        Validated current-activity rules from the supplied ``settings.phase``.
+    heuristic_min_margin : float
+        Minimum lead over the second candidate; ties always abstain.
+    heuristic_negation_pattern : str
+        Regex matching locally forbidden action clauses, not generic negation.
+    heuristic_weights : Dict[str, float]
+        Default keyword, phrase and pattern weights from the supplied config.
+    semantic_aggregation : str
+        ``per_target_top_k`` for a complete balanced ranking, or legacy ``global_top_k``.
+    semantic_min_margin : float
+        Minimum cosine lead over the runner-up; ties always abstain.
+    semantic_intent_max_chars, semantic_phase_max_chars : int
+        Independent character budgets applied before encoding each section.
     """
 
     # RoutingConfigBase hooks (ClassVar — not dataclass fields)
@@ -133,7 +158,16 @@ class CodexRoutingConfig(RoutingConfigBase):
     chunk_overlap: int
     embedding_model: str
     codex_modes: Tuple["CodexMode", ...]
+    heuristic_min_margin: float
+    heuristic_negation_pattern: str
+    heuristic_weights: Dict[str, float]
+    phase: CodexPhaseConfig
+    semantic_aggregation: str
+    semantic_min_margin: float
+    semantic_intent_max_chars: int
+    semantic_phase_max_chars: int
     classify_max_chars: int = DEFAULT_CLASSIFY_MAX_CHARS
+    memory: CodexMemoryConfig = field(default_factory=CodexMemoryConfig)
 
     @property
     def mode_names(self) -> List[str]:
@@ -176,7 +210,10 @@ class CodexRoutingConfig(RoutingConfigBase):
                 )
 
         settings = raw["settings"]
-        for setting_key in ("trigger_model", "fallback_mode"):
+        for setting_key in (
+            "trigger_model", "fallback_mode", "heuristic_min_margin",
+            "heuristic_negation_pattern", "heuristic_weights", "phase",
+        ):
             if setting_key not in settings:
                 raise KeyError(
                     f"Missing required field '{setting_key}' in settings. "
@@ -205,7 +242,26 @@ class CodexRoutingConfig(RoutingConfigBase):
             for m in raw["codex_modes"]
         )
 
-        semantic = settings.get("semantic", {}) or {}
+        semantic = settings.get("semantic")
+        if not isinstance(semantic, dict):
+            raise ValueError("settings.semantic must be an object")
+        for key in ("aggregation", "min_margin", "intent_max_chars", "phase_max_chars"):
+            if key not in semantic:
+                raise KeyError(f"Missing required field '{key}' in settings.semantic")
+        if semantic["aggregation"] not in ("global_top_k", "per_target_top_k"):
+            raise ValueError("settings.semantic.aggregation is not a supported strategy")
+        margin = semantic["min_margin"]
+        if (
+            isinstance(margin, bool) or not isinstance(margin, (int, float))
+            or not math.isfinite(margin) or not 0 <= margin <= 2
+        ):
+            raise ValueError("settings.semantic.min_margin must be finite and in [0, 2]")
+        for key in ("intent_max_chars", "phase_max_chars"):
+            value = semantic[key]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"settings.semantic.{key} must be a positive integer")
+        if "phase" in settings and not isinstance(settings["phase"], dict):
+            raise ValueError("settings.phase must be an object")
         chunk_size = int(semantic.get("chunk_size", 256))
         chunk_overlap = int(semantic.get("chunk_overlap", 64))
         top_k = int(semantic.get("top_k", 3))
@@ -220,6 +276,10 @@ class CodexRoutingConfig(RoutingConfigBase):
             or settings.get("vector_store_path"),
             semantic_enabled=bool(semantic.get("enabled", True)),
             similarity_threshold=float(semantic.get("threshold", 0.51)),
+            semantic_aggregation=semantic["aggregation"],
+            semantic_min_margin=float(margin),
+            semantic_intent_max_chars=semantic["intent_max_chars"],
+            semantic_phase_max_chars=semantic["phase_max_chars"],
             top_k=top_k,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
@@ -228,7 +288,31 @@ class CodexRoutingConfig(RoutingConfigBase):
             classify_max_chars=int(
                 settings.get("classify_max_chars", DEFAULT_CLASSIFY_MAX_CHARS)
             ),
+            phase=CodexPhaseConfig.from_raw(
+                settings["phase"], mode_names=[mode.name for mode in codex_modes]
+            ),
+            memory=memory_config_from_raw(
+                settings.get("memory"), AGENTIC_CODEX_ROUTING_PREFIX
+            ),
+            heuristic_min_margin=float(settings["heuristic_min_margin"]),
+            heuristic_negation_pattern=settings["heuristic_negation_pattern"],
+            heuristic_weights=cls._heuristic_weights(settings["heuristic_weights"]),
         )
+
+    @staticmethod
+    def _heuristic_weights(raw):
+        if not isinstance(raw, dict):
+            raise ValueError("settings.heuristic_weights must be an object")
+        if set(raw) != {"keyword", "phrase", "pattern"}:
+            raise ValueError("settings.heuristic_weights requires keyword, phrase and pattern")
+        result = dict(raw)
+        for name, value in result.items():
+            if (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0
+            ):
+                raise ValueError(f"settings.heuristic_weights.{name} must be finite and >= 0")
+        return result
 
     def _override_from_env(self, logger: Optional[logging.Logger] = None) -> None:
         """
@@ -347,6 +431,10 @@ class CodexRoutingConfig(RoutingConfigBase):
         min_score = env_float(AGENTIC_CODEX_ROUTING_PREFIX, "HEURISTIC_MIN_SCORE")
         if min_score is not None:
             self.heuristic_min_score = min_score
+
+        min_margin = env_float(AGENTIC_CODEX_ROUTING_PREFIX, "HEURISTIC_MIN_MARGIN")
+        if min_margin is not None:
+            self.heuristic_min_margin = min_margin
 
         classify_max_chars = env_int(
             AGENTIC_CODEX_ROUTING_PREFIX, "CLASSIFY_MAX_CHARS"
@@ -527,6 +615,43 @@ class CodexRoutingConfig(RoutingConfigBase):
         if self.top_k < 1:
             raise ValueError(f"CodexRouting: top_k must be >= 1, got {self.top_k}")
 
+        if self.semantic_aggregation not in ("global_top_k", "per_target_top_k"):
+            raise ValueError("CodexRouting: unsupported semantic_aggregation")
+        if (
+            isinstance(self.semantic_min_margin, bool)
+            or not isinstance(self.semantic_min_margin, (int, float))
+            or not math.isfinite(self.semantic_min_margin)
+            or not 0 <= self.semantic_min_margin <= 2
+        ):
+            raise ValueError("CodexRouting: semantic_min_margin must be finite and in [0, 2]")
+        for name in ("semantic_intent_max_chars", "semantic_phase_max_chars"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"CodexRouting: {name} must be a positive integer")
+
+        if self.memory.enabled:
+            validate_connection(self.memory.connection)
+            if (
+                self.memory.backend == "redis"
+                and not self.memory.connection.configured
+            ):
+                raise ValueError(
+                    "CodexRouting: memory is enabled with the redis backend but "
+                    f"{AGENTIC_CODEX_ROUTING_PREFIX}REDIS_HOST is not set"
+                )
+
+        for name in ("heuristic_min_score", "heuristic_min_margin"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"CodexRouting: {name} must be finite and >= 0")
+        self._heuristic_weights(self.heuristic_weights)
+        if not isinstance(self.heuristic_negation_pattern, str):
+            raise ValueError("CodexRouting: heuristic_negation_pattern must be a string")
+        try:
+            re.compile(self.heuristic_negation_pattern, re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError("CodexRouting: invalid heuristic_negation_pattern") from exc
+
     def lint_signals(self, logger: Optional[logging.Logger] = None) -> None:
         """
         Report configured signals that can never score, as warnings.
@@ -615,7 +740,8 @@ class CodexMode(RoutingTarget):
         Multi-word expressions for the scorer, optionally suffixed with
         ``":weight"`` (default weight 2.0).
     patterns : Tuple[str, ...]
-        Regex patterns for the scorer (each match adds 3.0).
+        Regex signals (weight 3.0); overlaps are deduplicated and each rule
+        contributes at most once, outside locally forbidden action clauses.
     weights : Dict[str, Any]
         Per-keyword weights overriding the default keyword weight of 1.0.
     """

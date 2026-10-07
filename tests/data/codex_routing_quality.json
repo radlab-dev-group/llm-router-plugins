@@ -1,0 +1,987 @@
+{
+  "schema_version": 1,
+  "description": "Human-authored expected current work modes, independent of historical routing choices. Log-derived prompts are calibration only; synthesized holdout paraphrases must not be copied into semantic examples. Each case is the request prefix seen at one decision point, in the OpenAI Responses wire format the Codex CLI sends. Sequence order is meaningful within each split and a sequence never spans two splits. 'ambiguous' marks a prefix whose evidence before the decision does not determine a mode: those cases are reported separately and excluded from mode accuracy.",
+  "cases": [
+    {
+      "id": "log-wandb-tests",
+      "split": "calibration",
+      "expected_mode": "test",
+      "provenance": "User prompt from agents-conversation/codex/conv-01/default-session-prepare-tests.log:765; minimal input reconstructed, not a full captured payload.",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Przygotuj testy jednostkowe dla modułu wandb."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "log-readme-consistency",
+      "split": "calibration",
+      "expected_mode": "review",
+      "provenance": "User prompt from agents-conversation/codex/conv-01/update-readme-in-default.log:801; minimal input reconstructed.",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "zobacz na agentic_routing_codex.json i sprawdź czy przypisane modele i plik cały jest zgodny z opisem w README"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "log-git-first-phase",
+      "split": "calibration",
+      "expected_mode": "git_review",
+      "provenance": "User prompt from agents-conversation/codex/conv-01/git-log-analysis.log:323. Label denotes initial commit inspection, before CHANGELOG editing; later activity is synthetic.",
+      "sequence": "calibration-git-changelog",
+      "metadata": {
+        "session_id": "replay-calibration-git-changelog",
+        "thread_id": "thread-git-changelog",
+        "turn_id": "turn-1"
+      },
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Zobacz na commity na tym branczu, któ©e nie są w main, podsumuj co tam jest i dodaj do CHANGELOG"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "calibration-changelog-phase",
+      "split": "calibration",
+      "expected_mode": "implement",
+      "sequence": "calibration-git-changelog",
+      "provenance": "Synthetic continuation of log-git-first-phase.",
+      "metadata": {
+        "session_id": "replay-calibration-git-changelog",
+        "thread_id": "thread-git-changelog",
+        "turn_id": "turn-2"
+      },
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Zobacz na commity na tym branczu, któ©e nie są w main, podsumuj co tam jest i dodaj do CHANGELOG"
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "Teraz zaktualizuję CHANGELOG."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "calibration-compound-git-show",
+      "split": "calibration",
+      "expected_mode": "git_review",
+      "sequence": "calibration-compound-git",
+      "provenance": "Reproducer of agents-conversation/codex/conv-01/git-log-analysis.log:6447 — a compound command with a neutral cd and a pipe into head. Anonymized repository path.",
+      "metadata": {
+        "session_id": "replay-calibration-compound-git",
+        "thread_id": "thread-compound-git",
+        "turn_id": "turn-2"
+      },
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Podsumuj co zmieniły ostatnie commity i dopisz to do CHANGELOG."
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "Sprawdzam historię tego commita."
+            }
+          ]
+        },
+        {
+          "type": "function_call",
+          "name": "exec_command",
+          "call_id": "call-compound-1",
+          "arguments": "{\"cmd\":\"cd /srv/work/llm-router && git show e65a66b --stat && git show e65a66b | head -80\"}"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call-compound-1",
+          "output": "Process exited with code 0\ncommit e65a66b\n API: Refactor model_handler configuration handling\n 1 file changed, 3 insertions(+), 2 deletions(-)"
+        }
+      ]
+    },
+    {
+      "id": "calibration-mock",
+      "split": "calibration",
+      "expected_mode": "implement",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Zaimplementuj demonstracyjny mock dostawcy płatności w aplikacji."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "calibration-github",
+      "split": "calibration",
+      "expected_mode": "implement",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Dodaj integrację webhooków GitHub do serwisu."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "calibration-plan",
+      "split": "calibration",
+      "expected_mode": "plan",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Zaplanuj wdrożenie powiadomień o wynikach testów; nie edytuj plików."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "calibration-debug",
+      "split": "calibration",
+      "expected_mode": "debug",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Zdiagnozuj wyjątek w parserze podczas odczytu pustej odpowiedzi API."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "calibration-infrastructure-error",
+      "split": "calibration",
+      "expected_mode": "test",
+      "ambiguous": true,
+      "provenance": "A 401 from the embedding backend, not a failing test: nothing before the decision says what the agent does next, so the case is reported as ambiguous.",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Uruchom testy integracyjne modułu płatności."
+            }
+          ]
+        },
+        {
+          "type": "function_call",
+          "name": "exec_command",
+          "call_id": "call-infra-1",
+          "arguments": "{\"cmd\":\"python -m pytest tests/test_payments.py\"}"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "call-infra-1",
+          "output": "error: authentication request failed: 401 Unauthorized"
+        }
+      ]
+    },
+    {
+      "id": "holdout-demo-double",
+      "split": "holdout",
+      "expected_mode": "implement",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Build an in-memory imitation of the shipping service for the interactive demo, not an automated test."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-git-product",
+      "split": "holdout",
+      "expected_mode": "implement",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Implement a dashboard widget displaying GitHub repository activity."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-specification",
+      "split": "holdout",
+      "expected_mode": "implement",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Na podstawie specification.md zaimplementuj nowy adapter eksportu."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-no-tests",
+      "split": "holdout",
+      "expected_mode": "implement",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Nie uruchamiaj testów, dodaj opis opcji timeout do dokumentacji."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-unit-suite",
+      "split": "holdout",
+      "expected_mode": "test",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Write unit tests for the shipping adapter, including empty addresses."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-integration-run",
+      "split": "holdout",
+      "expected_mode": "test",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Wykonaj zestaw testów integracyjnych modułu zamówień."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-test-repair",
+      "split": "holdout",
+      "expected_mode": "test",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Update obsolete test assertions to the intentional new API contract."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-readme-review",
+      "split": "holdout",
+      "expected_mode": "review",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Porównaj opisy opcji w instrukcji z rzeczywistą konfiguracją, bez wykonywania testów."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-code-review",
+      "split": "holdout",
+      "expected_mode": "review",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Evaluate the maintainability of the notification module without changing files or examining commit history."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-test-design-plan",
+      "split": "holdout",
+      "expected_mode": "plan",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Outline an architecture for a service that collects CI test results; do not implement it yet."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-git-design-plan",
+      "split": "holdout",
+      "expected_mode": "plan",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Zaprojektuj przepływ synchronizacji danych z GitHub, na razie tylko plan architektury."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-runtime-debug",
+      "split": "holdout",
+      "expected_mode": "debug",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Find the root cause of the checkout service crashing when a discount is missing."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-history-to-docs",
+      "split": "holdout",
+      "expected_mode": "git_review",
+      "sequence": "holdout-history-docs",
+      "metadata": {
+        "session_id": "replay-holdout-history-docs",
+        "thread_id": "thread-history-docs",
+        "turn_id": "turn-1"
+      },
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Inspect the commits unique to the release branch before preparing release notes."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-write-release-notes",
+      "split": "holdout",
+      "expected_mode": "implement",
+      "sequence": "holdout-history-docs",
+      "metadata": {
+        "session_id": "replay-holdout-history-docs",
+        "thread_id": "thread-history-docs",
+        "turn_id": "turn-2"
+      },
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Inspect the commits unique to the release branch before preparing release notes."
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "Now I will update docs/release.md."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-new-task-cuts-history",
+      "split": "holdout",
+      "expected_mode": "implement",
+      "sequence": "holdout-history-docs",
+      "metadata": {
+        "session_id": "replay-holdout-history-docs",
+        "thread_id": "thread-history-docs",
+        "turn_id": "turn-3"
+      },
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Przejrzyj commity ostatniej gałęzi."
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "Teraz przejrzę diff."
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Dodaj pole display_name do odpowiedzi API."
+            }
+          ]
+        },
+        {
+          "type": "function_call",
+          "name": "exec_command",
+          "call_id": "status-new-task",
+          "arguments": "{\"cmd\":\"git status\"}"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "status-new-task",
+          "output": "On branch main"
+        }
+      ]
+    },
+    {
+      "id": "holdout-executed-suite",
+      "split": "holdout",
+      "expected_mode": "test",
+      "sequence": "holdout-test-debug",
+      "metadata": {
+        "session_id": "replay-holdout-test-debug",
+        "thread_id": "thread-test-debug",
+        "turn_id": "turn-2"
+      },
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Dodaj walidację adresu w serwisie."
+            }
+          ]
+        },
+        {
+          "type": "function_call",
+          "name": "exec_command",
+          "call_id": "address-suite",
+          "arguments": "{\"cmd\":\"python -m pytest tests/test_address.py\"}"
+        }
+      ]
+    },
+    {
+      "id": "holdout-suite-failure",
+      "split": "holdout",
+      "expected_mode": "debug",
+      "sequence": "holdout-test-debug",
+      "metadata": {
+        "session_id": "replay-holdout-test-debug",
+        "thread_id": "thread-test-debug",
+        "turn_id": "turn-3"
+      },
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Dodaj walidację adresu w serwisie."
+            }
+          ]
+        },
+        {
+          "type": "function_call",
+          "name": "exec_command",
+          "call_id": "address-suite",
+          "arguments": "{\"cmd\":\"python -m pytest tests/test_address.py\"}"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "address-suite",
+          "output": "Process exited with code 1\nTraceback (most recent call last):\nValueError: empty address"
+        }
+      ]
+    },
+    {
+      "id": "holdout-failure-repaired",
+      "split": "holdout",
+      "expected_mode": "implement",
+      "sequence": "holdout-test-debug",
+      "metadata": {
+        "session_id": "replay-holdout-test-debug",
+        "thread_id": "thread-test-debug",
+        "turn_id": "turn-4"
+      },
+      "provenance": "The agent fixes the source file after the failing suite: the patch, not the earlier failure, is the current evidence.",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Dodaj walidację adresu w serwisie."
+            }
+          ]
+        },
+        {
+          "type": "function_call",
+          "name": "exec_command",
+          "call_id": "address-suite",
+          "arguments": "{\"cmd\":\"python -m pytest tests/test_address.py\"}"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "address-suite",
+          "output": "Process exited with code 1\nTraceback (most recent call last):\nValueError: empty address"
+        },
+        {
+          "type": "function_call",
+          "name": "apply_patch",
+          "call_id": "address-fix",
+          "arguments": "{\"input\":\"*** Begin Patch\\n*** Update File: src/service/address.py\\n@@\\n-def validate(value):\\n-    return True\\n+def validate(value):\\n+    return bool(value)\\n*** End Patch\\n\"}"
+        }
+      ]
+    },
+    {
+      "id": "holdout-suite-green-again",
+      "split": "holdout",
+      "expected_mode": "test",
+      "sequence": "holdout-test-debug",
+      "metadata": {
+        "session_id": "replay-holdout-test-debug",
+        "thread_id": "thread-test-debug",
+        "turn_id": "turn-5"
+      },
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Dodaj walidację adresu w serwisie."
+            }
+          ]
+        },
+        {
+          "type": "function_call",
+          "name": "exec_command",
+          "call_id": "address-suite",
+          "arguments": "{\"cmd\":\"python -m pytest tests/test_address.py\"}"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "address-suite",
+          "output": "Process exited with code 1\nTraceback (most recent call last):\nValueError: empty address"
+        },
+        {
+          "type": "function_call",
+          "name": "apply_patch",
+          "call_id": "address-fix",
+          "arguments": "{\"input\":\"*** Begin Patch\\n*** Update File: src/service/address.py\\n@@\\n-def validate(value):\\n-    return True\\n+def validate(value):\\n+    return bool(value)\\n*** End Patch\\n\"}"
+        },
+        {
+          "type": "function_call",
+          "name": "exec_command",
+          "call_id": "address-rerun",
+          "arguments": "{\"cmd\":\"python -m pytest tests/test_address.py\"}"
+        }
+      ]
+    },
+    {
+      "id": "holdout-log-to-implement",
+      "split": "holdout",
+      "expected_mode": "git_review",
+      "sequence": "holdout-log-implement",
+      "metadata": {
+        "session_id": "replay-holdout-log-implement",
+        "thread_id": "thread-log-implement",
+        "turn_id": "turn-1"
+      },
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Sprawdź, co zmieniło się w tym branczu względem main."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-log-executed",
+      "split": "holdout",
+      "expected_mode": "git_review",
+      "sequence": "holdout-log-implement",
+      "metadata": {
+        "session_id": "replay-holdout-log-implement",
+        "thread_id": "thread-log-implement",
+        "turn_id": "turn-2"
+      },
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Sprawdź, co zmieniło się w tym branczu względem main."
+            }
+          ]
+        },
+        {
+          "type": "function_call",
+          "name": "exec_command",
+          "call_id": "log-1",
+          "arguments": "{\"cmd\":\"git log --oneline main..HEAD\"}"
+        }
+      ]
+    },
+    {
+      "id": "holdout-changelog-after-log",
+      "split": "holdout",
+      "expected_mode": "implement",
+      "sequence": "holdout-log-implement",
+      "metadata": {
+        "session_id": "replay-holdout-log-implement",
+        "thread_id": "thread-log-implement",
+        "turn_id": "turn-3"
+      },
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Sprawdź, co zmieniło się w tym branczu względem main."
+            }
+          ]
+        },
+        {
+          "type": "function_call",
+          "name": "exec_command",
+          "call_id": "log-1",
+          "arguments": "{\"cmd\":\"git log --oneline main..HEAD\"}"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "log-1",
+          "output": "Process exited with code 0\n3f2a1b9 Add address validation\n"
+        },
+        {
+          "type": "function_call",
+          "name": "apply_patch",
+          "call_id": "log-2",
+          "arguments": "{\"input\":\"*** Begin Patch\\n*** Update File: CHANGELOG.md\\n@@\\n+# Unreleased\\n+- Address validation\\n*** End Patch\\n\"}"
+        }
+      ]
+    },
+    {
+      "id": "holdout-neutral-inspection",
+      "split": "holdout",
+      "expected_mode": "implement",
+      "sequence": "holdout-neutral-read",
+      "ambiguous": true,
+      "provenance": "Reading a file carries no work-phase evidence, so the cascade is expected to fall through; the label only records that no special mode is justified.",
+      "metadata": {
+        "session_id": "replay-holdout-neutral-read",
+        "thread_id": "thread-neutral-read",
+        "turn_id": "turn-2"
+      },
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Powiem ci później, co z tym zrobić."
+            }
+          ]
+        },
+        {
+          "type": "function_call",
+          "name": "exec_command",
+          "call_id": "read-1",
+          "arguments": "{\"cmd\":\"cat docs/release.md\"}"
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "read-1",
+          "output": "Process exited with code 0\n# Release notes\n"
+        }
+      ]
+    },
+    {
+      "id": "holdout-confirm-review",
+      "split": "holdout",
+      "expected_mode": "git_review",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Porównaj branch wydania z origin/main."
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "Czy mam porównać również historię commitów?"
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Tak, zrób to."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-incremental-suite",
+      "split": "holdout",
+      "expected_mode": "test",
+      "sequence": "holdout-incremental",
+      "metadata": {
+        "session_id": "replay-incremental",
+        "thread_id": "thread-incremental",
+        "turn_id": "turn-a"
+      },
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Dodaj walidację adresu wysyłki."
+            }
+          ]
+        },
+        {
+          "type": "function_call",
+          "name": "exec_command",
+          "call_id": "inc-1",
+          "arguments": "{\"cmd\": \"python -m pytest tests/test_shipping.py\"}"
+        }
+      ]
+    },
+    {
+      "id": "holdout-incremental-result-only",
+      "split": "holdout",
+      "expected_mode": "test",
+      "sequence": "holdout-incremental",
+      "metadata": {
+        "session_id": "replay-incremental",
+        "thread_id": "thread-incremental",
+        "turn_id": "turn-a"
+      },
+      "provenance": "Incremental payload: the client sends only the new result of a call it already showed, so the current request carries no phase evidence of its own.",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Dodaj walidację adresu wysyłki."
+            }
+          ]
+        },
+        {
+          "type": "function_call_output",
+          "call_id": "inc-1",
+          "output": "Process exited with code 0\n12 passed"
+        }
+      ]
+    },
+    {
+      "id": "holdout-incremental-asking",
+      "split": "holdout",
+      "expected_mode": "test",
+      "sequence": "holdout-incremental",
+      "metadata": {
+        "session_id": "replay-incremental",
+        "thread_id": "thread-incremental",
+        "turn_id": "turn-a"
+      },
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Dodaj walidację adresu wysyłki."
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "Suite gotowy."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "holdout-incremental-new-command",
+      "split": "holdout",
+      "expected_mode": "implement",
+      "sequence": "holdout-incremental",
+      "metadata": {
+        "session_id": "replay-incremental",
+        "thread_id": "thread-incremental",
+        "turn_id": "turn-b"
+      },
+      "provenance": "A new user instruction is a new command generation: the phase remembered for the previous one must not carry over.",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Dodaj opis nowej opcji do dokumentacji."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

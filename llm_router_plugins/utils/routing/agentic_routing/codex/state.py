@@ -1,0 +1,1437 @@
+"""
+Optional shared session memory for the Codex routing cascade.
+
+Why it exists
+-------------
+Codex runs one action per model call.  Between two calls the user's command
+does not change, but the evidence does: the test suite has now run, the patch
+has landed, the failure arrived.  A stateless cascade re-reads whatever the
+client happened to send and can lose the thread between two requests of the
+same action — especially when the history arrives incrementally instead of as a
+full transcript.
+
+This module remembers, per session, the last *reliable* phase of the current
+command generation, so a neutral request in the middle of an action keeps it.
+The memory is shared between Gunicorn workers through Redis, which is why
+there is no local-process cache: two workers holding two different ideas of the
+same session's phase is worse than no memory at all.
+
+What it never does
+------------------
+- It never overrides a fresh, unambiguous signal.  The caller applies it only
+  where the deterministic layers stayed silent.
+- It never stores a fallback, a weak semantic match or a special request
+  (title generation, compaction).
+- It stores no model names, no conversation text, no tool output and no
+  credentials — a mode name, the kind and reason of the evidence that produced
+  it, bounded event identifiers and a version counter.
+- A missing, expired, malformed or foreign record is a miss, not an error.
+  A Redis outage is a miss too: routing continues statelessly and the request
+  is never failed because of this module.
+
+Identity
+--------
+A key isolates the plugin's own namespace, the installation, the session, the
+thread and the agent.  ``turn_id`` is the *generation*: it distinguishes the
+current command from the one before it inside one thread, and it is what makes
+an older or causally incomparable update a conflict instead of an overwrite.
+Without enough identifiers to build a key, routing stays stateless.
+"""
+
+import hashlib
+import json
+import logging
+import math
+import os
+import re
+import threading
+import time
+
+from dataclasses import dataclass, field, replace
+from typing import Any, Callable, Dict, Optional, Tuple
+
+__all__ = [
+    "MEMORY_BACKEND_MEMORY",
+    "MEMORY_BACKEND_REDIS",
+    "RedisConnectionSettings",
+    "CodexMemoryConfig",
+    "SessionRoutingState",
+    "RoutingStateStore",
+    "InMemoryRoutingStateStore",
+    "RedisRoutingStateStore",
+    "MemoryStatus",
+    "session_key",
+    "build_state_store",
+]
+
+#: Process-local store.  Isolated replay and contract tests only, never a
+#: production fallback: a per-worker cache splits the state between workers.
+MEMORY_BACKEND_MEMORY = "memory"
+
+#: Shared Redis-backed store — the only backend two workers can agree on.
+MEMORY_BACKEND_REDIS = "redis"
+
+VALID_MEMORY_BACKENDS = (MEMORY_BACKEND_MEMORY, MEMORY_BACKEND_REDIS)
+
+#: Bump when the stored record layout changes; an unknown version is a miss.
+STATE_SCHEMA_VERSION = 1
+
+#: Characters allowed in a key component.  Anything else is fingerprinted, so a
+#: client-supplied identifier can never forge a key or escape the namespace.
+_SAFE_COMPONENT = re.compile(r"[A-Za-z0-9._-]{1,128}")
+
+#: Fallback fingerprint length for an unsafe identifier.
+_FINGERPRINT_CHARS = 16
+
+#: Environment variables holding connection settings, read the way the host
+#: application reads its own auth Redis: separate variables, ``os.environ.get``,
+#: explicit numeric conversion, empty password normalized to ``None``.
+#:
+#: Deliberately *not* read from the JSON config and never inherited from the
+#: host application's ``AUTH_REDIS_*`` or generic ``REDIS_*`` variables.
+CONNECTION_ENV_FIELDS = (
+    "host", "port", "db", "password", "protocol", "username", "ssl",
+    "ssl_ca_certs", "ssl_certfile", "ssl_keyfile", "ssl_cert_reqs",
+    "socket_connect_timeout", "socket_timeout",
+)
+
+
+@dataclass(frozen=True)
+class MemoryStatus:
+    """
+    Why the memory did or did not contribute to one decision.
+
+    Parameters
+    ----------
+    state : str
+        ``disabled``, ``unconfigured``, ``unavailable``, ``hit``, ``miss``,
+        ``expired``, ``conflict`` or ``written``.
+        The distinction matters operationally: ``unavailable`` is a broken
+        deployment while ``miss`` is an ordinary cold start.
+        Expired records are reported as ``expired`` rather than ``miss`` only
+        when the record was found and found stale.
+    detail : str
+        Short reason code, safe to log: never a credential, never a full
+        session identifier.
+    """
+
+    state: str
+    detail: str = ""
+
+
+#: Memory contributed nothing; the plugin runs statelessly.
+STATUS_DISABLED = MemoryStatus("disabled")
+
+#: Memory is enabled but has no host, or the client library is missing.
+STATUS_UNCONFIGURED = MemoryStatus("unconfigured")
+
+#: The store is configured but the operation failed.
+STATUS_UNAVAILABLE = MemoryStatus("unavailable")
+
+
+@dataclass(frozen=True)
+class RedisConnectionSettings:
+    """
+    Redis connection parameters, read exclusively from the plugin's own ENV.
+
+    Mirrors the host application's auth-Redis contract: one variable per
+    parameter under the plugin prefix, an empty password meaning *no
+    password*, and TLS verification on by default — enabling TLS never
+    silently disables certificate checks.
+
+    Parameters
+    ----------
+    host : str
+        Server host.  Empty means "not configured", which is the default: no
+        memory, no error.
+    port : int
+        Server port.
+    db : int
+        Database number.
+    password : str or None
+        AUTH password; ``None`` when unset or empty.
+    protocol : int
+        RESP protocol version.
+    username : str or None
+        ACL username; ``None`` for the default user.
+    ssl : bool
+        Whether to connect over TLS.
+    ssl_ca_certs, ssl_certfile, ssl_keyfile : str or None
+        TLS material paths.
+    ssl_cert_reqs : str
+        ``required`` (default), ``optional`` or ``none``.
+    socket_connect_timeout, socket_timeout : float
+        Short positive timeouts, in seconds.
+    """
+
+    host: str = ""
+    port: int = 6379
+    db: int = 0
+    password: Optional[str] = None
+    protocol: int = 3
+    username: Optional[str] = None
+    ssl: bool = False
+    ssl_ca_certs: Optional[str] = None
+    ssl_certfile: Optional[str] = None
+    ssl_keyfile: Optional[str] = None
+    ssl_cert_reqs: str = "required"
+    socket_connect_timeout: float = 1.0
+    socket_timeout: float = 1.0
+
+    @property
+    def configured(self) -> bool:
+        """Whether a connection can be attempted at all."""
+        return bool(self.host)
+
+    def client_kwargs(self) -> Dict[str, Any]:
+        """
+        Return the keyword arguments for :class:`redis.Redis`.
+
+        Returns
+        -------
+        dict
+            Connection arguments, including the TLS block only when TLS is on
+            and the short socket timeouts that keep a dead Redis from stalling
+            a routing decision.
+        """
+        arguments: Dict[str, Any] = {
+            "host": self.host,
+            "port": self.port,
+            "db": self.db,
+            "password": self.password,
+            "protocol": self.protocol,
+            "decode_responses": True,
+            "socket_connect_timeout": self.socket_connect_timeout,
+            "socket_timeout": self.socket_timeout,
+        }
+        if self.username:
+            arguments["username"] = self.username
+        if self.ssl:
+            arguments["ssl"] = True
+            arguments["ssl_cert_reqs"] = self.ssl_cert_reqs
+            for name in ("ssl_ca_certs", "ssl_certfile", "ssl_keyfile"):
+                value = getattr(self, name)
+                if value:
+                    arguments[name] = value
+        return arguments
+
+
+@dataclass(frozen=True)
+class CodexMemoryConfig:
+    """
+    Memory policy: whether it is on, where it lives and how big it may get.
+
+    Non-secret settings resolve ENV → explicit JSON → safe default.  Connection
+    settings have **no** JSON counterpart at all, so a config file can never
+    carry a Redis URL or a password.
+
+    Parameters
+    ----------
+    enabled : bool
+        Off unless explicitly turned on, by ENV or by an explicit JSON section.
+    backend : str
+        :data:`MEMORY_BACKEND_REDIS` in production;
+        :data:`MEMORY_BACKEND_MEMORY` for isolated replay and tests only.
+    ttl_seconds : int
+        Lifetime of one session record.
+    max_sessions : int
+        Cap on the sessions this plugin's namespace may hold, enforced across
+        workers without scanning the keyspace.
+    max_events : int
+        Cap on the event identifiers remembered per session.
+    max_calls : int
+        Cap on the unresolved call identifiers remembered per session.
+    key_prefix : str
+        Namespace of the plugin's own keys.  Pruning never touches anything
+        outside it.
+    max_retries : int
+        Attempts on a version conflict before the request continues statelessly.
+    connection : RedisConnectionSettings
+        Where to connect.
+    """
+
+    enabled: bool = False
+    backend: str = MEMORY_BACKEND_REDIS
+    ttl_seconds: int = 900
+    max_sessions: int = 10000
+    max_events: int = 64
+    max_calls: int = 32
+    key_prefix: str = "llm-router:codex-routing"
+    max_retries: int = 1
+    connection: RedisConnectionSettings = field(default_factory=RedisConnectionSettings)
+
+    @property
+    def usable(self) -> bool:
+        """Whether the policy is on and points at something connectable."""
+        if not self.enabled:
+            return False
+        if self.backend == MEMORY_BACKEND_REDIS:
+            return self.connection.configured
+        return True
+
+
+def _env_text(prefix: str, name: str, default: str = "") -> str:
+    """Read a stripped string variable."""
+    return (os.environ.get(f"{prefix}{name}") or default).strip()
+
+
+def _env_secret(prefix: str, name: str) -> Optional[str]:
+    """Read a secret variable, normalizing an empty value to ``None``."""
+    value = (os.environ.get(f"{prefix}{name}") or "").strip()
+    return value or None
+
+
+def _env_int(prefix: str, name: str, default: int) -> int:
+    """Read an integer variable, falling back to *default* when unparsable."""
+    raw = (os.environ.get(f"{prefix}{name}") or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{prefix}{name} must be an integer, got {raw!r}") from exc
+
+
+def _env_bool(prefix: str, name: str, default: bool) -> bool:
+    """Read a boolean variable; unrecognized values are an error, not a guess."""
+    raw = (os.environ.get(f"{prefix}{name}") or "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{prefix}{name} must be a boolean, got {raw!r}")
+
+
+def _env_float(prefix: str, name: str, default: float) -> float:
+    """Read a positive float variable."""
+    raw = (os.environ.get(f"{prefix}{name}") or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{prefix}{name} must be a number, got {raw!r}") from exc
+
+
+def _resolve(raw: Dict[str, Any], key: str, env_name: str, default):
+    """
+    Apply the ENV → explicit JSON → default order of a non-secret setting.
+
+    ``MEMORY_*`` variables always win over the configuration file, which is the
+    documented precedence; a variable that is present but empty still counts as
+    an explicit override attempt and is validated, not silently ignored.
+    """
+    if env_name in os.environ:
+        return os.environ[env_name]
+    if isinstance(raw, dict) and key in raw:
+        return raw[key]
+    return default
+
+
+def connection_from_env(prefix: str) -> RedisConnectionSettings:
+    """
+    Build the connection settings from the plugin's own environment variables.
+
+    Parameters
+    ----------
+    prefix : str
+        The plugin's environment prefix, e.g.
+        ``LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_``.
+
+    Returns
+    -------
+    RedisConnectionSettings
+        Values with the documented defaults.
+
+    Raises
+    ------
+    ValueError
+        On a malformed numeric, boolean or certificate-verification value.
+    """
+    cert_reqs = _env_text(prefix, "REDIS_SSL_CERT_REQS", "required").lower()
+    if cert_reqs not in ("required", "optional", "none"):
+        raise ValueError(
+            f"{prefix}REDIS_SSL_CERT_REQS must be required, optional or none"
+        )
+    return RedisConnectionSettings(
+        host=_env_text(prefix, "REDIS_HOST"),
+        port=_env_int(prefix, "REDIS_PORT", 6379),
+        db=_env_int(prefix, "REDIS_DB", 0),
+        password=_env_secret(prefix, "REDIS_PASSWORD"),
+        protocol=_env_int(prefix, "REDIS_PROTOCOL", 3),
+        username=_env_secret(prefix, "REDIS_USERNAME"),
+        ssl=_env_bool(prefix, "REDIS_SSL", False),
+        ssl_ca_certs=_env_secret(prefix, "REDIS_SSL_CA_CERTS"),
+        ssl_certfile=_env_secret(prefix, "REDIS_SSL_CERTFILE"),
+        ssl_keyfile=_env_secret(prefix, "REDIS_SSL_KEYFILE"),
+        ssl_cert_reqs=cert_reqs,
+        socket_connect_timeout=_env_float(prefix, "REDIS_SOCKET_CONNECT_TIMEOUT", 1.0),
+        socket_timeout=_env_float(prefix, "REDIS_SOCKET_TIMEOUT", 1.0),
+    )
+
+
+def memory_config_from_raw(raw: Any, prefix: str) -> CodexMemoryConfig:
+    """
+    Resolve the memory policy from an optional JSON section plus the ENV.
+
+    An absent section means "off": an older configuration file keeps the
+    stateless behaviour without being rewritten.
+
+    Parameters
+    ----------
+    raw : Any
+        ``settings.memory`` from the supplied JSON, or ``None``.
+    prefix : str
+        Environment prefix providing the ``MEMORY_*`` variables.
+
+    Returns
+    -------
+    CodexMemoryConfig
+        The resolved policy, with connection settings read from the ENV only.
+
+    Raises
+    ------
+    ValueError
+        On an unknown backend or an out-of-range limit.
+    """
+    data: Dict[str, Any] = raw if isinstance(raw, dict) else {}
+    unknown = set(data) - {
+        "enabled", "backend", "ttl_seconds", "max_sessions", "max_events",
+        "max_calls", "key_prefix", "max_retries",
+    }
+    if unknown:
+        raise ValueError(f"Unknown settings.memory fields: {sorted(unknown)}")
+
+    def pick(key: str, env_name: str, default):
+        return _resolve(data, key, f"{prefix}{env_name}", default)
+
+    enabled = _as_bool(pick("enabled", "MEMORY_ENABLED", False))
+    backend = str(
+        pick("backend", "MEMORY_BACKEND", MEMORY_BACKEND_REDIS)
+    ).strip().lower()
+    config = CodexMemoryConfig(
+        enabled=enabled,
+        backend=backend,
+        ttl_seconds=_positive(
+            pick("ttl_seconds", "MEMORY_TTL_SECONDS", 900), "ttl_seconds"
+        ),
+        max_sessions=_positive(
+            pick("max_sessions", "MEMORY_MAX_SESSIONS", 10000), "max_sessions"
+        ),
+        max_events=_positive(
+            pick("max_events", "MEMORY_MAX_EVENTS", 64), "max_events"
+        ),
+        max_calls=_positive(pick("max_calls", "MEMORY_MAX_CALLS", 32), "max_calls"),
+        key_prefix=str(pick(
+            "key_prefix", "MEMORY_KEY_PREFIX", "llm-router:codex-routing"
+        )).strip(),
+        max_retries=_non_negative(
+            pick("max_retries", "MEMORY_MAX_RETRIES", 1), "max_retries"
+        ),
+        connection=connection_from_env(prefix),
+    )
+    if backend not in VALID_MEMORY_BACKENDS:
+        raise ValueError(
+            f"settings.memory.backend must be one of {VALID_MEMORY_BACKENDS}"
+        )
+    if not config.key_prefix or any(
+        char.isspace() for char in config.key_prefix
+    ):
+        raise ValueError(
+            "settings.memory.key_prefix must be a non-empty, space-free prefix"
+        )
+    return config
+
+
+def _as_bool(value: Any) -> bool:
+    """Interpret a JSON or ENV boolean-ish value."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        if lowered in ("0", "false", "no", "off"):
+            return False
+    raise ValueError(f"memory enabled must be a boolean, got {value!r}")
+
+
+def _positive(value: Any, label: str) -> int:
+    """Validate a strictly positive integer limit."""
+    number = _integer(value, label)
+    if number < 1:
+        raise ValueError(f"settings.memory.{label} must be >= 1")
+    return number
+
+
+def _non_negative(value: Any, label: str) -> int:
+    """Validate a non-negative integer."""
+    number = _integer(value, label)
+    if number < 0:
+        raise ValueError(f"settings.memory.{label} must be >= 0")
+    return number
+
+
+def _integer(value: Any, label: str) -> int:
+    """
+    Coerce an int-ish value, rejecting bools, fractional floats and text.
+
+    A number arriving from the environment is a string, so a digit string is a
+    legitimate value here; anything that is not a whole number is a
+    configuration error rather than something to guess at.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"settings.memory.{label} must be an integer")
+    if isinstance(value, str):
+        try:
+            value = int(value.strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"settings.memory.{label} must be an integer, got {value!r}"
+            ) from exc
+    if not isinstance(value, (int, float)):
+        raise ValueError(f"settings.memory.{label} must be an integer")
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError(f"settings.memory.{label} must be an integer")
+    return int(value)
+
+
+def validate_connection(connection: RedisConnectionSettings) -> None:
+    """
+    Validate resolved connection settings.
+
+    Parameters
+    ----------
+    connection : RedisConnectionSettings
+        The settings to check.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ValueError
+        On an out-of-range port, database, protocol or timeout.
+    """
+    if not 1 <= connection.port <= 65535:
+        raise ValueError(f"Redis port must be in [1, 65535], got {connection.port}")
+    if not 0 <= connection.db <= 15:
+        raise ValueError(f"Redis db must be in [0, 15], got {connection.db}")
+    if connection.protocol not in (2, 3):
+        raise ValueError(f"Redis protocol must be 2 or 3, got {connection.protocol}")
+    if connection.ssl_cert_reqs not in ("required", "optional", "none"):
+        raise ValueError("Redis ssl_cert_reqs must be required, optional or none")
+    for name in ("socket_connect_timeout", "socket_timeout"):
+        value = getattr(connection, name)
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or (
+            not math.isfinite(value)
+        ) or value <= 0:
+            raise ValueError(f"Redis {name} must be a positive number of seconds")
+
+
+def _safe_component(value: str) -> str:
+    """
+    Return a key-safe form of *value*, fingerprinting anything unusual.
+
+    Identifiers come from a client payload.  A component that is not plainly
+    alphanumeric is replaced by a digest of itself, which keeps the key stable
+    for the same input while making it impossible to inject a separator.
+    """
+    text = (value or "").strip()
+    if not text:
+        return "-"
+    if _SAFE_COMPONENT.fullmatch(text):
+        return text
+    return "~" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:_FINGERPRINT_CHARS]
+
+
+def session_key(
+    key_prefix: str,
+    session_id: str,
+    thread_id: str,
+    agent_name: str,
+) -> Optional[str]:
+    """
+    Build the isolation key of one agent's session, or ``None``.
+
+    A session is identified by the CLI session and thread; the agent is part of
+    the key because a sub-agent working in the same thread has its own current
+    action.  Without both a session and a thread identifier there is nothing to
+    isolate, and routing must stay stateless rather than guess.
+
+    Parameters
+    ----------
+    key_prefix : str
+        The plugin's own namespace.
+    session_id : str
+        ``client_metadata.session_id`` of the request.
+    thread_id : str
+        ``client_metadata.thread_id`` of the request.
+    agent_name : str
+        Agent emitting the request; the root agent uses its own name.
+
+    Returns
+    -------
+    Optional[str]
+        The key, or ``None`` when the identifiers are insufficient.
+    """
+    if not session_id or not thread_id:
+        return None
+    return ":".join((
+        key_prefix,
+        f"v{STATE_SCHEMA_VERSION}",
+        _safe_component(session_id),
+        _safe_component(thread_id),
+        _safe_component(agent_name),
+    ))
+
+
+@dataclass(frozen=True)
+class SessionRoutingState:
+    """
+    What one session currently remembers about its work phase.
+
+    Parameters
+    ----------
+    mode : str
+        The remembered work mode.
+    kind : str
+        Kind of evidence that produced it, e.g. ``command`` or ``patch``.
+    reason : str
+        Reason code of that evidence.
+    generation : str
+        ``turn_id`` of the command generation this state belongs to.
+    event_id : str
+        Identifier of the payload item that produced the evidence.
+    fingerprint : str
+        Digest of the evidence, used to notice a repeated payload.
+    pending_calls : Tuple[str, ...]
+        Call identifiers opened and not yet settled, bounded by the policy.
+    seen_events : Tuple[str, ...]
+        Recently accounted event identifiers, newest last, bounded by the
+        policy.  Replaying a full transcript therefore does not re-count a
+        result it has already applied.
+    version : int
+        Monotonic compare-and-set counter, assigned by the store.
+    updated_at : float
+        Wall-clock second of the last write, for diagnostics only.
+    """
+
+    mode: str = ""
+    kind: str = ""
+    reason: str = ""
+    generation: str = ""
+    event_id: str = ""
+    fingerprint: str = ""
+    pending_calls: Tuple[str, ...] = ()
+    seen_events: Tuple[str, ...] = ()
+    version: int = 0
+    updated_at: float = 0.0
+
+    def set_version(self, version: int, updated_at: float) -> "SessionRoutingState":
+        """
+        Return a copy stamped with the version and time the store assigns.
+
+        Parameters
+        ----------
+        version : int
+            The version this record is written under.
+        updated_at : float
+            Wall-clock second of the write.
+
+        Returns
+        -------
+        SessionRoutingState
+            This record with :attr:`version` and :attr:`updated_at` set.
+        """
+        return replace(self, version=version, updated_at=updated_at)
+
+    def to_json(self) -> str:
+        """
+        Serialize the record.
+
+        Returns
+        -------
+        str
+            A compact JSON object tagged with :data:`STATE_SCHEMA_VERSION`.
+        """
+        return json.dumps({
+            "v": STATE_SCHEMA_VERSION,
+            "mode": self.mode,
+            "kind": self.kind,
+            "reason": self.reason,
+            "gen": self.generation,
+            "ev": self.event_id,
+            "fp": self.fingerprint,
+            "pending": list(self.pending_calls),
+            "seen": list(self.seen_events),
+            "ver": self.version,
+            "ts": self.updated_at,
+        }, separators=(",", ":"), ensure_ascii=True)
+
+    @classmethod
+    def from_json(cls, raw: Any) -> Optional["SessionRoutingState"]:
+        """
+        Parse a stored record, returning ``None`` for anything unusable.
+
+        A damaged, unknown-version or non-object record is a miss: the memory
+        degrades to stateless routing instead of acting on a guess, and it never
+        evaluates or imports what it read.
+
+        Parameters
+        ----------
+        raw : Any
+            The stored string.
+
+        Returns
+        -------
+        Optional[SessionRoutingState]
+            The record, or ``None``.
+        """
+        if not isinstance(raw, str) or not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(data, dict) or data.get("v") != STATE_SCHEMA_VERSION:
+            return None
+        mode = data.get("mode")
+        if not isinstance(mode, str) or not mode:
+            return None
+        return cls(
+            mode=mode,
+            kind=_text(data.get("kind")),
+            reason=_text(data.get("reason")),
+            generation=_text(data.get("gen")),
+            event_id=_text(data.get("ev")),
+            fingerprint=_text(data.get("fp")),
+            pending_calls=_texts(data.get("pending")),
+            seen_events=_texts(data.get("seen")),
+            version=int(_number(data.get("ver"))),
+            updated_at=_number(data.get("ts")),
+        )
+
+
+def _text(value: Any) -> str:
+    """Return *value* when it is a string, else ``""``."""
+    return value if isinstance(value, str) else ""
+
+
+def _texts(value: Any) -> Tuple[str, ...]:
+    """Return the string entries of *value* as a tuple."""
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(entry for entry in value if isinstance(entry, str))
+
+
+def _number(value: Any) -> float:
+    """Return *value* when it is a finite number, else ``0.0``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return float(value) if math.isfinite(float(value)) else 0.0
+
+
+class RoutingStateStore:
+    """
+    Interface the cascade needs from a session memory.
+
+    Implementations must be safe to share between threads and workers, must
+    never raise on a routing path (a failure is a miss reported through
+    :class:`MemoryStatus`), and must never touch keys outside the plugin's own
+    namespace.
+    """
+
+    def read(self, key: str) -> Tuple[Optional[SessionRoutingState], MemoryStatus]:
+        """
+        Return the state stored under *key*.
+
+        Parameters
+        ----------
+        key : str
+            Key from :func:`session_key`.
+
+        Returns
+        -------
+        Tuple[Optional[SessionRoutingState], MemoryStatus]
+            The record (or ``None``) and why.
+        """
+        raise NotImplementedError
+
+    def write(
+        self,
+        key: str,
+        state: SessionRoutingState,
+        expected_version: int,
+    ) -> MemoryStatus:
+        """
+        Store *state* only if the record is still at *expected_version*.
+
+        Parameters
+        ----------
+        key : str
+            Key from :func:`session_key`.
+        state : SessionRoutingState
+            The record to store.
+        expected_version : int
+            Version read with this state; ``0`` when the key was absent.
+
+        Returns
+        -------
+        MemoryStatus
+            ``written`` on success, ``conflict`` when another worker moved
+            first, ``unavailable`` on an infrastructure error.
+        """
+        raise NotImplementedError
+
+    def clear(self, key: str) -> MemoryStatus:
+        """
+        Forget one session.
+
+        Parameters
+        ----------
+        key : str
+            Key from :func:`session_key`.
+
+        Returns
+        -------
+        MemoryStatus
+            Why the key was or was not removed.
+        """
+        raise NotImplementedError
+
+    @property
+    def available(self) -> bool:
+        """Whether the store can be used at all."""
+        return True
+
+
+class InMemoryRoutingStateStore(RoutingStateStore):
+    """
+    Process-local store for isolated replay and for testing the contract.
+
+    Explicitly *not* a production fallback: each worker would keep its own
+    idea of a session, which is the failure mode shared memory exists to
+    avoid.  It implements the same versioned compare-and-set semantics as the
+    Redis adapter so a test of the contract means something.
+
+    Parameters
+    ----------
+    config : CodexMemoryConfig
+        Policy providing the TTL, the session cap and the key prefix.
+    clock : callable
+        Seconds-source, injectable to test expiry without sleeping.
+    """
+
+    def __init__(
+        self,
+        config: Optional[CodexMemoryConfig] = None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        """Store the policy and start with an empty set of sessions."""
+        self._config = config or CodexMemoryConfig(backend=MEMORY_BACKEND_MEMORY)
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._records: Dict[str, Tuple[SessionRoutingState, float]] = {}
+        self._fail_read = False
+        self._fail_write = False
+
+    def fail_reads(self, enabled: bool = True) -> None:
+        """
+        Make reads fail, to exercise the fail-open path.
+
+        Parameters
+        ----------
+        enabled : bool
+            Whether :meth:`read` should behave as an infrastructure failure.
+
+        Returns
+        -------
+        None
+        """
+        self._fail_read = enabled
+
+    def fail_writes(self, enabled: bool = True) -> None:
+        """
+        Make writes fail, to exercise the fail-open path.
+
+        Parameters
+        ----------
+        enabled : bool
+            Whether :meth:`write` should behave as an infrastructure failure.
+
+        Returns
+        -------
+        None
+        """
+        self._fail_write = enabled
+
+    def read(self, key: str) -> Tuple[Optional[SessionRoutingState], MemoryStatus]:
+        """Return the live record under *key*, applying the TTL."""
+        if self._fail_read:
+            return None, MemoryStatus("unavailable", "injected read failure")
+        with self._lock:
+            stored = self._records.get(key)
+            if stored is None:
+                return None, MemoryStatus("miss")
+            state, expires_at = stored
+            if expires_at <= self._clock():
+                del self._records[key]
+                return None, MemoryStatus("expired")
+            return state, MemoryStatus("hit")
+
+    def write(
+        self,
+        key: str,
+        state: SessionRoutingState,
+        expected_version: int,
+    ) -> MemoryStatus:
+        """
+        Store the record only while *key* still holds *expected_version*.
+
+        The version lives inside the record — exactly as in the Redis adapter,
+        where a server-side script reads it — so a test of this store exercises
+        the same compare-and-set contract rather than a friendlier imitation.
+        """
+        if self._fail_write:
+            return MemoryStatus("unavailable", "injected write failure")
+        with self._lock:
+            stored = self._records.get(key)
+            current = stored[0].version if stored else 0
+            if stored is not None and current != expected_version:
+                return MemoryStatus("conflict", f"version {current}")
+            if stored is None and expected_version != 0:
+                return MemoryStatus("conflict", "record disappeared")
+            self._records[key] = (
+                state.set_version(current + 1, self._clock()),
+                self._clock() + self._config.ttl_seconds,
+            )
+            self._prune()
+            return MemoryStatus("written")
+
+    def clear(self, key: str) -> MemoryStatus:
+        """Remove one session's record."""
+        with self._lock:
+            if self._records.pop(key, None) is None:
+                return MemoryStatus("miss")
+            return MemoryStatus("written")
+
+    def _prune(self) -> None:
+        """Enforce the session cap and drop expired records, oldest first."""
+        now = self._clock()
+        expired = [
+            key for key, (_, expires) in self._records.items() if expires <= now
+        ]
+        for key in expired:
+            self._records.pop(key, None)
+        overflow = len(self._records) - self._config.max_sessions
+        if overflow <= 0:
+            return
+        oldest = sorted(self._records, key=lambda key: self._records[key][1])[:overflow]
+        for key in oldest:
+            self._records.pop(key, None)
+
+
+def build_state_store(
+    config: CodexMemoryConfig,
+    client: Any = None,
+    logger: Any = None,
+) -> Tuple[Optional[RoutingStateStore], MemoryStatus]:
+    """
+    Build the store the policy asks for, or explain why there is none.
+
+    Enabled Redis memory is checked with PING before returning the store.
+    A failed check logs a warning and leaves routing stateless.
+
+    Parameters
+    ----------
+    config : CodexMemoryConfig
+        Resolved memory policy.
+    client : Any, optional
+        Pre-built Redis client.  Injected clients are used as-is, which is how
+        a test or an embedding application supplies its own connection.
+    logger : Any, optional
+        Logger for a one-line, credential-free explanation.
+
+    Returns
+    -------
+    Tuple[Optional[RoutingStateStore], MemoryStatus]
+        The store (or ``None``) and the reason.
+    """
+    if not config.enabled:
+        return None, STATUS_DISABLED
+    if logger is None:
+        logger = logging.getLogger(__name__)
+    if config.backend == MEMORY_BACKEND_MEMORY:
+        return (
+            InMemoryRoutingStateStore(config),
+            MemoryStatus("written", "memory backend"),
+        )
+    if not config.connection.configured:
+        status = MemoryStatus(STATUS_UNCONFIGURED.state, "no host configured")
+        if logger is not None:
+            logger.warning(
+                "Codex routing memory is enabled but %s is unset — routing "
+                "stays stateless.",
+                "REDIS_HOST",
+            )
+        return None, status
+    try:
+        import redis  # noqa: PLC0415 - optional dependency, imported on demand
+    except ImportError:
+        status = MemoryStatus(STATUS_UNCONFIGURED.state, "redis client not installed")
+        if logger is not None:
+            logger.warning(
+                "Codex routing memory needs the redis client — install it or "
+                "set the memory backend to a stateless configuration."
+            )
+        return None, status
+    try:
+        validate_connection(config.connection)
+        redis_client = client if client is not None else redis.Redis(
+            **config.connection.client_kwargs()
+        )
+        redis_client.ping()
+    except Exception as exc:  # a bad deployment must not break routing
+        status = MemoryStatus("unavailable", _reason(exc))
+        if logger is not None:
+            logger.warning("Codex routing memory disabled: %s", _reason(exc))
+        return None, status
+    return (
+        RedisRoutingStateStore(config, redis_client, logger=logger),
+        MemoryStatus("written", "redis backend"),
+    )
+
+
+def _reason(exc: BaseException) -> str:
+    """Return a short, credential-free description of an exception."""
+    return f"{type(exc).__name__}: {exc}"[:180]
+
+
+#: Compare-and-set executed server-side, so two workers cannot interleave a
+#: read, a merge and a write.  The version stored inside the record is the
+#: optimistic lock; the index is a per-namespace sorted set of session keys
+#: scored by expiry, which is what makes a session cap possible without ever
+#: scanning the keyspace.  Every key it touches is one it wrote itself.
+_ATOMIC_WRITE_SCRIPT = """
+local current = redis.call('GET', KEYS[1])
+local version = 0
+if current then
+  local ok, decoded = pcall(cjson.decode, current)
+  if ok and type(decoded) == 'table' and decoded['ver'] then
+    version = tonumber(decoded['ver']) or 0
+  end
+end
+if version ~= tonumber(ARGV[2]) then
+  return {'conflict', tostring(version)}
+end
+local ttl = tonumber(ARGV[3])
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ttl)
+redis.call('ZADD', KEYS[2], tonumber(ARGV[4]), KEYS[1])
+redis.call('EXPIRE', KEYS[2], ttl + 60)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', tonumber(ARGV[6]))
+local overflow = redis.call('ZCARD', KEYS[2]) - tonumber(ARGV[5])
+if overflow > 0 then
+  local victims = redis.call('ZRANGE', KEYS[2], 0, overflow - 1)
+  for index = 1, #victims do
+    redis.call('DEL', victims[index])
+  end
+  redis.call('ZREMRANGEBYRANK', KEYS[2], 0, overflow - 1)
+end
+return {'written', tostring(version + 1)}
+"""
+
+
+class RedisRoutingStateStore(RoutingStateStore):
+    """
+    Shared session memory over Redis, fail-open by construction.
+
+    Every method swallows infrastructure errors and reports them through
+    :class:`MemoryStatus`: a routing decision must never depend on a cache, and
+    a Redis that is down degrades the plugin to the stateless cascade it had
+    before this module existed.
+
+    The client is created on first use rather than at plugin construction, so a
+    worker forked from a preloaded application builds its own connection pool
+    instead of inheriting its parent's sockets.
+
+    Parameters
+    ----------
+    config : CodexMemoryConfig
+        Policy providing the TTL, the caps and the key prefix.
+    client : Any, optional
+        Redis client to use as-is (tests, or an embedding application that
+        owns its connections).  When omitted, one is built lazily from the
+        connection settings.
+    logger : Any, optional
+        Logger for a one-line reason per distinct failure; never a credential.
+    """
+
+    def __init__(
+        self,
+        config: CodexMemoryConfig,
+        client: Any = None,
+        logger: Any = None,
+    ) -> None:
+        """Store the policy, the client (or the means to build one) and the logger."""
+        self._config = config
+        self._client = client
+        self._logger = logger
+        self._lock = threading.Lock()
+        self._script: Any = None
+        self._factory: Optional[Callable[[], Any]] = None
+        if client is None:
+            def _build() -> Any:
+                import redis  # noqa: PLC0415 - optional dependency
+
+                return redis.Redis(**config.connection.client_kwargs())
+            self._factory = _build
+
+    def _connection(self) -> Any:
+        """
+        Return the Redis client, building it once per process.
+
+        Returns
+        -------
+        Any
+            The client.
+
+        Raises
+        ------
+        Exception
+            Whatever the client constructor raises; callers translate it into
+            an ``unavailable`` status.
+        """
+        client = self._client
+        if client is not None:
+            return client
+        with self._lock:
+            if self._client is None and self._factory is not None:
+                self._client = self._factory()
+            return self._client
+
+    def _session_index(self) -> str:
+        """Return the index key holding this namespace's session keys."""
+        return f"{self._config.key_prefix}:v{STATE_SCHEMA_VERSION}:sessions"
+
+    def read(self, key: str) -> Tuple[Optional[SessionRoutingState], MemoryStatus]:
+        """
+        Read one session's record.
+
+        Parameters
+        ----------
+        key : str
+            Key from :func:`session_key`.
+
+        Returns
+        -------
+        Tuple[Optional[SessionRoutingState], MemoryStatus]
+            ``hit`` with the record, ``miss`` when there is none, ``expired``
+            when it lived here but the TTL won, and ``unavailable`` when Redis
+            could not be reached.
+        """
+        try:
+            raw = self._connection().get(key)
+        except Exception as exc:
+            return None, self._unavailable("read", exc)
+        if raw is None:
+            return None, MemoryStatus("miss")
+        state = SessionRoutingState.from_json(raw)
+        if state is None:
+            # Unreadable or from another schema version: forget it and continue.
+            self._drop(key)
+            return None, MemoryStatus("miss", "unreadable record")
+        return state, MemoryStatus("hit")
+
+    def write(
+        self,
+        key: str,
+        state: SessionRoutingState,
+        expected_version: int,
+    ) -> MemoryStatus:
+        """
+        Store the record through an atomic, versioned update.
+
+        Parameters
+        ----------
+        key : str
+            Key from :func:`session_key`.
+        state : SessionRoutingState
+            The record to store; its version field is assigned by the store.
+        expected_version : int
+            Version this record was read at, ``0`` when it did not exist.
+
+        Returns
+        -------
+        MemoryStatus
+            ``written``, ``conflict`` when another worker moved first, or
+            ``unavailable``.
+        """
+        now = time.time()
+        payload = state.set_version(expected_version + 1, now).to_json()
+        try:
+            client = self._connection()
+            with self._lock:
+                if self._script is None:
+                    self._script = client.register_script(_ATOMIC_WRITE_SCRIPT)
+            result = self._script(
+                keys=[key, self._session_index()],
+                args=[
+                    payload,
+                    expected_version,
+                    self._config.ttl_seconds,
+                    now + self._config.ttl_seconds,
+                    self._config.max_sessions,
+                    now,
+                ],
+            )
+        except Exception as exc:
+            return self._unavailable("write", exc)
+        status, version = _script_result(result)
+        if status == "conflict":
+            return MemoryStatus("conflict", f"version {version}")
+        return MemoryStatus("written")
+
+    def clear(self, key: str) -> MemoryStatus:
+        """Forget one session's record and remove it from the namespace index."""
+        try:
+            client = self._connection()
+            removed = client.delete(key)
+            client.zrem(self._session_index(), key)
+        except Exception as exc:
+            return self._unavailable("clear", exc)
+        return MemoryStatus("written" if removed else "miss")
+
+    def _drop(self, key: str) -> None:
+        """Best-effort removal of a record this version cannot read."""
+        try:
+            self._connection().delete(key)
+        except Exception:  # a cleanup must never surface on the routing path
+            pass
+
+    def _unavailable(self, operation: str, exc: BaseException) -> MemoryStatus:
+        """Log and wrap an infrastructure failure as an ``unavailable`` status."""
+        status = MemoryStatus(STATUS_UNAVAILABLE.state, f"{operation}: {_reason(exc)}")
+        if self._logger is not None:
+            self._logger.warning("Codex routing memory %s", status.detail)
+        return status
+
+
+def _script_result(result: Any) -> Tuple[str, int]:
+    """Normalize a Lua reply into ``(status, version)``."""
+    if not isinstance(result, (list, tuple)) or not result:
+        return "unavailable", 0
+    status = result[0]
+    if isinstance(status, bytes):
+        status = status.decode("utf-8", "replace")
+    version = 0
+    if len(result) > 1:
+        try:
+            version = int(result[1])
+        except (TypeError, ValueError):
+            version = 0
+    return (status if status in ("written", "conflict") else "unavailable", version)
+
+
+def _bounded(values: Tuple[str, ...], limit: int) -> Tuple[str, ...]:
+    """Keep the last *limit* entries of *values*, newest last."""
+    if limit <= 0:
+        return ()
+    return tuple(values[-limit:])
+
+
+def merge_state(
+    previous: Optional[SessionRoutingState],
+    generation: str,
+    same_generation: bool,
+) -> Optional[SessionRoutingState]:
+    """
+    Decide whether a remembered state still applies to this request.
+
+    A new command resets the phase: what the agent was doing under the previous
+    instruction is not evidence about the current one.  Within one generation,
+    a remembered state survives while it is still fresh and comparable; a
+    request carrying a different generation, or no generation at all, cannot be
+    compared and therefore does not inherit anything.
+
+    Parameters
+    ----------
+    previous : Optional[SessionRoutingState]
+        The record read from the store, if any.
+    generation : str
+        ``turn_id`` of the request being routed.
+    same_generation : bool
+        Whether the request belongs to the same command generation as before,
+        as decided by the caller from identifiers it actually has.
+
+    Returns
+    -------
+    Optional[SessionRoutingState]
+        The state to carry forward, or ``None``.
+    """
+    if previous is None or not previous.mode:
+        return None
+    if not generation or not same_generation:
+        return None
+    if previous.generation and previous.generation != generation:
+        return None
+    return previous
+
+
+def record_state(
+    mode: str,
+    kind: str,
+    reason: str,
+    generation: str,
+    event_id: str,
+    fingerprint: str,
+    previous: Optional[SessionRoutingState],
+    config: CodexMemoryConfig,
+) -> SessionRoutingState:
+    """
+    Build the record for one decision, bounded by the policy's limits.
+
+    Parameters
+    ----------
+    mode : str
+        Resolved work mode.
+    kind : str
+        Kind of evidence that decided it.
+    reason : str
+        Reason code of that evidence.
+    generation : str
+        ``turn_id`` of the command this decision belongs to.
+    event_id : str
+        Identifier of the payload item that carried the evidence.
+    fingerprint : str
+        Digest identifying this evidence, so a replayed payload can be spotted.
+    previous : Optional[SessionRoutingState]
+        The record being replaced, whose identifier lists are extended.
+    config : CodexMemoryConfig
+        Policy providing the event and call caps.
+
+    Returns
+    -------
+    SessionRoutingState
+        The record to store.
+    """
+    seen = tuple(previous.seen_events) if previous else ()
+    if event_id:
+        seen = tuple(entry for entry in seen if entry != event_id) + (event_id,)
+    return SessionRoutingState(
+        mode=mode,
+        kind=kind,
+        reason=reason,
+        generation=generation,
+        event_id=event_id,
+        fingerprint=fingerprint,
+        pending_calls=_bounded(
+            tuple(previous.pending_calls) if previous else (), config.max_calls
+        ),
+        seen_events=_bounded(seen, config.max_events),
+    )
+
+
+def fingerprint(*parts: str) -> str:
+    """
+    Return a short digest identifying a piece of evidence.
+
+    Parameters
+    ----------
+    *parts : str
+        Structural components of the evidence — tool name, command shape,
+        status — never its content.
+
+    Returns
+    -------
+    str
+        A hex digest prefix, stable for equal input.
+    """
+    digest = hashlib.sha256("\x00".join(parts).encode("utf-8"))
+    return digest.hexdigest()[:_FINGERPRINT_CHARS]
+
+
+def remember_decision(
+    store: Optional[RoutingStateStore],
+    config: CodexMemoryConfig,
+    request: Any,
+    decision: Any,
+) -> str:
+    """
+    Write a phase decision to the session memory, if it deserves to be written.
+
+    Only a phase decided from this turn's own evidence is carried forward.  A
+    fallback, a weak semantic match and a special request are not facts about
+    what the agent is doing; storing one would let a single uninformative
+    request pin the mode for the rest of a command generation.  Replaying the
+    same history is a no-op: identical evidence in the same generation does not
+    bump the version, so a retry cannot make a session look fresher than it is.
+
+    Parameters
+    ----------
+    store : Optional[RoutingStateStore]
+        The session memory, or ``None`` when routing is stateless.
+    config : CodexMemoryConfig
+        Policy providing the key prefix and the retry budget.
+    request : Any
+        The parsed request, read for its session identifiers.
+    decision : Any
+        The routing decision, read for ``source``, ``mode``, ``reason`` and
+        ``evidence``.
+
+    Returns
+    -------
+    str
+        ``"written"``, ``"unchanged"``, ``"skipped"``, ``"conflict"`` or
+        ``"unavailable"`` — for diagnostics, never raised.
+    """
+    if store is None or getattr(decision, "source", "") != "phase":
+        return "skipped"
+    key = session_key(
+        config.key_prefix,
+        getattr(request, "session_id", ""),
+        getattr(request, "thread_id", ""),
+        getattr(request, "agent_name", ""),
+    )
+    generation = getattr(request, "turn_id", "")
+    if key is None or not generation:
+        return "skipped"
+    evidence = getattr(decision, "evidence", None)
+    record = record_state(
+        mode=decision.mode,
+        kind=getattr(evidence, "kind", ""),
+        reason=getattr(decision, "reason", ""),
+        generation=generation,
+        event_id=getattr(evidence, "event_id", ""),
+        fingerprint=fingerprint(
+            decision.mode,
+            getattr(evidence, "kind", ""),
+            getattr(decision, "reason", ""),
+            str(getattr(evidence, "succeeded", None)),
+        ),
+        previous=None,
+        config=config,
+    )
+    for attempt in range(config.max_retries + 1):
+        stored, status = store.read(key)
+        if status.state not in ("hit", "miss", "expired"):
+            return "unavailable"
+        if (
+            stored is not None
+            and stored.generation == record.generation
+            and stored.fingerprint == record.fingerprint
+        ):
+            return "unchanged"
+        written = store.write(
+            key,
+            replace(record, seen_events=stored.seen_events if stored else ()),
+            stored.version if stored else 0,
+        )
+        if written.state != "conflict":
+            return written.state
+        if attempt >= config.max_retries:
+            return "conflict"
+    return "conflict"

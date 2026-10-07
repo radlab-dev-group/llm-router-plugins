@@ -22,7 +22,6 @@ from llm_router_plugins.maskers.fast_masker.rules.phone_international_rule impor
     PhoneInternationalRule,
 )
 
-
 # ---------------------------------------------------------------------------
 # Domestic Phone Rule tests
 # ---------------------------------------------------------------------------

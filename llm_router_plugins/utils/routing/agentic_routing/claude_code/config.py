@@ -44,6 +44,7 @@ from llm_router_plugins.utils.routing.agentic_routing.claude_code.mapping import
     DEFAULT_MODEL_FIELDS,
     DEFAULT_PROVIDER_PREFIXES,
     ModelMatcher,
+    ModelNameMapper,
     find_ambiguous_wildcards,
     find_duplicate_literals,
     iter_mode_entries,
@@ -165,6 +166,18 @@ class ClaudeCodeRoutingConfig(RoutingConfigBase):
             Every configured model pattern, tagged with its tier name.
         """
         return iter_mode_entries(self.modes)
+
+    @property
+    def mapper(self) -> ModelNameMapper:
+        """
+        Return the name mapper configured for this instance.
+
+        Returns
+        -------
+        ModelNameMapper
+            A mapper using the configured ``provider_prefixes``.
+        """
+        return ModelNameMapper(self.provider_prefixes)
 
     def build_matcher(self) -> ModelMatcher:
         """
@@ -534,9 +547,7 @@ class ClaudeCodeRoutingConfig(RoutingConfigBase):
             for pattern in mode.models:
                 validate_pattern(pattern)
 
-        claimed = find_duplicate_literals(
-            self.patterns, provider_prefixes=self.provider_prefixes
-        )
+        claimed = find_duplicate_literals(self.patterns, self.provider_prefixes)
         if claimed:
             detail = ", ".join(
                 f"'{pattern}' claimed by modes '{first}' and '{second}'"

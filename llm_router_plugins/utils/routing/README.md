@@ -632,10 +632,10 @@ plugins' configuration: `auto` traffic stays with the semantic plugins, `auto_co
 
 | Module          | Contents                                                                              |
 |-----------------|-----------------------------------------------------------------------------------------|
-| `payload.py`    | `CodexRequest` and `parse_codex_payload()` — the read-only request normalizer            |
-| `scoring.py`    | `detect_mode()`, `score_mode()`, `score_to_similarity()` — deterministic keyword scoring |
-| `semantic.py`   | `CodexSemanticLayer` — availability gate and cosine-similarity lookup                    |
-| `classifier.py` | `classify()` and `RoutingDecision` — the resolution cascade                              |
+| `payload.py`    | `CodexRequest` (incl. `assistant_messages`) and `CodexPayloadParser` — read-only normalizer |
+| `scoring.py`    | `CodexModeScorer` (`detect_mode`, `score_mode`, `score_to_similarity`) — keyword scoring |
+| `semantic.py`   | `CodexSemanticLayer` — independent intent/phase encoding, cosine threshold + margin      |
+| `classifier.py` | `CodexModeClassifier` and `RoutingDecision` — the resolution cascade                  |
 | `config.py`     | `CodexRoutingConfig`, `CodexMode`, defaults, validation, env overrides                   |
 | `plugin.py`     | `CodexRoutingPlugin` — trigger check, cascade, payload annotation                        |
 
@@ -648,7 +648,7 @@ labelled with a class, in strict priority order **compaction → aux_title → m
 | Class        | `request_class` | Detected from                                                                                   | Routed as    |
 |--------------|-----------------|-------------------------------------------------------------------------------------------------|--------------|
 | Compaction   | `compaction`    | `request_kind == "compaction"` in the turn metadata                                              | `compaction` |
-| Title        | `aux_title`     | `request_kind == "turn"` **and** `thread_source == "system"`, corroborated by `tools == []` and a `codex_output_schema` JSON-schema output | `aux_title`  |
+| Title        | `aux_title`     | `thread_source == "system"`, or — when the metadata does not declare it — the shape of the call: `tools == []`, a `json_schema` output format and the CLI title instruction as the first sentence of the user text | `aux_title`  |
 | Main turn    | `main`          | everything else                                                                                  | mode layers  |
 
 Notes on the wire format:
@@ -669,6 +669,9 @@ Notes on the wire format:
   one is appended only while the text stays within `classify_max_chars` (default `4000`), and assembly stops at the first
   message that would overflow, so the text the classifier sees is bounded as the session grows. `instructions` is deliberately **not** classified — in captured
   sessions it is one constant 16 979-character preamble that would drown the signal.
+- `assistant_messages` keeps every `role == "assistant"` message (oldest → newest), retaining only its `output_text`
+  content parts. The semantic layer appends only the **last** of these to `latest_user_text` when it builds the query
+  it embeds, so the vector store sees the agent's current utterance, not the whole thread history.
 - Parsing never mutates the payload and never raises: a missing or non-list `input`, `tools=None`, an absent
   `client_metadata` or a missing `text` all yield a well-formed `CodexRequest` with empty defaults.
 
@@ -683,7 +686,7 @@ Mode resolution is strictly ordered — the first layer that answers wins:
 | 3 | **Class: aux title**   | `class`              | Auxiliary title generation on a system thread — never keyword-scored                           | no    |
 | 4 | **Collaboration mode** | `collaboration_mode` | The CLI declared Plan Mode in the latest `<collaboration_mode>` block                          | no    |
 | 5 | **Heuristic**          | `heuristic`          | Keywords (default 1.0), `text:weight` phrases (default 2.0), regex patterns (default 3.0)      | no    |
-| 6 | **Semantic**           | `semantic`           | Embedding cosine similarity over mode descriptions/examples, accepted at `similarity >= threshold`; reached only when 1-5 stay silent | yes   |
+| 6 | **Semantic**           | `semantic`           | Complete balanced cosine ranking, accepted at threshold + minimum lead over runner-up; reached only when deterministic layers stay silent | yes   |
 | 7 | **Fallback**           | `fallback`           | The configured `fallback_mode` (`implement`)                                                    | no    |
 
 Details worth knowing:
@@ -734,6 +737,12 @@ Notes:
   unaffected; only the semantic and fallback similarities drop out.
 - The index persists to disk through the shared `resolve_persist_dir()` helper (`PERSIST_DIR`,
   `settings.vector_store_path`).
+- Codex opts into `settings.semantic.aggregation: "per_target_top_k"`: all indexed fragments are scored,
+  then each mode contributes the same count of its best fragments (up to `top_k`). Acceptance requires a complete
+  finite ranking, `threshold` and a strictly positive lead of at least `min_margin`; ties abstain.
+  `intent_max_chars` and `phase_max_chars` independently bound sections encoded separately before one lookup.
+  Other routing plugins retain legacy `global_top_k` aggregation. See the [Codex reference](agentic_routing/codex/README.md#step-5--semantic-similarity-optional)
+  for the full contract and required custom-config migration.
 
 ### 3.5 Configuration
 
@@ -752,6 +761,10 @@ Notes:
     "semantic": {
       "enabled": true,
       "threshold": 0.51,
+      "aggregation": "per_target_top_k",
+      "min_margin": 0.05,
+      "intent_max_chars": 2000,
+      "phase_max_chars": 2000,
       "top_k": 3,
       "chunk_size": 256,
       "chunk_overlap": 64
@@ -856,7 +869,7 @@ With the same plugin and a Default-mode collaboration block, the latest user mes
 | `"napraw testy w tests/"`                                      | `qwen/Qwen3.8-27B`     | `test`       | `heuristic`          | 0.9333333333333333 |
 | `"Przejrzyj ten katalog i zaproponuj poprawki do modułów"`     | `qwen/Qwen3.8-Flash-Next` | `review`     | `heuristic`          | 0.9333333333333333 |
 | `"hello world"`                                                | `qwen/Qwen3.8-Flash-Next` | `implement`  | `fallback`           | 0.0          |
-| Title generation (`thread_source="system"`, `tools: []`)       | `qwen/Qwen3.8-27B`     | `aux_title` | `class`             | 1.0          |
+| Title generation (`thread_source="system"` or no tools + `json_schema` title prompt) | `qwen/Qwen3.8-27B` | `aux_title` | `class` | 1.0      |
 | `request_kind="compaction"`                                    | `qwen/Qwen3.8-27B`     | `compaction` | `class`            | 1.0          |
 | Any payload with `model="gpt-4"`                               | the payload object itself (identity) | — | —            | —            |
 

@@ -153,8 +153,9 @@ memory between requests, so the same request is routed identically by any replic
 
 ### Step 1 — payload normalization
 
-`parse_codex_payload()` is the only code that knows where Codex metadata lives on the wire; everything downstream works
-on an immutable `CodexRequest` snapshot. Reading it never raises — an unreadable value keeps the field default.
+`CodexPayloadParser.parse()` is the only code that knows where Codex metadata lives on the wire; everything downstream
+works on an immutable `CodexRequest` snapshot. The parser is configured once (with `classify_max_chars`) and holds no
+per-request state; reading never raises — an unreadable value keeps the field default.
 
 | Snapshot field                              | Read from                                                                 |
 |---------------------------------------------|---------------------------------------------------------------------------|
@@ -166,54 +167,103 @@ on an immutable `CodexRequest` snapshot. Reading it never raises — an unreadab
 | `reasoning_effort`, `parallel_tool_calls`   | `reasoning.effort`, `parallel_tool_calls`                                 |
 | `context_chars`, `context_tokens`           | content length of `instructions` + `input` (tokens ≈ chars / 4)           |
 | `collaboration_mode`                        | `<collaboration_mode>…</collaboration_mode>` block in `developer` messages |
-| `latest_user_text`                          | genuine `user` messages, newest first, within `classify_max_chars`         |
+| `latest_user_text`                          | newest genuine `user` command, kept whole                                 |
+| `user_history`                              | earlier user commands, newest first, within `classify_max_chars`           |
+| `intent_text`                               | current command; nearest earlier task only for a short confirmation       |
+| `assistant_messages`                        | assistant `output_text` messages after the current command                |
+| `activity`                                  | ordered assistant utterances, actual tool calls and linked outputs after that command |
 
 Details that matter when you debug routing:
 
 - **Collaboration mode** is read from every `role == "developer"` message; the **last** `<collaboration_mode>` block
   wins, so a Plan → Default switch mid-session is picked up on the next turn. Its first heading decides: `# Plan Mode`
   → `plan`, `# Collaboration Mode: Default` → `default`, anything else → `""`.
-- **`latest_user_text`** scans `input` in reverse and keeps only `type == "message"`, `role == "user"` items whose text
-  is not just an `<environment_context>` block. The newest message is always kept whole; older ones are appended while
-  the `classify_max_chars` budget holds (a non-positive budget means "unbounded"). If the request carries no usable
-  user message, the legacy `payload["prompt"]` is used.
+- **`latest_user_text`** keeps only the newest real command. Environment-only messages do not start a new task;
+  an environment block attached to a command is stripped without dropping that command. With no usable user message,
+  the legacy `payload["prompt"]` is used. Earlier commands live separately in bounded **`user_history`**.
+- **`intent_text`** uses history only for narrowly recognised confirmations such as `tak, zrób to`, `yes, do it`,
+  `ok` or `continue`. It stops at the nearest non-confirmation command; an independent new instruction never inherits
+  older test/Git keywords. This is a conservative rule, not general reference resolution.
+- **`assistant_messages`** and **`activity`** include only events after the newest real command. Assistant text is
+  copied, and tool outputs are linked by `call_id` only to calls in that active turn. An old final answer, old failure,
+  or advertised tool therefore cannot establish the new task's phase. No session cache is needed.
 
 ### Step 2 — request class
 
 Codex mixes three kinds of request on one endpoint. The structural ones are recognised *before* any prompt text is
 read, with strict priority `compaction > aux_title > main`:
 
-| Class        | Condition                                                     | Why it matters                                                    |
-|--------------|---------------------------------------------------------------|-------------------------------------------------------------------|
-| `compaction` | `request_kind == "compaction"`                                | Carries the whole transcript; wins over every keyword signal       |
-| `aux_title`  | `request_kind == "turn"` **and** `thread_source == "system"`   | CLI-generated one-line thread title, no tools, JSON-schema output  |
-| `main`       | everything else                                               | A regular agent turn (Plan or Default collaboration mode)          |
+| Class        | Condition                                                       | Why it matters                                                    |
+|--------------|-----------------------------------------------------------------|-------------------------------------------------------------------|
+| `compaction` | `request_kind == "compaction"`                                  | Carries the whole transcript; wins over every keyword signal       |
+| `aux_title`  | `thread_source == "system"` **or** the title-call shape below    | CLI-generated one-line thread title, no tools, JSON-schema output  |
+| `main`       | everything else                                                 | A regular agent turn (Plan or Default collaboration mode)          |
+
+The title call is recognised in two ways on purpose. Codex releases disagree about what they declare in
+`x-codex-turn-metadata` — some emit the title on a `user` thread, or send no `client_metadata` at all — so when the
+`system` thread source is missing the parser falls back to the *shape* of the call, which is what actually makes it
+unmistakable: no tool advertised, a `json_schema` response format, and the CLI title instruction as the first
+sentence of the user text (`generate` / `produce` / `create` / `write` / `draft` / `suggest` … `title`). A regular
+agent turn advertises tools, so it can never match that shape.
 
 ### Step 3 — resolution cascade
 
-`classify()` tries layers in a fixed order; the **first layer that can answer wins**. A main turn never falls below the
+`CodexModeClassifier.classify()` tries layers in a fixed order; the **first layer that can answer wins**. A main turn never falls below the
 fallback mode: the keyword and semantic layers can specialise the decision, never weaken it.
 
-| # | Layer                                          | `routing.source`     | Confidence                          |
+| # | Layer                                          | `routing.source`     | Routing similarity                  |
 |---|------------------------------------------------|----------------------|-------------------------------------|
 | 1 | Explicit `agent_mode` / `codex_mode` / `metadata.agent_mode` in the payload | `explicit`           | `1.0`             |
 | 2 | Request class — `compaction`, then `aux_title` | `class`              | `1.0`                               |
 | 3 | `<collaboration_mode>` Plan block from the CLI  | `collaboration_mode` | `1.0`                               |
-| 4 | Keyword scoring of the user text                | `heuristic`          | `score / (score + 1)`               |
-| 5 | Embedding cosine similarity over the modes      | `semantic`           | cosine of the matched mode          |
-| 6 | Configured `fallback_mode` (`implement`)        | `fallback`           | cosine of that mode, else `0.0`     |
+| 4 | Clear current assistant action or actual tool activity | `phase`         | `1.0` (rule strength, not calibrated probability) |
+| 5 | Keyword scoring of the current user intent      | `heuristic`          | `score / (score + 1)` (heuristic strength, not calibrated probability) |
+| 6 | Embedding cosine similarity over the modes      | `semantic`           | cosine of the matched mode          |
+| 7 | Configured `fallback_mode` (`implement`)        | `fallback`           | cosine of that mode, else `0.0`     |
 
 Notes:
 
 - An explicit override must name a **configured** mode, otherwise it is ignored and the cascade continues;
   `agent_mode` is checked before `codex_mode`, and both before `metadata.agent_mode`. This is the escape hatch for
   "route this one request by hand": send `"agent_mode": "debug"` in the request body.
-- Only four modes compete in the keyword layer, scanned in the order `test`, `git_review`, `review`, `debug`
+- Only four modes compete in the keyword layer: `test`, `git_review`, `review`, `debug`
   (`HEURISTIC_MODES`). `plan` is declared by the CLI and `implement` is the fallback, so their `keywords` / `phrases` /
   `patterns` are never scored — only their `description` and `examples` feed the embedding index. `aux_title` and
   `compaction` are class-routed and are left out of the index too.
-- Layers 1–4 never touch the embedding stack. The vector store is queried **at most once per request**, and only after
+- The phase layer recognises explicit current-action announcements and concrete executed commands/patches, rather
+  than arbitrary mentions of tests or Git. Thus commit inspection can route to `git_review`, then editing `CHANGELOG`
+  to `implement`; helper commands such as `git status` do not create a Git phase. The newest clear action wins.
+  Unknown or ambiguous activity leaves the remaining cascade to decide. Rule-based phase detection is disabled along
+  with keyword scoring by `heuristic_enabled=false`, and a phase must name a configured mode.
+  `settings.phase.enabled=false` disables only the phase layer, leaving keyword scoring active.
+- Layers 1–5 never touch the embedding stack. The vector store is queried **at most once per request**, and only after
   the deterministic layers have stayed silent.
+
+#### Phase configuration
+
+Phase signals live in `settings.phase` in `agentic_routing_codex.json`, not in Python keyword lists:
+
+- `announcement_prefix`, `uncertain`, `announcements`: case-insensitive regexes for current-action prefixes,
+  uncertainty/negation and complete actions mapped to mode names. Actions use full matches, not substring searches.
+- `command_tools`, `patch_tools`: names of actual command/patch tools. Advertised tools are never signals.
+- `commands`: each rule has an `executable` regex (case-sensitive full match of the executable basename), an
+  `args_prefix` list of exact leading arguments, and a `mode`. A `null` mode is neutral (e.g. `git status` or `cd`).
+  Unknown commands or conflicting matches make the command ambiguous; rule order does not break ties.
+- `test_directories`, `test_filename_prefixes`, `test_filename_pattern`: recognition of test-only patches;
+  directory names and prefixes should be lower-case, since paths are compared in lower-case.
+- `test_mode`, `implement_mode`, `failure_mode`: modes for test-only patches, other patches and linked test failures.
+  Failure transitions apply only to command calls routed to `test_mode`, never to unrelated tool outputs.
+
+All phase fields must be supplied in the loaded configuration. No fields are inherited from another JSON file.
+Empty maps/lists disable those signals. Regexes are compiled when configuration is loaded. Missing fields,
+invalid types, regexes, unknown fields or referenced unknown modes reject configuration loading.
+Apply configuration changes by reloading/recreating the plugin; rules are not read from disk per request.
+
+To disable phase routing without affecting the keyword layer, set `settings.phase.enabled` to `false` in the
+complete phase object.
+
+Shell/patch syntax validation, rejected unsafe shell constructs, Git option parsing and call/output linkage remain
+in code. They are parser safeguards, not configurable routing signals. Extending the command list cannot bypass them.
 
 ### Step 4 — keyword scoring
 
@@ -227,26 +277,52 @@ declared stem therefore also hits inflected forms — `test` matches `testy` and
 |-----------|--------------------------------------------|----------------------------------|
 | `keywords`| `weights[keyword]`, else `1.0`             | `"debug": 3`                     |
 | `phrases` | `":weight"` suffix, else `2.0`             | `"napraw błąd:3"`                |
-| `patterns`| `3.0` per match                            | `"\broot\s+cause\b"`             |
+| `patterns`| `3.0` per declared rule                    | `"\broot\s+cause\b"`             |
 
-Scores of all matched signals are summed per mode; `detect_mode` uses strictly-greater-than while scanning
-`HEURISTIC_MODES` in order, so **ties go to the earlier mode** (`test` over `git_review`, `git_review` over `review`).
-The best score is accepted only when it reaches `heuristic_min_score` (`3.0` by default), and is reported as
-`similarity = score / (score + 1)`.
+Matches are deduplicated **within each mode**: strongest weight first, then longest span for equal weights,
+keeping only non-overlapping matches. A single declared rule contributes its weight **at most once**; repeating
+the same keyword, phrase or regex match does not inflate the score. The retained weights are summed per mode.
+Each rule supplies only its first non-negated match and never retries a later occurrence after losing
+deduplication, so repeated text cannot inflate scores through keyword/phrase/pattern aliases.
 
-Measured against the shipped configuration:
+`CodexModeScorer.rank_modes(text, modes)` returns a score-descending ranking of `ModeScore(mode, score, matches)`.
+Each retained match is a `SignalMatch(signal, start, end, weight)`; offsets refer to the lower-cased text, with
+`end` exclusive. `detect_mode()` returns `(None, top_score)` on a tied top score rather than choosing by mode order.
+These result types live in `codex.scoring`.
 
-| Text                                        | Mode        | Score | Accepted (`≥ 3.0`) |
-|---------------------------------------------|-------------|-------|--------------------|
-| `napraw testy w tests/`                      | `test`      | 14.0  | yes → `0.933`      |
-| `testy`                                      | `test`      | 8.0   | yes → `0.889`      |
-| `Dlaczego nie działa ta funkcja?`            | `debug`     | 9.0   | yes → `0.900`      |
-| `review this PR`                             | `review`    | 9.0   | yes → `0.900`      |
-| `git review przed merge`                     | `git_review`| 11.0  | yes → `0.917`      |
-| `Przygotuj plan refactoru`                   | `review`    | 2.0   | no → semantic/fallback |
-| `Dodaj nowy endpoint do API`                 | —           | 0.0   | no → semantic/fallback |
+The classifier accepts a heuristic winner only when its score reaches `settings.heuristic_min_score` (`3.0` by
+default) **and** its lead over the second-best score is at least `settings.heuristic_min_margin` (`1.0` by default).
+Ties are always rejected, even with a zero minimum margin. A conflict, insufficient margin or insufficient score
+continues to the optional semantic layer, then fallback; it does not force a heuristic choice.
 
-The last two rows are the point of the design: **`plan` is never decided by keywords** (the CLI tells you, in Plan
+For API compatibility, heuristic `routing.similarity` remains `score / (score + 1)`: this expresses **heuristic
+strength, not a calibrated probability**. For a simple example, `testy` scores `3.0`, hence similarity `0.75`.
+This is illustrative score arithmetic, not a report of measurements.
+
+#### Local negation
+
+`settings.heuristic_negation_pattern` is a configurable regex identifying explicit prohibitions of actions in
+Polish and English, such as `nie uruchamiaj` / `do not run`, `nie pisz` / `do not write`, and
+`bez uruchamiania` / `without running`. It does **not** treat every `nie` as negation: `nie działa` still supplies
+debugging evidence.
+
+The regex matches the **entire prohibited fragment** and defines its own scope and boundaries; there is no
+separate boundary parser. The default regex ends the span at a sentence boundary, semicolon, comma,
+contrastive `ale` / `but`, or a new positive action after `i` / `and`. Thus `nie uruchamiaj testów i napisz testy`
+does not suppress the separate request to write tests. An empty regex disables filtering; zero-width spans
+are ignored. This is a bounded heuristic, not full NLP and not a veto on semantic routing.
+
+The shipped `test` signals deliberately exclude standalone `spec`, `mock`, `assertion`, `fixture`, `suite` and
+`coverage`: these can describe production code rather than testing. Test patterns match bounded test nouns rather
+than every `test…` prefix; coverage needs a concrete action such as `increase coverage` or `sprawdź coverage`.
+Test-framework names and explicit phrases such as `unit tests` and `test fixture` remain strong signals.
+
+Likewise, repository and hosting names, generic descriptions of changes and configuration conflicts do not by
+themselves establish `git_review`. Branch mentions are weak signals; reviewing or comparing a branch supplies the
+stronger evidence. Git commands, commit history and pull/merge requests remain explicit Git signals. These are
+heuristic safeguards, not a veto on the optional semantic layer or a general-purpose NLP/history parser.
+
+**`plan` is never decided by keywords** (the CLI tells you, in Plan
 Mode, and a planning *sentence* in Default mode is not enough), and a plain imperative like "add an endpoint" is left to
 the semantic layer or to `fallback_mode` — which is exactly what `implement` means.
 
@@ -258,13 +334,25 @@ Enabled with `settings.semantic.enabled`, disabled for a single process with
 - An `EmbeddingRouter` indexes `description` + `examples` of the six non-class-routed modes with a sliding window
   (`chunk_size` 256, `chunk_overlap` 64) using a sentence-transformers BiEncoder.
 - Index vectors are L2-normalized and searched with FAISS inner product, which is cosine similarity.
-- A query longer than the embedding model's `max_seq_length` is split into overlapping token windows; at most the
-  first `MAX_QUERY_WINDOWS = 4` windows are encoded and their unit vectors are averaged and renormalized, so a huge
-  prompt costs a bounded amount of compute.
-- `top_k` hits are grouped per mode and **averaged**; the best mode wins and is accepted only when its average cosine
-  reaches `similarity_threshold` (`0.51` by default).
-- One lookup serves both the accept decision and the fallback mode's reported similarity, so a request never embeds the
-  same text twice.
+- With `aggregation: "per_target_top_k"`, FAISS retrieves every indexed fragment. Each mode contributes the same
+  number of its best fragments: `min(top_k, smallest indexed mode's fragment count)`. Their cosines are averaged,
+  producing a complete `all_scores` ranking, including negative similarities. Larger example collections do not
+  contribute more votes. A missing indexed mode rejects the lookup rather than inventing a score.
+- Acceptance requires both `threshold` (shipped value `0.51`) and a strictly positive lead over the runner-up of
+  at least `min_margin` (shipped value `0.05`). Ties, incomplete rankings, inconsistent winners and malformed scores
+  abstain. A single configured semantic mode needs only the threshold. Margin `0.05` is a starting setting,
+  not a measured or calibrated optimum.
+- `CodexSemanticLayer._build_semantic_parts` separately budgets current `request.intent_text` and phase context
+  (last active-turn utterance plus latest linked tool call/result). `intent_max_chars` and `phase_max_chars`
+  are both `2000` in the shipped JSON and are independent of the parser's `classify_max_chars` history budget.
+  Earlier assistant turns never cross a new user-command boundary. Empty context does not call the router.
+- The shared router's `route_context(parts)` encodes those sections separately, then averages and normalizes their
+  vectors for one FAISS lookup. Each section has its own bounded token-window budget (`MAX_QUERY_WINDOWS = 4`),
+  so a long intent cannot displace the phase before embedding. One lookup serves acceptance and fallback similarity.
+- Other routing plugins retain legacy `global_top_k` aggregation unless explicitly opted in. Codex can also select
+  that strategy, but an incomplete global ranking cannot meet its acceptance contract. Injected routers exposing
+  only `route(text)` receive concatenated, budgeted sections; they must return a complete ranking to be accepted,
+  and do not gain independent section encoding automatically.
 - The model is loaded with `device="cpu"` and `trust_remote_code=True` at plugin construction. A router that raises at
   query time (broken index, empty vector) disables only the semantic answer for that request.
 
@@ -349,11 +437,19 @@ it after logging — the plugin itself only guarantees that the request shape Co
     "fallback_mode": "implement",        // required, must name a mode below
     "heuristic_enabled": true,
     "heuristic_min_score": 3.0,
+    "heuristic_min_margin": 1.0,
+    // heuristic_negation_pattern: required; use the desired regex or "" to disable
+    "heuristic_weights": {"keyword": 1.0, "phrase": 2.0, "pattern": 3.0},
+    // phase: required complete object; see the bundled config for an example
     "classify_max_chars": 4000,
     "vector_store_path": "",             // "" = index lives in memory only
     "semantic": {
       "enabled": true,
       "threshold": 0.51,
+      "aggregation": "per_target_top_k",  // required
+      "min_margin": 0.05,                 // required
+      "intent_max_chars": 2000,           // required
+      "phase_max_chars": 2000,            // required
       "top_k": 3,
       "chunk_size": 256,
       "chunk_overlap": 64
@@ -374,10 +470,30 @@ it after logging — the plugin itself only guarantees that the request shape Co
 }
 ```
 
-Required keys: top-level `settings` and `codex_modes`; inside `settings`, `trigger_model` and `fallback_mode`; inside
-each mode, `name`, `model_name` and `description`. Everything else has a default (see
+Required keys: top-level `settings` and `codex_modes`; inside `settings`, `trigger_model`, `fallback_mode`,
+`heuristic_min_margin`, `heuristic_negation_pattern`, `heuristic_weights` and complete `phase`; inside
+each mode, `name`, `model_name` and `description`. The `semantic` object must explicitly supply `aggregation`,
+`min_margin`, `intent_max_chars` and `phase_max_chars`, even when disabled. Other settings retain their existing defaults (see
 [Defaults at a glance](#defaults-at-a-glance)). `description` and `examples` are not decoration — with the semantic
 layer enabled they *are* the classifier's training set.
+
+`settings.heuristic_min_margin` is the required score lead over the runner-up, not a similarity difference;
+zero permits any strictly positive lead but never a tie. `settings.heuristic_negation_pattern` replaces the
+local-prohibition regex (escape regex backslashes in JSON). `heuristic_min_margin`, `heuristic_negation_pattern`,
+`heuristic_weights` and the complete `phase` object are required in the supplied config. Older custom configs
+must add them explicitly; no rules are silently copied from the bundled file. The plugin's standard config
+loading chooses the bundled file only when no custom config is supplied.
+
+`settings.heuristic_weights` configures default signal weights: `keyword: 1.0`, `phrase: 2.0`, `pattern: 3.0`.
+Per-keyword `weights` and phrase `:weight` suffixes still take precedence. All three weights must be supplied;
+values must be finite, nonnegative numbers. Changing them requires only changes to the loaded JSON, not edits
+to the scorer.
+
+The new semantic settings are taken only from the supplied JSON, never merged with another config.
+Older custom configurations must add all four explicitly. `aggregation` accepts `per_target_top_k` or
+`global_top_k`; `min_margin` must be finite in `[0, 2]` (cosine differences), and both section budgets must
+be positive integers. Changing aggregation, margin or query budgets does not require rebuilding the index;
+changing descriptions, examples, modes or the embedding model does. These new settings have no separate env overrides.
 
 ### Environment variables
 
@@ -394,13 +510,28 @@ construction** (so after a restart, never mid-session).
 | `…_FALLBACK_MODE`                                                   | Mode used when nothing matches                        |
 | `…_HEURISTIC_ENABLED`                                               | `1/0`, `true/false`, `yes/no`, `on/off`               |
 | `…_HEURISTIC_MIN_SCORE`                                             | Minimum keyword score to accept a heuristic hit       |
-| `…_CLASSIFY_MAX_CHARS`                                              | Character budget of the classified user text          |
+| `…_HEURISTIC_MIN_MARGIN`                                            | Minimum score lead over the runner-up (default `1.0`; ties always rejected) |
+| `…_CLASSIFY_MAX_CHARS`                                              | Parser's optional history budget                      |
 | `…_MODEL`                                                           | **Embedding** model for the semantic layer            |
 | `…_SEMANTIC_ENABLED`                                                | Toggle the embedding layer                            |
 | `…_SIMILARITY_THRESHOLD`                                            | Minimum cosine similarity for a semantic hit          |
 | `…_TOP_K` / `…_CHUNK_SIZE` / `…_CHUNK_OVERLAP`                       | Embedding router knobs                                |
 | `…_PERSIST_DIR`                                                     | Directory holding `index.faiss` + `docstore.pkl`      |
 | `…_MODE_<name>_KEYWORDS`                                            | Pipe-separated keyword override for one mode          |
+| `…_MEMORY_ENABLED`                                          | Turn the shared session memory on (default **off**)   |
+| `…_MEMORY_BACKEND`                                          | `redis` (production) or `memory` (tests/replay only)   |
+| `…_MEMORY_TTL_SECONDS`                                      | Lifetime of one session record (default `900`)         |
+| `…_MEMORY_MAX_SESSIONS`                                     | Sessions kept in this plugin's namespace (default `10000`) |
+| `…_MEMORY_MAX_EVENTS` / `…_MEMORY_MAX_CALLS`                 | Per-session identifier caps (defaults `64` / `32`)     |
+| `…_MEMORY_KEY_PREFIX`                                       | Key namespace owned by the plugin                       |
+| `…_MEMORY_MAX_RETRIES`                                      | Attempts after a version conflict (default `1`)         |
+| `…_REDIS_HOST`                                              | **Empty by default — no connection, memory stays off**  |
+| `…_REDIS_PORT` / `…_REDIS_DB` / `…_REDIS_PROTOCOL`           | `6379` / `0` / `3`                                      |
+| `…_REDIS_PASSWORD` / `…_REDIS_USERNAME`                      | Empty password means no AUTH; username is optional ACL  |
+| `…_REDIS_SSL`                                               | TLS on/off (default off)                                |
+| `…_REDIS_SSL_CA_CERTS` / `…_REDIS_SSL_CERTFILE` / `…_REDIS_SSL_KEYFILE` | TLS material                                   |
+| `…_REDIS_SSL_CERT_REQS`                                     | `required` (default), `optional` or `none`              |
+| `…_REDIS_SOCKET_CONNECT_TIMEOUT` / `…_REDIS_SOCKET_TIMEOUT`  | Short positive timeouts, seconds (default `1.0`)        |
 
 Booleans accept `1/0`, `true/false`, `yes/no`, `on/off`; numeric values are parsed as `int`/`float` and a malformed
 value is ignored (with a warning where a logger is present). Unknown mode names in `MODELS`, `MODES`, `MODEL_<MODE>` or
@@ -409,6 +540,54 @@ routing.
 
 `…_MODES` filters the mode list **but does not move the fallback**: if the whitelist excludes the configured
 `fallback_mode` (`implement`), set `…_FALLBACK_MODE` too — otherwise validation fails at startup.
+
+### Session memory (shared, optional)
+
+Codex asks one action per model call, and between two calls the user's instruction does not change while the evidence
+does: the suite has now run, the patch has landed, the failure arrived. A stateless cascade can only read what the
+client happened to send, so an **incremental payload** — the result of a call it already showed, without the call —
+carries no evidence of its own and falls through to the fallback.
+
+The session memory carries a **reliable** phase from one request of a command generation to the next. It lives in
+**Redis**, shared by every Gunicorn worker pointed at the same instance and namespace; there is deliberately **no
+local-process cache**, because two workers holding two ideas of the same session's phase is worse than no memory.
+
+```bash
+pip install redis            # optional dependency; without it the plugin stays stateless
+export LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_REDIS_HOST=cache.internal
+export LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_REDIS_PASSWORD=…   # or leave unset
+export LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_MEMORY_ENABLED=true
+```
+
+**Lifecycle.** A key isolates the plugin's namespace, the session, the thread and the agent; `turn_id` is the
+*generation* — the current user command. A new command resets the phase. A record holds the mode, the kind and reason
+of the evidence that produced it, bounded event identifiers and a version counter: **no model names, no conversation
+text, no tool output, no credentials**. Every write is an atomic versioned compare-and-set executed in a Lua script
+alongside the namespace's session index, so concurrent workers cannot interleave a read, a merge and a write; the
+loser gets a conflict and continues statelessly rather than overwriting. TTL (`MEMORY_TTL_SECONDS`, default 15 min)
+and `MEMORY_MAX_SESSIONS` bound storage; pruning touches only keys inside `MEMORY_KEY_PREFIX`, never anything else in
+the instance. Replaying the same history is a no-op — identical evidence in the same generation does not refresh a
+record's standing.
+
+**What it never does.** It never outranks a fresh signal: it is consulted only after the current turn's own evidence
+stayed silent, and a phase decided from evidence always wins. It never stores a fallback, a weak semantic match, a
+title request or a compaction, because those are not facts about what the agent is doing. Without a session and thread
+identifier there is nothing to isolate, so routing stays stateless instead of guessing.
+
+**Failure behaviour.** A memory error is a miss, never a failed request. `routing.memory` in the annotation says which
+case you are in: `hit`, `miss`, `expired`, `conflict`, `not consulted`, `unavailable` (Redis unreachable — check the
+host, the credentials and the timeouts) or absent/`disabled` when no store is configured. A damaged record, an unknown
+schema version or a value written by another format is dropped and treated as a miss. Connection and socket timeouts
+default to one second so a dead Redis costs at most that, not a stalled request. Restarting a worker keeps the state;
+restarting Redis without persistence loses it, which costs only the carried phase.
+
+When Redis memory is enabled, plugin construction checks the connection with `PING`, using the configured
+connection and socket timeouts. If the check fails, it logs `Codex routing memory disabled: …` at `WARNING`
+(also when no logger was supplied) and routing stays stateless until the plugin is recreated. Disabled memory
+and the in-memory backend do not connect to Redis.
+
+**Isolation.** `MEMORY_KEY_PREFIX` is the plugin's own space. To reset it: `redis-cli --scan --pattern '<prefix>*' | xargs redis-cli del` —
+with the prefix you chose, and only that one.
 
 ### Precedence and linting
 
@@ -438,7 +617,7 @@ discover dead signals.
 | `git_review` | `qwen/Qwen3.8-27B`         | Keywords                                        | Diff/`git log` analysis: precision over speed              |
 | `review`     | `qwen/Qwen3.8-Flash-Next`  | Keywords                                        | Mostly reading and describing; short answers               |
 | `debug`      | `qwen/Qwen3.8-Flash-Next`  | Keywords                                        | Long traces + hypothesis chains                            |
-| `aux_title`  | `qwen/Qwen3.8-27B`         | Request class (system thread)                  | Tiny prompt, structured JSON-schema output                 |
+| `aux_title`  | `qwen/Qwen3.8-27B`         | Request class (system thread / title shape)    | Tiny prompt, structured JSON-schema output                 |
 | `compaction` | `qwen/Qwen3.8-27B`         | Request class (`request_kind == "compaction"`) | Whole-transcript summarization: capacity matters          |
 
 The names are what this deployment uses today; the plugin is agnostic to them, it just rewrites strings.
@@ -522,6 +701,11 @@ export LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_MODELS="implement=qwen/A|debug=
 - **`heuristic_min_score` is the false-positive dial.** One plain keyword is `1.0`, so the default `3.0` needs a strong
   keyword (`"debug": 3`), a phrase (`2.0`+), or a pattern (`3.0`). Lower it and generic words start stealing turns;
   raise it and specialised modes go quiet. Score math is visible in the logs via `similarity = score/(score+1)`.
+- **`heuristic_min_margin` guards ambiguous intent.** The default requires a lead of `1.0` over the runner-up;
+  ties always continue to semantic/fallback, even at margin `0`. Repeated rules and overlapping matches do not
+  multiply the score. Heuristic similarity is rule strength, not calibrated probability.
+- **Negations are local action prohibitions.** Tune `heuristic_negation_pattern` for your phrasing, not for every
+  occurrence of `nie` / `not`; a failure report such as `nie działa` must remain debugging evidence.
 - **`plan` and `implement` signals are dead by design.** Their keyword lists exist in the JSON for the embedding layer
   only. To route planning by text you would have to change `HEURISTIC_MODES` in code — prefer Plan Mode in the CLI, or
   an explicit `"agent_mode": "plan"` override.
@@ -536,9 +720,11 @@ export LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_MODELS="implement=qwen/A|debug=
 - **Write Polish signals in both spellings.** There is no diacritic folding and no stemming beyond word-start prefixes:
   `błąd` never matches `blad`. Every signal users may type without Polish characters needs its ASCII twin — as the
   shipped lists already do.
-- **Class routing needs Codex metadata.** If a proxy or middleware strips `client_metadata` (or the JSON string in
-  `x-codex-turn-metadata`), `compaction` and `aux_title` degrade to `main` and get heuristic/fallback routing — the
-  classic "why is my title generation on the coding model" symptom.
+- **Class routing needs Codex metadata — except the title.** `compaction` is decided by `request_kind` alone, so a
+  proxy that strips `client_metadata` (or the JSON string in `x-codex-turn-metadata`) degrades it to `main` and to
+  heuristic/fallback routing. `aux_title` survives that: the title-call shape (no tools + `json_schema` output + the
+  title instruction) is read from the body, which is also why a title request that reaches the keyword layer is a bug
+  in the shape match, not in the metadata.
 - **A persisted FAISS index is not invalidated when you edit the config.** With `PERSIST_DIR` / `vector_store_path`
   set, `index.faiss` and `docstore.pkl` are reloaded as-is. After changing modes, descriptions or examples, delete both
   files (or point at a new directory) or you keep routing against the old index.
@@ -594,7 +780,7 @@ def turn(text, collaboration=DEFAULT, **turn_meta):
 plugin = CodexRoutingPlugin(logger=None)
 cases = {
     "plan mode turn": turn("Zaplanuj migrację bazy danych.", PLAN),
-    "keyword turn": turn("napraw testy w tests/"),
+    "keyword turn": turn("testy"),
     "plain turn": turn("Dodaj endpoint zwracający status usługi."),
     "title generation": turn("Summarize this thread in one line.", None, thread_source="system"),
     "compaction": turn("Compact the conversation.", DEFAULT, request_kind="compaction"),
@@ -606,11 +792,11 @@ for name, payload in cases.items():
           f"class={out['routing']['codex_class']}")
 ```
 
-Expected output with the shipped config:
+Illustrative expected output with the shipped config (not a measurement report):
 
 ```text
 plan mode turn       -> model=qwen/Qwen3.8-Flash-Next    agent_mode=plan        source=collaboration_mode  sim=1.000 class=main
-keyword turn         -> model=qwen/Qwen3.8-27B           agent_mode=test        source=heuristic           sim=0.933 class=main
+keyword turn         -> model=qwen/Qwen3.8-27B           agent_mode=test        source=heuristic           sim=0.750 class=main
 plain turn           -> model=qwen/Qwen3.8-Flash-Next    agent_mode=implement   source=fallback            sim=0.000 class=main
 title generation     -> model=qwen/Qwen3.8-27B           agent_mode=aux_title   source=class               sim=1.000 class=aux_title
 compaction           -> model=qwen/Qwen3.8-27B           agent_mode=compaction  source=class               sim=1.000 class=compaction
@@ -633,12 +819,72 @@ Then confirm the router logged `mode=test source=heuristic model=qwen/Qwen3.8-27
 
 ```bash
 python -m pytest tests/test_agentic_routing_codex.py -q      # plugin, cascade, scoring, config
+python -m pytest tests/test_codex_semantic_ranking.py -q     # balanced ranking, margin, section encoding
 python -m pytest tests/test_routing_common.py -q             # shared routing plumbing
 ```
 
 The suite asserts the deterministic layers exactly and exercises the semantic layer through stub routers only, so it
 runs without a model or network. `agents-conversation/codex/conv-01/` holds the captured real requests (main turn,
 title, compaction) the payload builders mirror.
+
+### Semantic quality evaluation and calibration
+
+`tests/data/codex_routing_quality.json` is a small, manually labelled main-turn corpus, not a record of the router's
+historical choices. It distinguishes Git-related product code from Git inspection, demo doubles from automated tests,
+test repair from diagnosing application failures, and README/config consistency review from running tests. It includes
+new-task boundaries, short confirmations and `git_review → implement` / `test → debug` phase sequences.
+The three log-derived prompts have file/line provenance and reconstructed minimal inputs; synthetic continuations
+are marked explicitly. Labels describe the current action, not every eventual deliverable of a compound task.
+
+Run from the repository root with the project's Python environment and optional embedding dependencies:
+
+```bash
+python -m llm_router_plugins.utils.routing.agentic_routing.codex.evaluation \
+  --config llm_router_plugins/resources/routing/agentic_routing_codex.json \
+  --dataset tests/data/codex_routing_quality.json \
+  --split calibration > codex-calibration.json
+```
+
+Add `--no-semantic` to replay the deterministic cascade and the stateful variant without loading an embedding model at
+all — that is the reproducible half of the comparison, and it runs in milliseconds.
+
+Use `--split holdout` for the separate check set (the default), or `all` for diagnostics only. The evaluator loads the
+supplied JSON without environment overrides and rebuilds the index in memory; stale persisted embeddings cannot
+hide description/example changes. Missing model/dependencies, failed lookups and incomplete rankings stop evaluation
+instead of silently measuring disabled semantics. No generation model/provider is called.
+
+The report measures four variants of the same replay:
+
+| Variant         | What ran                                                              |
+|-----------------|------------------------------------------------------------------------|
+| `deterministic` | the cascade with no embedding layer — what `semantic.enabled=false` runs |
+| `stateful`      | the same cascade plus the session memory, one fresh store per session sequence |
+| `cascade`       | the cascade with the semantic layer                                    |
+| `semantic_only` | the semantic layer alone, as an upper bound on what embeddings add     |
+
+Every routing metric is computed on the **mode**, not the model: mode accuracy, the per-mode confusion matrix, and
+per-sequence mode transitions (`pairs`, `expected_switches`, `actual_switches`, `missed_switches`,
+`unnecessary_switches`, `mean_switch_delay`). Reassigning `model_name` in the configuration moves the auxiliary model
+metrics and leaves the mode metrics byte-for-byte identical, which is what makes a routing change measurable at all.
+Cases marked `ambiguous` — those where nothing before the decision determines a mode — are counted separately and
+excluded from accuracy, so an unlabeled prefix can neither inflate nor pollute a number. Expected models always come
+from the supplied mode table, not hard-coded model names. Initialization and routing timings are separate; two diagnostic passes and
+cache warm-up mean these are not a production latency benchmark. Config/dataset hashes identify each run.
+
+Tune descriptions/examples and threshold/margin only on `calibration`, then compare an untouched `holdout` run with
+the previous configuration using the same embedding weights and dataset. Do not copy evaluation prompts into indexed
+examples; if tuning against holdout, retire it and create a new independent set. Prioritize wrong **model** selections
+and false switches, then per-mode recall and abstention. This small corpus is a regression starting point, not proof
+of statistical quality. No measured improvement or optimal threshold is claimed by adding it. The embedding model,
+model mapping and acceptance thresholds remain unchanged; measuring answer quality, token cost and provider latency
+requires a separate generation experiment on both target models. Rebuild any production persisted index after changing
+examples/descriptions. `tests/test_codex_routing_quality.py` covers evaluation plumbing only, without loading a model.
+`tests/data/codex_routing_baseline.json` records the stateless cascade case by case, as it stood on 2026-10-06 before
+the phase-evidence and memory work; `test_no_case_loses_a_mode_it_had_right_at_the_baseline` turns a regression on any
+individually correct case red, per case rather than in aggregate, so one fix cannot pay for one regression. Recorded
+on the untouched holdout: the stateless cascade resolves 20/27 and misses one mode switch while making one it should
+not have; the memory variant resolves 22/27 with neither, the difference coming entirely from the incremental-session
+cases. Neither number is a quality claim about production traffic — it is a regression floor.
 
 ---
 
@@ -647,10 +893,10 @@ title, compaction) the payload builders mirror.
 | Symptom                                                     | Likely cause                                                     | Fix                                                                    |
 |--------------------------------------------------------------|------------------------------------------------------------------|-------------------------------------------------------------------------|
 | Nothing is ever rerouted                                      | plugin not in `LLM_ROUTER_UTILS_PLUGINS_PIPELINE`, or trigger mismatch | check the `[utils] Registered utility plugin` log line, then `…_TRIGGER` |
-| Every turn is `implement` / `source=fallback`                 | signals too narrow, `heuristic_min_score` too high, semantic off   | lower `…_HEURISTIC_MIN_SCORE`, add phrases, check `…_SEMANTIC_ENABLED`   |
+| Every turn is `implement` / `source=fallback`                 | signals too narrow, score/margin too high, tied scores, semantic off | inspect scores and local negations; tune score/margin and phrases; check `…_SEMANTIC_ENABLED` |
 | `plan` never selected in Plan Mode                            | no `<collaboration_mode>` block reached the plugin (stripped/rewritten) | verify the `developer` message survives to the router; `"agent_mode": "plan"` as override |
 | Titles or compaction on the coding model                      | `client_metadata` / `x-codex-turn-metadata` missing or unparsable   | stop stripping metadata; `routing.codex_class` in the logs tells you what was seen |
-| Wrong specialised mode                                        | overlapping keywords; ties go to `test` → `git_review` → `review` → `debug` | re-weight, or move the ambiguous phrase to a `phrases` entry with a weight |
+| Ambiguous intent reaches semantic/fallback                     | tied heuristic scores or insufficient lead over the runner-up    | add specific signals or re-weight; lowering the margin never accepts a tie |
 | `similarity` just under `0.51` on good matches                 | embedding model / threshold mismatch for your phrasing              | lower `…_SIMILARITY_THRESHOLD` gradually (0.45–0.5 is the usual band)     |
 | `model not found` after a routing decision                     | `model_name` not declared in the router model config                | add/fix the model in `LLM_ROUTER_MODELS_CONFIG`                            |
 | Agent stops calling tools on some turns                        | routed model/provider without tool parsing                          | `tool_calling: true` + a server with tool parsing for that model           |
@@ -668,9 +914,10 @@ title, compaction) the payload builders mirror.
 | Module            | Responsibility                                                             |
 |-------------------|----------------------------------------------------------------------------|
 | `payload.py`      | Codex wire format → immutable `CodexRequest`; request classes; user-text assembly |
-| `scoring.py`      | keyword / phrase / regex scoring, `score / (score + 1)` confidence mapping  |
-| `classifier.py`   | the six-layer cascade, `HEURISTIC_MODES`, `CLASS_ROUTED_MODES`, `RoutingDecision` |
-| `semantic.py`     | optional cosine-similarity layer, acceptance threshold, fail-open lookups   |
+| `scoring.py`      | `CodexModeScorer`: deduplicated keyword / phrase / regex scoring, local negations, `ModeScore` / `SignalMatch` ranking |
+| `classifier.py`   | `CodexModeClassifier` cascade, `HEURISTIC_MODES`, `CLASS_ROUTED_MODES`, `RoutingDecision` |
+| `semantic.py`     | optional cosine ranking, threshold + margin, section budgets, fail-open lookups |
+| `state.py`        | optional shared session memory: keys, TTL/caps, versioned compare-and-set, Redis and in-memory stores, ENV contract |
 | `config.py`       | JSON loading, env overrides, `validate_args`, `lint_signals`                |
 | `plugin.py`       | `CodexRoutingPlugin`: trigger gate, router construction, payload annotation  |
 
@@ -682,16 +929,26 @@ title, compaction) the payload builders mirror.
 | `settings.fallback_mode`     | `implement`                           |
 | `settings.heuristic_enabled` | `true`                                |
 | `settings.heuristic_min_score` | `3.0`                               |
+| `settings.heuristic_min_margin` | `1.0`                              |
+| `settings.heuristic_weights` | `keyword: 1.0`, `phrase: 2.0`, `pattern: 3.0` |
+| `settings.heuristic_negation_pattern` | packaged explicit PL/EN action-prohibition regex |
 | `settings.classify_max_chars`| `4000`                                |
+| `settings.memory.enabled`    | `false` — routing is stateless unless turned on explicitly |
+| `settings.memory.backend`    | `redis`; `memory` is for replay and tests only |
+| `settings.memory.ttl_seconds` | `900`                                |
+| `…_REDIS_HOST`               | empty — no connection configured      |
 | `settings.semantic.enabled`  | `true`                                |
 | `settings.semantic.threshold`| `0.51`                                |
+| `settings.semantic.aggregation` | `per_target_top_k`                  |
+| `settings.semantic.min_margin` | `0.05`                               |
+| `settings.semantic.intent_max_chars` / `phase_max_chars` | `2000` / `2000` |
 | `settings.semantic.top_k`    | `3`                                   |
 | `settings.semantic.chunk_size` / `chunk_overlap` | `256` / `64`          |
 | keyword / phrase / pattern weight | `1.0` / `2.0` / `3.0`            |
 | heuristic candidate order    | `test`, `git_review`, `review`, `debug` |
 | class-routed modes           | `compaction`, `aux_title`             |
 | embedding device             | `cpu`                                 |
-| `MAX_QUERY_WINDOWS`          | `4` (over-length query windows)       |
+| `MAX_QUERY_WINDOWS`          | `4` per semantic context section      |
 
 ### Reference deployment (example — your hosts will differ)
 

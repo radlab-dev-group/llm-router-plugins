@@ -27,7 +27,6 @@ from llm_router_plugins.utils.routing.embedder import (
     EmbeddingRouterConfig,
 )
 
-
 # Accepted textual representations of booleans coming from env vars.
 _BOOL_TRUE_VALUES = ("1", "true", "yes", "on")
 _BOOL_FALSE_VALUES = ("0", "false", "no", "off")
@@ -364,6 +363,7 @@ def build_embedding_router(
     logger: Any = None,
     persist_dir: Optional[str] = None,
     missing_deps_hint: Optional[str] = None,
+    aggregation: str = "global_top_k",
 ) -> EmbeddingRouter:
     """
     Build and initialize the shared BiEncoder + FAISS :class:`EmbeddingRouter`.
@@ -391,6 +391,9 @@ def build_embedding_router(
     missing_deps_hint : str, optional
         Extra context added to the error message raised when the ML
         dependencies are not installed.
+    aggregation : str, optional
+        ``global_top_k`` for legacy retrieval, ``per_target_top_k`` for a
+        complete ranking with an equal number of fragments per target.
 
     Returns
     -------
@@ -421,6 +424,7 @@ def build_embedding_router(
             chunk_overlap=chunk_overlap,
             top_k=top_k,
             routing_targets=tuple(routing_targets),
+            aggregation=aggregation,
         ),
         logger=logger,
         persist_dir=persist_dir,

@@ -45,7 +45,7 @@ spaced_dashed_fixed = (
     + r"\d\d"
     + r"([A-Za-z0-9]"
     + r"[\s -]*[A-Za-z0-9]?"
-    + r"){1,9})"
+    + r"){1,9}"
 )
 
 # Test IBANs

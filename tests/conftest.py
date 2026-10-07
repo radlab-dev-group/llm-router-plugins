@@ -2,8 +2,25 @@
 Shared pytest fixtures for the routing plugin test suites.
 """
 
+import sys
+
 import numpy as np
 import pytest
+
+if not hasattr(sys, "get_int_max_str_digits"):
+    # Python 3.11.0rc1 predates ``sys.get_int_max_str_digits`` /
+    # ``sys.set_int_max_str_digits`` (final 3.11 / 3.12).  torch >= 2.2
+    # references both in its dynamo polyfills, so importing
+    # ``sentence_transformers`` on this interpreter raises AttributeError.
+    # Provide no-op shims so the mock-based routing tests can run.
+    def _get_int_max_str_digits() -> int:
+        return 4300
+
+    def _set_int_max_str_digits(maxdigits: int) -> None:
+        return None
+
+    sys.get_int_max_str_digits = _get_int_max_str_digits
+    sys.set_int_max_str_digits = _set_int_max_str_digits
 
 
 def _make_mock_model_class():

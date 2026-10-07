@@ -13,7 +13,6 @@ from llm_router_plugins.maskers.fast_masker.rules.bank_account_rule import (
     BankAccountRule,
 )
 
-
 # ── Fixtures ───────────────────────────────────────────────────────────────
 
 

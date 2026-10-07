@@ -22,6 +22,11 @@ setup(
     python_requires=">=3.10",
     install_requires=["radlab-pii-classification>=0.1.0"],
     extras_require={
+        # Shared session memory for the Codex router (optional; routing stays
+        # stateless without it).
+        "memory": [
+            "redis>=5",
+        ],
         # Semantic routing (EmbeddingRouter): CPU build of FAISS.
         "ml": [
             "faiss-cpu",
