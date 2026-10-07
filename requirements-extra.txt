@@ -2,6 +2,7 @@
 #   pip install .[ml]       — CPU FAISS + sentence-transformers (semantic routing)
 #   pip install .[ml-gpu]   — CUDA FAISS + sentence-transformers (pick ONE faiss build!)
 #   pip install .[rag]      — langchain + Pillow (RAG utilities)
+#   pip install .[memory]   — redis (shared Codex session memory; optional)
 #
 # Manual install:
 langchain
@@ -11,3 +12,4 @@ sentence-transformers
 numpy
 scipy
 Pillow
+redis
