@@ -4,7 +4,11 @@ from pathlib import Path
 import pytest
 
 from llm_router_plugins.utils.routing.agentic_routing.codex.payload import CodexActivity
-from llm_router_plugins.utils.routing.agentic_routing.codex.phase import detect_phase
+from llm_router_plugins.utils.routing.agentic_routing.codex.phase import (
+    collect_phase_evidence,
+    detect_phase,
+    detect_phase_evidence,
+)
 from llm_router_plugins.utils.routing.agentic_routing.codex.phase_config import CodexPhaseConfig
 
 
@@ -113,7 +117,7 @@ def test_noncurrent_uncertain_or_quoted_announcements(text, rules):
     ("git diff && pytest", None),
     ("pytest || true", None),
     ("echo $(pytest)", None),
-    ("pytest | tee output", None),
+    ("pytest | tee output", "test"),
     ("pytest > output", None),
     ("pytest &", None),
     ("'pytest", None),
@@ -266,7 +270,7 @@ def test_custom_command_and_tool_rules_replace_defaults():
     assert detect_phase((command("cargo build", name="run_shell"),), rules) is None
     assert detect_phase((command("pytest", name="run_shell"),), rules) is None
     assert detect_phase((command("cargo test"),), rules) is None
-    assert detect_phase((command("cargo test | tee log", name="run_shell"),), rules) is None
+    assert detect_phase((command("cargo test | tee log", name="run_shell"),), rules) == "test"
 
 
 def test_conflicting_command_rules_do_not_pick_by_order():
@@ -334,3 +338,143 @@ def test_routing_config_uses_only_supplied_phase_rules():
     raw["settings"]["phase"] = None
     with pytest.raises(ValueError, match=r"settings\.phase"):
         CodexRoutingConfig._from_raw(raw)
+
+# --- compound commands, filters and evidence --------------------------------
+
+
+@pytest.mark.parametrize("text, expected", [
+    (
+        "cd /srv/work/llm-router && git show e65a66b --stat && "
+        "git show e65a66b | head -80",
+        "git_review",
+    ),
+    ("git log --oneline main..HEAD | tee /tmp/log", "git_review"),
+    ("MODE=ci python -m pytest -q | tee ci.log", "test"),
+    ("cd repo && cd tests && pytest", "test"),
+    ("git status && git diff", "git_review"),
+])
+def test_safe_compound_commands_keep_the_producer_phase(text, expected, rules):
+    assert detect_phase((command(text),), rules) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "pytest | sh",
+    "pytest | python -c 'print(1)'",
+    "git diff | tee log && pytest",
+    "pytest && git diff",
+    "pytest || true",
+    "head -1 tests/test_main.py",
+    "git show HEAD | cat | sh",
+])
+def test_unsupported_or_conflicting_composites_abstain(text, rules):
+    assert detect_phase((command(text),), rules) is None
+
+
+def test_filters_are_configurable_and_replaceable():
+    strict = CodexPhaseConfig.from_raw(phase_raw({"neutral_filters": ["head"]}))
+    assert detect_phase((command("pytest | head -5"),), strict) == "test"
+    assert detect_phase((command("pytest | tee log"),), strict) is None
+    none = CodexPhaseConfig.from_raw(phase_raw({"neutral_filters": []}))
+    assert detect_phase((command("pytest | head -5"),), none) is None
+
+
+def test_invalid_neutral_filter_configuration_is_rejected():
+    for raw in ({"neutral_filters": "head"}, {"neutral_filters": [""]},
+                {"neutral_filters": ["["]},
+                {"announcement_followup_max_chars": -1},
+                {"announcement_followup_max_chars": "10"}):
+        with pytest.raises(ValueError, match=r"settings\.phase"):
+            CodexPhaseConfig.from_raw(phase_raw(raw))
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Teraz uruchomię testy.\n", "test"),
+    ("Teraz uruchomię testy.\n\nPotem podsumuję wynik.", "test"),
+    ("Now I will update the CHANGELOG.\nThe entry covers the fix.", "implement"),
+])
+def test_trailing_newlines_and_short_explanations_are_tolerated(text, expected, rules):
+    assert detect_phase((assistant(text),), rules) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "Teraz uruchomię testy.\n" + "X" * 400,
+    "Teraz uruchomię testy.\nTeraz przejrzę diff.",
+])
+def test_long_bodies_and_second_announcements_do_not_announce(text, rules):
+    assert detect_phase((assistant(text),), rules) is None
+
+
+def test_followup_budget_is_configurable():
+    strict = CodexPhaseConfig.from_raw(phase_raw({"announcement_followup_max_chars": 0}))
+    assert detect_phase((assistant("Teraz uruchomię testy.\nPotem podsumuję."),), strict) is None
+    assert detect_phase((assistant("Teraz uruchomię testy."),), strict) == "test"
+
+
+def test_failure_is_read_from_the_result_envelope_not_the_captured_body(rules):
+    body = "Process exited with code 1\nTraceback (most recent call last):\nAssertionError"
+    output_of_a_green_run = (
+        "Chunk ID: 4899d0\nWall time: 0.1000 seconds\n"
+        "Process exited with code 0\nOriginal token count: 40\nOutput:\n" + body
+    )
+    assert detect_phase((command("pytest"), output(output_of_a_green_run)), rules) == "test"
+
+
+def test_infrastructure_error_is_not_a_test_failure(rules):
+    gateway = (
+        "Process exited with code 0\nOutput:\n"
+        "error: authentication request failed: 401 Unauthorized\n"
+        "connection refused, retrying\n"
+    )
+    assert detect_phase((command("pytest"), output(gateway)), rules) == "test"
+    assert detect_phase((command("git log"), output(gateway)), rules) == "git_review"
+
+
+def test_evidence_carries_kind_reason_and_settlement(rules):
+    activity = (
+        command("python -m pytest tests/test_a.py", call_id="c1"),
+        output("Process exited with code 1", call_id="c1"),
+    )
+    evidence = detect_phase_evidence(activity, rules)
+    assert evidence.mode == "debug"
+    assert evidence.kind == "test_failure"
+    assert evidence.call_id == "c1"
+    assert evidence.completed is True
+    assert evidence.succeeded is False
+
+
+def test_evidence_of_a_running_command_is_unsettled(rules):
+    evidence = detect_phase_evidence((command("python -m pytest"),), rules)
+    assert (evidence.mode, evidence.kind, evidence.completed, evidence.succeeded) == (
+        "test", "command", False, None,
+    )
+    assert evidence.reason == "python -m pytest"
+
+
+def test_evidence_keeps_the_event_identifier_of_its_payload_item():
+    with_ids = CodexPhaseConfig.from_raw(phase_raw())
+    activity = (
+        CodexActivity(
+            kind="function_call", name="exec_command", call_id="c1",
+            event_id="fc_01", text='{"cmd": "pytest"}',
+        ),
+        CodexActivity(
+            kind="function_call_output", name="exec_command", call_id="c1",
+            event_id="fco_01", text="Process exited with code 1",
+        ),
+    )
+    collected = collect_phase_evidence(activity, with_ids)
+    assert [item.event_id for item in collected] == ["fc_01", "fco_01"]
+    assert collected[0].completed is True
+
+
+def test_announcement_evidence_explains_itself(rules):
+    evidence = detect_phase_evidence((assistant("Teraz uruchomię pytest."),), rules)
+    assert (evidence.kind, evidence.reason, evidence.mode) == (
+        "announcement", "announcement", "test",
+    )
+
+
+def test_patch_evidence_names_the_envelope(rules):
+    evidence = detect_phase_evidence((patch("src/main.py"),), rules)
+    assert evidence.kind == "patch"
+    assert evidence.reason.startswith("patch ")

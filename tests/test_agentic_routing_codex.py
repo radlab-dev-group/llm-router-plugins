@@ -1929,7 +1929,7 @@ class TestConfig:
         config.validate_args()
         classifier = CodexModeClassifier(config)
         mode = CodexMode(name="test", model_name="test-model", description="test",
-                         patterns=(r"\bunique\b",))
+                         examples=(), patterns=(r"\bunique\b",))
 
         assert config.heuristic_weights["keyword"] == 4.0
         assert classifier._scorer.score_mode(mode, "unique") == 7.0
@@ -2735,7 +2735,7 @@ class TestSemanticSimilarity:
         assert router.calls[0].endswith("Sprawdzam zgodność konfiguracji.")
         assert request.latest_user_text == "X" * 1000
 
-    def test_semantic_query_includes_linked_tool_command_and_result(self):
+    def test_semantic_query_describes_the_action_without_the_tool_output(self):
         payload = main_payload("Dodaj endpoint")
         payload["input"].extend([
             TestActiveWorkPhase._call("exec_command", '{"cmd":"git status"}'),
@@ -2745,7 +2745,9 @@ class TestSemanticSimilarity:
 
         _semantic_layer(router).route(_parse(payload))
 
-        assert router.calls == ['Dodaj endpoint\nexec_command\n{"cmd":"git status"}\nclean']
+        assert router.calls == ["Dodaj endpoint\ncalled exec_command"]
+        assert "clean" not in router.calls[0]
+        assert '"cmd"' not in router.calls[0]
 
     def test_long_assistant_does_not_exclude_the_latest_tool_from_semantics(self):
         payload = main_payload("Dodaj endpoint")
@@ -2760,7 +2762,7 @@ class TestSemanticSimilarity:
         )
 
         assert len(router.calls[0]) <= 200
-        assert 'git status' in router.calls[0]
+        assert "exec_command" in router.calls[0]
 
     def test_malformed_assistant_message_does_not_break_routing(self):
         payload = main_payload("wyrenderuj pusty stan w widoku")
