@@ -1,0 +1,348 @@
+{
+  "description": "Replay baseline of the stateless cascade, recorded 2026-10-06 before the phase-evidence and shared-memory work. Generated from tests/data/codex_routing_quality.json with the deterministic variant (no semantic layer); a later variant is compared against it per case.",
+  "per_case": {
+    "calibration-changelog-phase": {
+      "ambiguous": false,
+      "expected_mode": "implement",
+      "mode": "implement",
+      "sequence": "calibration-git-changelog",
+      "source": "phase",
+      "split": "calibration"
+    },
+    "calibration-compound-git-show": {
+      "ambiguous": false,
+      "expected_mode": "git_review",
+      "mode": "git_review",
+      "sequence": "calibration-compound-git",
+      "source": "phase",
+      "split": "calibration"
+    },
+    "calibration-debug": {
+      "ambiguous": false,
+      "expected_mode": "debug",
+      "mode": "debug",
+      "sequence": null,
+      "source": "heuristic",
+      "split": "calibration"
+    },
+    "calibration-github": {
+      "ambiguous": false,
+      "expected_mode": "implement",
+      "mode": "implement",
+      "sequence": null,
+      "source": "fallback",
+      "split": "calibration"
+    },
+    "calibration-infrastructure-error": {
+      "ambiguous": true,
+      "expected_mode": "test",
+      "mode": "test",
+      "sequence": null,
+      "source": "phase",
+      "split": "calibration"
+    },
+    "calibration-mock": {
+      "ambiguous": false,
+      "expected_mode": "implement",
+      "mode": "implement",
+      "sequence": null,
+      "source": "fallback",
+      "split": "calibration"
+    },
+    "calibration-plan": {
+      "ambiguous": false,
+      "expected_mode": "plan",
+      "mode": "test",
+      "sequence": null,
+      "source": "heuristic",
+      "split": "calibration"
+    },
+    "holdout-changelog-after-log": {
+      "ambiguous": false,
+      "expected_mode": "implement",
+      "mode": "implement",
+      "sequence": "holdout-log-implement",
+      "source": "phase",
+      "split": "holdout"
+    },
+    "holdout-code-review": {
+      "ambiguous": false,
+      "expected_mode": "review",
+      "mode": "git_review",
+      "sequence": null,
+      "source": "heuristic",
+      "split": "holdout"
+    },
+    "holdout-confirm-review": {
+      "ambiguous": false,
+      "expected_mode": "git_review",
+      "mode": "git_review",
+      "sequence": null,
+      "source": "heuristic",
+      "split": "holdout"
+    },
+    "holdout-demo-double": {
+      "ambiguous": false,
+      "expected_mode": "implement",
+      "mode": "test",
+      "sequence": null,
+      "source": "heuristic",
+      "split": "holdout"
+    },
+    "holdout-executed-suite": {
+      "ambiguous": false,
+      "expected_mode": "test",
+      "mode": "test",
+      "sequence": "holdout-test-debug",
+      "source": "phase",
+      "split": "holdout"
+    },
+    "holdout-failure-repaired": {
+      "ambiguous": false,
+      "expected_mode": "implement",
+      "mode": "implement",
+      "sequence": "holdout-test-debug",
+      "source": "phase",
+      "split": "holdout"
+    },
+    "holdout-git-design-plan": {
+      "ambiguous": false,
+      "expected_mode": "plan",
+      "mode": "implement",
+      "sequence": null,
+      "source": "fallback",
+      "split": "holdout"
+    },
+    "holdout-git-product": {
+      "ambiguous": false,
+      "expected_mode": "implement",
+      "mode": "implement",
+      "sequence": null,
+      "source": "fallback",
+      "split": "holdout"
+    },
+    "holdout-history-to-docs": {
+      "ambiguous": false,
+      "expected_mode": "git_review",
+      "mode": "git_review",
+      "sequence": "holdout-history-docs",
+      "source": "heuristic",
+      "split": "holdout"
+    },
+    "holdout-incremental-asking": {
+      "ambiguous": false,
+      "expected_mode": "test",
+      "mode": "implement",
+      "sequence": "holdout-incremental",
+      "source": "fallback",
+      "split": "holdout"
+    },
+    "holdout-incremental-new-command": {
+      "ambiguous": false,
+      "expected_mode": "implement",
+      "mode": "implement",
+      "sequence": "holdout-incremental",
+      "source": "fallback",
+      "split": "holdout"
+    },
+    "holdout-incremental-result-only": {
+      "ambiguous": false,
+      "expected_mode": "test",
+      "mode": "implement",
+      "sequence": "holdout-incremental",
+      "source": "fallback",
+      "split": "holdout"
+    },
+    "holdout-incremental-suite": {
+      "ambiguous": false,
+      "expected_mode": "test",
+      "mode": "test",
+      "sequence": "holdout-incremental",
+      "source": "phase",
+      "split": "holdout"
+    },
+    "holdout-integration-run": {
+      "ambiguous": false,
+      "expected_mode": "test",
+      "mode": "test",
+      "sequence": null,
+      "source": "heuristic",
+      "split": "holdout"
+    },
+    "holdout-log-executed": {
+      "ambiguous": false,
+      "expected_mode": "git_review",
+      "mode": "git_review",
+      "sequence": "holdout-log-implement",
+      "source": "phase",
+      "split": "holdout"
+    },
+    "holdout-log-to-implement": {
+      "ambiguous": false,
+      "expected_mode": "git_review",
+      "mode": "git_review",
+      "sequence": "holdout-log-implement",
+      "source": "heuristic",
+      "split": "holdout"
+    },
+    "holdout-neutral-inspection": {
+      "ambiguous": true,
+      "expected_mode": "implement",
+      "mode": "implement",
+      "sequence": "holdout-neutral-read",
+      "source": "fallback",
+      "split": "holdout"
+    },
+    "holdout-new-task-cuts-history": {
+      "ambiguous": false,
+      "expected_mode": "implement",
+      "mode": "implement",
+      "sequence": "holdout-history-docs",
+      "source": "fallback",
+      "split": "holdout"
+    },
+    "holdout-no-tests": {
+      "ambiguous": false,
+      "expected_mode": "implement",
+      "mode": "implement",
+      "sequence": null,
+      "source": "fallback",
+      "split": "holdout"
+    },
+    "holdout-readme-review": {
+      "ambiguous": false,
+      "expected_mode": "review",
+      "mode": "implement",
+      "sequence": null,
+      "source": "fallback",
+      "split": "holdout"
+    },
+    "holdout-runtime-debug": {
+      "ambiguous": false,
+      "expected_mode": "debug",
+      "mode": "debug",
+      "sequence": null,
+      "source": "heuristic",
+      "split": "holdout"
+    },
+    "holdout-specification": {
+      "ambiguous": false,
+      "expected_mode": "implement",
+      "mode": "implement",
+      "sequence": null,
+      "source": "fallback",
+      "split": "holdout"
+    },
+    "holdout-suite-failure": {
+      "ambiguous": false,
+      "expected_mode": "debug",
+      "mode": "debug",
+      "sequence": "holdout-test-debug",
+      "source": "phase",
+      "split": "holdout"
+    },
+    "holdout-suite-green-again": {
+      "ambiguous": false,
+      "expected_mode": "test",
+      "mode": "test",
+      "sequence": "holdout-test-debug",
+      "source": "phase",
+      "split": "holdout"
+    },
+    "holdout-test-design-plan": {
+      "ambiguous": false,
+      "expected_mode": "plan",
+      "mode": "test",
+      "sequence": null,
+      "source": "heuristic",
+      "split": "holdout"
+    },
+    "holdout-test-repair": {
+      "ambiguous": false,
+      "expected_mode": "test",
+      "mode": "test",
+      "sequence": null,
+      "source": "heuristic",
+      "split": "holdout"
+    },
+    "holdout-unit-suite": {
+      "ambiguous": false,
+      "expected_mode": "test",
+      "mode": "test",
+      "sequence": null,
+      "source": "heuristic",
+      "split": "holdout"
+    },
+    "holdout-write-release-notes": {
+      "ambiguous": false,
+      "expected_mode": "implement",
+      "mode": "implement",
+      "sequence": "holdout-history-docs",
+      "source": "phase",
+      "split": "holdout"
+    },
+    "log-git-first-phase": {
+      "ambiguous": false,
+      "expected_mode": "git_review",
+      "mode": "git_review",
+      "sequence": "calibration-git-changelog",
+      "source": "heuristic",
+      "split": "calibration"
+    },
+    "log-readme-consistency": {
+      "ambiguous": false,
+      "expected_mode": "review",
+      "mode": "implement",
+      "sequence": null,
+      "source": "fallback",
+      "split": "calibration"
+    },
+    "log-wandb-tests": {
+      "ambiguous": false,
+      "expected_mode": "test",
+      "mode": "test",
+      "sequence": null,
+      "source": "heuristic",
+      "split": "calibration"
+    }
+  },
+  "summary": {
+    "calibration": {
+      "ambiguous_count": 1,
+      "count": 9,
+      "mode_accuracy": 0.7777777777777778,
+      "mode_transitions": {
+        "actual_switches": 1,
+        "expected_switches": 1,
+        "mean_switch_delay": 0.0,
+        "missed_switches": 0,
+        "pairs": 1,
+        "unnecessary_switches": 0
+      },
+      "sources": {
+        "fallback": 3,
+        "heuristic": 4,
+        "phase": 2
+      }
+    },
+    "holdout": {
+      "ambiguous_count": 1,
+      "count": 27,
+      "mode_accuracy": 0.7407407407407407,
+      "mode_transitions": {
+        "actual_switches": 6,
+        "expected_switches": 6,
+        "mean_switch_delay": 0.0,
+        "missed_switches": 1,
+        "pairs": 10,
+        "unnecessary_switches": 1
+      },
+      "sources": {
+        "fallback": 9,
+        "heuristic": 10,
+        "phase": 8
+      }
+    }
+  },
+  "variant": "deterministic"
+}
