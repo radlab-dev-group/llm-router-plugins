@@ -518,6 +518,20 @@ construction** (so after a restart, never mid-session).
 | `…_TOP_K` / `…_CHUNK_SIZE` / `…_CHUNK_OVERLAP`                       | Embedding router knobs                                |
 | `…_PERSIST_DIR`                                                     | Directory holding `index.faiss` + `docstore.pkl`      |
 | `…_MODE_<name>_KEYWORDS`                                            | Pipe-separated keyword override for one mode          |
+| `…_MEMORY_ENABLED`                                          | Turn the shared session memory on (default **off**)   |
+| `…_MEMORY_BACKEND`                                          | `redis` (production) or `memory` (tests/replay only)   |
+| `…_MEMORY_TTL_SECONDS`                                      | Lifetime of one session record (default `900`)         |
+| `…_MEMORY_MAX_SESSIONS`                                     | Sessions kept in this plugin's namespace (default `10000`) |
+| `…_MEMORY_MAX_EVENTS` / `…_MEMORY_MAX_CALLS`                 | Per-session identifier caps (defaults `64` / `32`)     |
+| `…_MEMORY_KEY_PREFIX`                                       | Key namespace owned by the plugin                       |
+| `…_MEMORY_MAX_RETRIES`                                      | Attempts after a version conflict (default `1`)         |
+| `…_REDIS_HOST`                                              | **Empty by default — no connection, memory stays off**  |
+| `…_REDIS_PORT` / `…_REDIS_DB` / `…_REDIS_PROTOCOL`           | `6379` / `0` / `3`                                      |
+| `…_REDIS_PASSWORD` / `…_REDIS_USERNAME`                      | Empty password means no AUTH; username is optional ACL  |
+| `…_REDIS_SSL`                                               | TLS on/off (default off)                                |
+| `…_REDIS_SSL_CA_CERTS` / `…_REDIS_SSL_CERTFILE` / `…_REDIS_SSL_KEYFILE` | TLS material                                   |
+| `…_REDIS_SSL_CERT_REQS`                                     | `required` (default), `optional` or `none`              |
+| `…_REDIS_SOCKET_CONNECT_TIMEOUT` / `…_REDIS_SOCKET_TIMEOUT`  | Short positive timeouts, seconds (default `1.0`)        |
 
 Booleans accept `1/0`, `true/false`, `yes/no`, `on/off`; numeric values are parsed as `int`/`float` and a malformed
 value is ignored (with a warning where a logger is present). Unknown mode names in `MODELS`, `MODES`, `MODEL_<MODE>` or
@@ -526,6 +540,49 @@ routing.
 
 `…_MODES` filters the mode list **but does not move the fallback**: if the whitelist excludes the configured
 `fallback_mode` (`implement`), set `…_FALLBACK_MODE` too — otherwise validation fails at startup.
+
+### Session memory (shared, optional)
+
+Codex asks one action per model call, and between two calls the user's instruction does not change while the evidence
+does: the suite has now run, the patch has landed, the failure arrived. A stateless cascade can only read what the
+client happened to send, so an **incremental payload** — the result of a call it already showed, without the call —
+carries no evidence of its own and falls through to the fallback.
+
+The session memory carries a **reliable** phase from one request of a command generation to the next. It lives in
+**Redis**, shared by every Gunicorn worker pointed at the same instance and namespace; there is deliberately **no
+local-process cache**, because two workers holding two ideas of the same session's phase is worse than no memory.
+
+```bash
+pip install redis            # optional dependency; without it the plugin stays stateless
+export LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_REDIS_HOST=cache.internal
+export LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_REDIS_PASSWORD=…   # or leave unset
+export LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_MEMORY_ENABLED=true
+```
+
+**Lifecycle.** A key isolates the plugin's namespace, the session, the thread and the agent; `turn_id` is the
+*generation* — the current user command. A new command resets the phase. A record holds the mode, the kind and reason
+of the evidence that produced it, bounded event identifiers and a version counter: **no model names, no conversation
+text, no tool output, no credentials**. Every write is an atomic versioned compare-and-set executed in a Lua script
+alongside the namespace's session index, so concurrent workers cannot interleave a read, a merge and a write; the
+loser gets a conflict and continues statelessly rather than overwriting. TTL (`MEMORY_TTL_SECONDS`, default 15 min)
+and `MEMORY_MAX_SESSIONS` bound storage; pruning touches only keys inside `MEMORY_KEY_PREFIX`, never anything else in
+the instance. Replaying the same history is a no-op — identical evidence in the same generation does not refresh a
+record's standing.
+
+**What it never does.** It never outranks a fresh signal: it is consulted only after the current turn's own evidence
+stayed silent, and a phase decided from evidence always wins. It never stores a fallback, a weak semantic match, a
+title request or a compaction, because those are not facts about what the agent is doing. Without a session and thread
+identifier there is nothing to isolate, so routing stays stateless instead of guessing.
+
+**Failure behaviour.** A memory error is a miss, never a failed request. `routing.memory` in the annotation says which
+case you are in: `hit`, `miss`, `expired`, `conflict`, `not consulted`, `unavailable` (Redis unreachable — check the
+host, the credentials and the timeouts) or absent/`disabled` when no store is configured. A damaged record, an unknown
+schema version or a value written by another format is dropped and treated as a miss. Connection and socket timeouts
+default to one second so a dead Redis costs at most that, not a stalled request. Restarting a worker keeps the state;
+restarting Redis without persistence loses it, which costs only the carried phase.
+
+**Isolation.** `MEMORY_KEY_PREFIX` is the plugin's own space. To reset it: `redis-cli --scan --pattern '<prefix>*' | xargs redis-cli del` —
+with the prefix you chose, and only that one.
 
 ### Precedence and linting
 
@@ -783,16 +840,30 @@ python -m llm_router_plugins.utils.routing.agentic_routing.codex.evaluation \
   --split calibration > codex-calibration.json
 ```
 
+Add `--no-semantic` to replay the deterministic cascade and the stateful variant without loading an embedding model at
+all — that is the reproducible half of the comparison, and it runs in milliseconds.
+
 Use `--split holdout` for the separate check set (the default), or `all` for diagnostics only. The evaluator loads the
 supplied JSON without environment overrides and rebuilds the index in memory; stale persisted embeddings cannot
 hide description/example changes. Missing model/dependencies, failed lookups and incomplete rankings stop evaluation
 instead of silently measuring disabled semantics. No generation model/provider is called.
 
-The report separates the **production cascade** from **semantic-only classification plus configured fallback** for
-every case, including cases that heuristics or phase detection would intercept. It reports mode accuracy/precision/
-recall, target-model accuracy and confusion counts, acceptance/fallback sources, expected versus actual model switches,
-missed and unnecessary switches, full cosine rankings and margins. Expected models always come from the supplied
-mode table, not hard-coded model names. Initialization and routing timings are separate; two diagnostic passes and
+The report measures four variants of the same replay:
+
+| Variant         | What ran                                                              |
+|-----------------|------------------------------------------------------------------------|
+| `deterministic` | the cascade with no embedding layer — what `semantic.enabled=false` runs |
+| `stateful`      | the same cascade plus the session memory, one fresh store per session sequence |
+| `cascade`       | the cascade with the semantic layer                                    |
+| `semantic_only` | the semantic layer alone, as an upper bound on what embeddings add     |
+
+Every routing metric is computed on the **mode**, not the model: mode accuracy, the per-mode confusion matrix, and
+per-sequence mode transitions (`pairs`, `expected_switches`, `actual_switches`, `missed_switches`,
+`unnecessary_switches`, `mean_switch_delay`). Reassigning `model_name` in the configuration moves the auxiliary model
+metrics and leaves the mode metrics byte-for-byte identical, which is what makes a routing change measurable at all.
+Cases marked `ambiguous` — those where nothing before the decision determines a mode — are counted separately and
+excluded from accuracy, so an unlabeled prefix can neither inflate nor pollute a number. Expected models always come
+from the supplied mode table, not hard-coded model names. Initialization and routing timings are separate; two diagnostic passes and
 cache warm-up mean these are not a production latency benchmark. Config/dataset hashes identify each run.
 
 Tune descriptions/examples and threshold/margin only on `calibration`, then compare an untouched `holdout` run with
@@ -803,6 +874,12 @@ of statistical quality. No measured improvement or optimal threshold is claimed 
 model mapping and acceptance thresholds remain unchanged; measuring answer quality, token cost and provider latency
 requires a separate generation experiment on both target models. Rebuild any production persisted index after changing
 examples/descriptions. `tests/test_codex_routing_quality.py` covers evaluation plumbing only, without loading a model.
+`tests/data/codex_routing_baseline.json` records the stateless cascade case by case, as it stood on 2026-10-06 before
+the phase-evidence and memory work; `test_no_case_loses_a_mode_it_had_right_at_the_baseline` turns a regression on any
+individually correct case red, per case rather than in aggregate, so one fix cannot pay for one regression. Recorded
+on the untouched holdout: the stateless cascade resolves 20/27 and misses one mode switch while making one it should
+not have; the memory variant resolves 22/27 with neither, the difference coming entirely from the incremental-session
+cases. Neither number is a quality claim about production traffic — it is a regression floor.
 
 ---
 
@@ -835,6 +912,7 @@ examples/descriptions. `tests/test_codex_routing_quality.py` covers evaluation p
 | `scoring.py`      | `CodexModeScorer`: deduplicated keyword / phrase / regex scoring, local negations, `ModeScore` / `SignalMatch` ranking |
 | `classifier.py`   | `CodexModeClassifier` cascade, `HEURISTIC_MODES`, `CLASS_ROUTED_MODES`, `RoutingDecision` |
 | `semantic.py`     | optional cosine ranking, threshold + margin, section budgets, fail-open lookups |
+| `state.py`        | optional shared session memory: keys, TTL/caps, versioned compare-and-set, Redis and in-memory stores, ENV contract |
 | `config.py`       | JSON loading, env overrides, `validate_args`, `lint_signals`                |
 | `plugin.py`       | `CodexRoutingPlugin`: trigger gate, router construction, payload annotation  |
 
@@ -850,6 +928,10 @@ examples/descriptions. `tests/test_codex_routing_quality.py` covers evaluation p
 | `settings.heuristic_weights` | `keyword: 1.0`, `phrase: 2.0`, `pattern: 3.0` |
 | `settings.heuristic_negation_pattern` | packaged explicit PL/EN action-prohibition regex |
 | `settings.classify_max_chars`| `4000`                                |
+| `settings.memory.enabled`    | `false` — routing is stateless unless turned on explicitly |
+| `settings.memory.backend`    | `redis`; `memory` is for replay and tests only |
+| `settings.memory.ttl_seconds` | `900`                                |
+| `…_REDIS_HOST`               | empty — no connection configured      |
 | `settings.semantic.enabled`  | `true`                                |
 | `settings.semantic.threshold`| `0.51`                                |
 | `settings.semantic.aggregation` | `per_target_top_k`                  |

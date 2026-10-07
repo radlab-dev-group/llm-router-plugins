@@ -44,7 +44,7 @@ Example
     decision.similarity  # 1.0
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
 
 from llm_router_plugins.utils.routing.agentic_routing.codex.config import (
@@ -59,9 +59,18 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
 from llm_router_plugins.utils.routing.agentic_routing.codex.scoring import (
     CodexModeScorer,
 )
-from llm_router_plugins.utils.routing.agentic_routing.codex.phase import detect_phase
+from llm_router_plugins.utils.routing.agentic_routing.codex.phase import (
+    PhaseEvidence,
+    detect_phase_evidence,
+)
 from llm_router_plugins.utils.routing.agentic_routing.codex.semantic import (
     CodexSemanticLayer,
+)
+from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
+    MemoryStatus,
+    RoutingStateStore,
+    merge_state,
+    session_key,
 )
 
 __all__ = [
@@ -71,6 +80,7 @@ __all__ = [
     "SOURCE_PHASE",
     "SOURCE_HEURISTIC",
     "SOURCE_SEMANTIC",
+    "SOURCE_MEMORY",
     "SOURCE_FALLBACK",
     "HEURISTIC_MODES",
     "CLASS_ROUTED_MODES",
@@ -98,6 +108,9 @@ SOURCE_SEMANTIC = "semantic"
 
 #: No layer could decide, the configured fallback mode was used.
 SOURCE_FALLBACK = "fallback"
+
+#: A still-fresh phase evidence from the shared session memory decided the mode.
+SOURCE_MEMORY = "memory"
 
 #: Modes eligible for keyword scoring.  ``plan`` is decided by the
 #: collaboration block and ``implement`` is the fallback, so neither needs
@@ -138,16 +151,29 @@ class RoutingDecision:
     similarity : float
         Value in ``[0.0, 1.0]`` reported in ``payload["routing"]``. For heuristics
         this is score strength, not a calibrated probability of correctness.
-
-    Raises
-    ------
-    None
+    reason : str
+        Why this layer answered, as a short code: the phase evidence reason, or
+        a marker such as ``"below threshold"``.  Diagnostic only.
+    evidence : Optional[PhaseEvidence]
+        The phase evidence behind a phase or memory decision, ``None`` otherwise.
+    memory : MemoryStatus or None
+        What the session memory did — hit, miss, expired, conflict, disabled,
+        unavailable — ``None`` when the request never consulted it.
+    semantic : str
+        Outcome of the semantic layer: ``"disabled"``, ``"unavailable"``,
+        ``"accepted"``, ``"below threshold"``, ``"ambiguous"`` or ``""`` when
+        the layer was never reached.  A refusal is reported as a reason, never
+        as a probability.
     """
 
     mode: str
     source: str
     score: float
     similarity: float
+    reason: str = ""
+    evidence: Optional[PhaseEvidence] = None
+    memory: Optional[MemoryStatus] = None
+    semantic: str = ""
 
 
 class CodexModeClassifier:
@@ -185,9 +211,10 @@ class CodexModeClassifier:
         config: CodexRoutingConfig,
         semantic: Optional[CodexSemanticLayer] = None,
         scorer: Optional[CodexModeScorer] = None,
+        memory: Optional[RoutingStateStore] = None,
     ) -> None:
         """
-        Store the configuration, the semantic layer and the keyword scorer.
+        Store the configuration, the layers and the optional session memory.
 
         Parameters
         ----------
@@ -198,6 +225,9 @@ class CodexModeClassifier:
             deterministic cascade.
         scorer : CodexModeScorer, optional
             Keyword scorer, built when omitted.
+        memory : RoutingStateStore, optional
+            Shared session memory, consulted after the current turn's evidence
+            and before the user text is scored again.
 
         Returns
         -------
@@ -209,10 +239,23 @@ class CodexModeClassifier:
         """
         self._config = config
         self._semantic = semantic
+        self._memory = memory
         self._scorer = scorer if scorer is not None else CodexModeScorer(
             negation_pattern=config.heuristic_negation_pattern,
             weights=config.heuristic_weights,
         )
+
+    @property
+    def memory(self) -> Optional[RoutingStateStore]:
+        """
+        Return the shared session memory, if one was injected.
+
+        Returns
+        -------
+        Optional[RoutingStateStore]
+            The store, or ``None`` when the cascade runs statelessly.
+        """
+        return self._memory
 
     def classify(
         self, payload: Dict[str, Any], request: CodexRequest
@@ -257,13 +300,26 @@ class CodexModeClassifier:
         if request.collaboration_mode == COLLABORATION_MODE_PLAN and "plan" in modes:
             return RoutingDecision("plan", SOURCE_COLLABORATION_MODE, 1.0, 1.0)
 
+        memory_status: Optional[MemoryStatus] = None
         if config.heuristic_enabled:
-            phase = detect_phase(request.activity, config.phase)
-            if phase is not None and phase in modes:
-                return RoutingDecision(phase, SOURCE_PHASE, 1.0, 1.0)
+            evidence = detect_phase_evidence(request.activity, config.phase)
+            remembered, memory_status = (None, None)
+            if evidence is not None and evidence.mode in modes:
+                return RoutingDecision(
+                    evidence.mode, SOURCE_PHASE, 1.0, 1.0,
+                    reason=evidence.reason, evidence=evidence,
+                    memory=MemoryStatus("not consulted", "fresh evidence")
+                    if self._memory is not None else None,
+                )
+            remembered, memory_status = self._remembered(request, modes)
+            if remembered is not None:
+                return RoutingDecision(
+                    remembered, SOURCE_MEMORY, 1.0, 1.0,
+                    reason="carried phase", memory=memory_status,
+                )
             decision = self._heuristic_mode(request.intent_text, modes)
             if decision is not None:
-                return decision
+                return replace(decision, memory=memory_status)
 
         routed = (
             semantic.route(request)
@@ -275,8 +331,10 @@ class CodexModeClassifier:
         )
         if mode is not None:
             return RoutingDecision(
-                mode.name, SOURCE_SEMANTIC, similarity, similarity
+                mode.name, SOURCE_SEMANTIC, similarity, similarity,
+                memory=memory_status,
             )
+        semantic_outcome = self._semantic_outcome(semantic, routed, similarity)
 
         fallback_similarity = 0.0
         if semantic is not None:
@@ -288,7 +346,76 @@ class CodexModeClassifier:
             SOURCE_FALLBACK,
             0.0,
             fallback_similarity,
+            reason="no layer answered",
+            memory=memory_status,
+            semantic=semantic_outcome,
         )
+
+    def _remembered(
+        self, request: CodexRequest, modes: Dict[str, Any]
+    ) -> Tuple[Optional[str], Optional[MemoryStatus]]:
+        """
+        Return the phase the session memory still vouches for, if any.
+
+        The memory only carries a phase inside the same command generation: a
+        new user instruction resets what the agent was doing, and a request
+        without enough identifiers to know which generation it belongs to gets
+        nothing rather than a guess.
+
+        Parameters
+        ----------
+        request : CodexRequest
+            The request being routed.
+        modes : Dict[str, Any]
+            Configured modes by name; an unknown remembered mode is ignored.
+
+        Returns
+        -------
+        Tuple[Optional[str], Optional[MemoryStatus]]
+            The carried mode and what the store reported, the status being
+            ``None`` when a disabled memory was never consulted at all.
+        """
+        store = self._memory
+        if store is None:
+            return None, None
+        key = session_key(
+            self._config.memory.key_prefix,
+            request.session_id,
+            request.thread_id,
+            request.agent_name,
+        )
+        if key is None or not request.turn_id:
+            return None, MemoryStatus("miss", "no session identity")
+        stored, status = store.read(key)
+        carried = merge_state(stored, request.turn_id, stored is not None)
+        if carried is None or carried.mode not in modes:
+            return None, status
+        return carried.mode, status
+
+    @staticmethod
+    def _semantic_outcome(
+        semantic: Optional[CodexSemanticLayer],
+        routed: Any,
+        similarity: float,
+    ) -> str:
+        """
+        Name the reason the semantic layer did not decide, without a probability.
+
+        Distinguishing "off", "broken" and "genuinely ambiguous" is the point:
+        an outage and an unclear ranking call for different fixes, and neither
+        is a statement about how likely the fallback is to be right.
+        """
+        if semantic is None:
+            return "disabled"
+        if not semantic.available:
+            return "unavailable"
+        if not routed:
+            return "unavailable"
+        if similarity <= 0:
+            return "no ranking"
+        if similarity < semantic.threshold:
+            return "below threshold"
+        return "ambiguous"
 
     @staticmethod
     def _explicit_mode(

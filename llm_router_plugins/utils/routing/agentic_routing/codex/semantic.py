@@ -32,6 +32,9 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
 )
 
 from llm_router_plugins.utils.routing.agentic_routing.codex.config import CodexMode
+from llm_router_plugins.utils.routing.agentic_routing.codex.phase import (
+    describe_activity,
+)
 
 __all__ = ["CodexSemanticLayer"]
 
@@ -77,6 +80,7 @@ class CodexSemanticLayer:
         min_margin: float,
         intent_max_chars: int,
         phase_max_chars: int,
+        phase_rules: Optional[Any] = None,
     ) -> None:
         """
         Store the router, acceptance threshold and mode lookup table.
@@ -107,10 +111,23 @@ class CodexSemanticLayer:
         self._min_margin = min_margin
         self._intent_max_chars = intent_max_chars
         self._phase_max_chars = phase_max_chars
+        self._phase_rules = phase_rules
         self._semantic_modes = {
             name for name in mode_by_name
             if name not in (REQUEST_CLASS_AUX_TITLE, REQUEST_CLASS_COMPACTION)
         }
+
+    @property
+    def threshold(self) -> float:
+        """
+        Return the cosine similarity a semantic match must reach.
+
+        Returns
+        -------
+        float
+            The configured acceptance threshold.
+        """
+        return self._threshold
 
     @property
     def available(self) -> bool:
@@ -164,7 +181,8 @@ class CodexSemanticLayer:
 
         try:
             parts = self._build_semantic_parts(
-                request, self._intent_max_chars, self._phase_max_chars
+                request, self._intent_max_chars, self._phase_max_chars,
+                phase_rules=self._phase_rules,
             )
         except Exception as exc:  # never let context building break routing
             self._warn("CodexRouting: context building failed, ignoring it: %s", exc)
@@ -351,7 +369,7 @@ class CodexSemanticLayer:
     @staticmethod
     def _build_semantic_parts(
         request: CodexRequest, intent_max_chars: int, phase_max_chars: int,
-        last_agent_messages: int = 1,
+        last_agent_messages: int = 1, phase_rules: Optional[Any] = None,
     ) -> Tuple[str, ...]:
         """
         Assemble the text embedded for the semantic lookup.
@@ -387,24 +405,19 @@ class CodexSemanticLayer:
         phase_parts = (
             utterances[-last_agent_messages:] if last_agent_messages > 0 else []
         )
-        tool_events = [
-            event for event in request.activity
-            if event.kind in ("function_call", "function_call_output") and event.name
-        ]
-        if tool_events:
-            latest = tool_events[-1]
-            call = next(
-                (event for event in reversed(tool_events)
-                 if event.kind == "function_call" and event.call_id == latest.call_id),
-                None,
-            )
-            if call is not None:
-                phase_parts.append(call.name + "\n" + call.text)
-                if latest.kind == "function_call_output":
-                    phase_parts.append(latest.text)
+        # The action, described structurally.  A raw tool output is the content
+        # of whatever the agent read and would let that topic stand in for the
+        # work itself, so only the shape of the action is embedded here.
+        action = describe_activity(request.activity, phase_rules)
+        if action:
+            phase_parts.append(action)
 
         intent = request.intent_text.strip()[:intent_max_chars]
         phase_parts = [part for part in phase_parts if part.strip()]
+        if phase_parts and phase_max_chars > 0:
+            phase_parts = [
+                part[:phase_max_chars // len(phase_parts)] for part in phase_parts
+            ]
         if phase_parts:
             part_budget = max(
                 1, (phase_max_chars - len(phase_parts) + 1) // len(phase_parts)

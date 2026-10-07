@@ -104,12 +104,32 @@ _FOLLOW_UP_RE = re.compile(
 
 @dataclass(frozen=True)
 class CodexActivity:
-    """One assistant utterance or tool event in the active user turn."""
+    """
+    One assistant utterance or tool event in the active user turn.
+
+    Parameters
+    ----------
+    kind : str
+        ``assistant``, ``function_call`` or ``function_call_output``.
+    text : str
+        The utterance, the raw call arguments, or the tool output.
+    name : str
+        Tool name for a call; the name of the calling tool for an output, when
+        a call with that ``call_id`` was seen in this turn.
+    call_id : str
+        Identifier linking a call to its output.
+    event_id : str
+        Identifier of the ``input`` item itself (``id``), when the payload
+        carried one.  It survives retries of a *different* call, so it is what
+        lets a session remember that this exact event was already accounted for
+        while the same conversation history is replayed.
+    """
 
     kind: str
     text: str
     name: str = ""
     call_id: str = ""
+    event_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -304,7 +324,8 @@ class CodexPayloadParser:
             or self._text(turn_metadata.get("root_turn_id")),
             window_id=self._text(client_metadata.get("x-codex-window-id"))
             or self._text(turn_metadata.get("window_id")),
-            agent_name=self._text(turn_metadata.get("agent_name")),
+            agent_name=self._text(client_metadata.get("agent_name"))
+            or self._text(turn_metadata.get("agent_name")),
             thread_source=thread_source,
             sandbox_mode=self._text(turn_metadata.get("sandbox_mode")),
             request_kind=request_kind,
@@ -644,11 +665,12 @@ class CodexPayloadParser:
             if not isinstance(item, dict):
                 continue
             kind = item.get("type")
+            event_id = self._text(item.get("id"))
             if kind == "message" and item.get("role") == "assistant":
                 messages = self._assistant_messages([item]) or []
                 for message in messages:
                     text = "\n".join(part["text"] for part in message["content"])
-                    events.append(CodexActivity("assistant", text))
+                    events.append(CodexActivity("assistant", text, event_id=event_id))
             elif kind in ("function_call", "custom_tool_call"):
                 name = self._text(item.get("name"))
                 call_id = self._text(item.get("call_id"))
@@ -659,7 +681,10 @@ class CodexPayloadParser:
                     else item.get("arguments")
                 )
                 events.append(
-                    CodexActivity("function_call", self._text(arguments), name, call_id)
+                    CodexActivity(
+                        "function_call", self._text(arguments), name, call_id,
+                        event_id,
+                    )
                 )
             elif kind in ("function_call_output", "custom_tool_call_output"):
                 call_id = self._text(item.get("call_id"))
@@ -668,7 +693,8 @@ class CodexPayloadParser:
                     text = text[:self._max_chars]
                 events.append(
                     CodexActivity(
-                        "function_call_output", text, calls.get(call_id, ""), call_id
+                        "function_call_output", text, calls.get(call_id, ""), call_id,
+                        event_id,
                     )
                 )
         return tuple(events)

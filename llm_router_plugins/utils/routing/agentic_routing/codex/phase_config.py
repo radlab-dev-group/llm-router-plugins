@@ -5,6 +5,12 @@ from dataclasses import dataclass
 from typing import Optional, Pattern, Tuple
 
 
+#: Phase fields a configuration may omit.  Each has a safe default that keeps
+#: the behaviour of the version that predates it, so an older config file keeps
+#: working untouched; nothing is merged in from the shipped default file.
+OPTIONAL_FIELDS = frozenset({"neutral_filters", "announcement_followup_max_chars"})
+
+
 @dataclass(frozen=True)
 class PhaseCommandRule:
     executable: Pattern[str]
@@ -27,6 +33,19 @@ class CodexPhaseConfig:
     test_mode: str
     implement_mode: str
     failure_mode: str
+    neutral_filters: Tuple[Pattern[str], ...] = ()
+    announcement_followup_max_chars: int = 0
+
+    @classmethod
+    @staticmethod
+    def _followup_budget(value):
+        """A non-negative cap on the prose that may follow an announcement."""
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(
+                "settings.phase.announcement_followup_max_chars must be a "
+                "non-negative integer"
+            )
+        return value
 
     @classmethod
     def from_raw(cls, raw, mode_names=None):
@@ -37,7 +56,7 @@ class CodexPhaseConfig:
         unknown = raw.keys() - fields
         if unknown:
             raise ValueError(f"Unknown settings.phase fields: {sorted(unknown)}")
-        missing = fields - raw.keys()
+        missing = fields - raw.keys() - OPTIONAL_FIELDS
         if missing:
             raise ValueError(f"Missing settings.phase fields: {sorted(missing)}")
         data = raw
@@ -115,6 +134,15 @@ class CodexPhaseConfig:
             test_mode=mode(data["test_mode"], "test_mode"),
             implement_mode=mode(data["implement_mode"], "implement_mode"),
             failure_mode=mode(data["failure_mode"], "failure_mode"),
+            neutral_filters=tuple(
+                pattern(value, "neutral_filters")
+                for value in strings(
+                    data.get("neutral_filters", []), "neutral_filters"
+                )
+            ),
+            announcement_followup_max_chars=cls._followup_budget(
+                data.get("announcement_followup_max_chars", 0)
+            ),
         )
         if mode_names is not None:
             references = set()

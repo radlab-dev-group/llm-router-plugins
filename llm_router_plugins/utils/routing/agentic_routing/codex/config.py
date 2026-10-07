@@ -55,6 +55,11 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
 from llm_router_plugins.utils.routing.agentic_routing.codex.phase_config import (
     CodexPhaseConfig,
 )
+from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
+    CodexMemoryConfig,
+    memory_config_from_raw,
+    validate_connection,
+)
 from llm_router_plugins.utils.routing.constants import AGENTIC_CODEX_ROUTING_PREFIX
 from llm_router_plugins.utils.routing.common import (
     RoutingConfigBase,
@@ -162,6 +167,7 @@ class CodexRoutingConfig(RoutingConfigBase):
     semantic_intent_max_chars: int
     semantic_phase_max_chars: int
     classify_max_chars: int = DEFAULT_CLASSIFY_MAX_CHARS
+    memory: CodexMemoryConfig = field(default_factory=CodexMemoryConfig)
 
     @property
     def mode_names(self) -> List[str]:
@@ -284,6 +290,9 @@ class CodexRoutingConfig(RoutingConfigBase):
             ),
             phase=CodexPhaseConfig.from_raw(
                 settings["phase"], mode_names=[mode.name for mode in codex_modes]
+            ),
+            memory=memory_config_from_raw(
+                settings.get("memory"), AGENTIC_CODEX_ROUTING_PREFIX
             ),
             heuristic_min_margin=float(settings["heuristic_min_margin"]),
             heuristic_negation_pattern=settings["heuristic_negation_pattern"],
@@ -619,6 +628,17 @@ class CodexRoutingConfig(RoutingConfigBase):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"CodexRouting: {name} must be a positive integer")
+
+        if self.memory.enabled:
+            validate_connection(self.memory.connection)
+            if (
+                self.memory.backend == "redis"
+                and not self.memory.connection.configured
+            ):
+                raise ValueError(
+                    "CodexRouting: memory is enabled with the redis backend but "
+                    f"{AGENTIC_CODEX_ROUTING_PREFIX}REDIS_HOST is not set"
+                )
 
         for name in ("heuristic_min_score", "heuristic_min_margin"):
             value = getattr(self, name)

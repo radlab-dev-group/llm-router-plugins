@@ -35,12 +35,13 @@ Example
 
 import logging
 
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from llm_router_plugins.plugin_interface import PluginInterface
 from llm_router_plugins.utils.routing.agentic_routing.codex.classifier import (
     CLASS_ROUTED_MODES,
     CodexModeClassifier,
+    RoutingDecision,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.config import (
     CodexRoutingConfig,
@@ -50,6 +51,11 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.semantic import (
     CodexSemanticLayer,
+)
+from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
+    RoutingStateStore,
+    build_state_store,
+    remember_decision,
 )
 from llm_router_plugins.utils.routing.common import (
     annotate_routing,
@@ -85,6 +91,7 @@ class CodexRoutingPlugin(PluginInterface):
         config: Optional[CodexRoutingConfig] = None,
         emb_router: Optional[Any] = None,
         semantic: Optional[CodexSemanticLayer] = None,
+        memory: Optional[RoutingStateStore] = None,
     ) -> None:
         """
         Initialize the plugin, loading and validating configuration.
@@ -109,6 +116,10 @@ class CodexRoutingPlugin(PluginInterface):
             routers are used as-is and are never re-initialized.
         semantic : CodexSemanticLayer, optional
             Pre-built semantic layer.  Takes precedence over *emb_router*.
+        memory : RoutingStateStore, optional
+            Pre-built session memory.  When omitted and the configuration
+            enables one, the store named by the policy is built here.  A memory
+            that cannot be built is reported once and routing stays stateless.
 
         Raises
         ------
@@ -146,10 +157,17 @@ class CodexRoutingPlugin(PluginInterface):
                     min_margin=self._config.semantic_min_margin,
                     intent_max_chars=self._config.semantic_intent_max_chars,
                     phase_max_chars=self._config.semantic_phase_max_chars,
+                    phase_rules=self._config.phase,
                 )
 
+        self._memory: Optional[RoutingStateStore] = memory
+        if memory is None:
+            self._memory, _ = build_state_store(
+                self._config.memory, logger=self._logger
+            )
+
         self._classifier = CodexModeClassifier(
-            config=self._config, semantic=self._semantic
+            config=self._config, semantic=self._semantic, memory=self._memory
         )
 
     def apply(
@@ -212,13 +230,19 @@ class CodexRoutingPlugin(PluginInterface):
             )
             return payload
 
+        self._remember(request, decision)
+
         self._info(
-            "Codex routing: mode=%s source=%s model=%s similarity=%.3f class=%s",
+            "Codex routing: mode=%s source=%s model=%s similarity=%.3f "
+            "class=%s reason=%s memory=%s semantic=%s",
             mode.name,
             decision.source,
             mode.model_name,
             decision.similarity,
             request.request_class,
+            decision.reason or "-",
+            decision.memory.state if decision.memory else "-",
+            decision.semantic or "-",
         )
         annotated = annotate_routing(
             payload,
@@ -232,9 +256,63 @@ class CodexRoutingPlugin(PluginInterface):
             request_kind=request.request_kind,
             thread_id=request.thread_id,
             turn_id=request.turn_id,
+            **self._diagnostics(decision),
         )
         annotated["agent_mode"] = mode.name
         return annotated
+
+    @staticmethod
+    def _diagnostics(decision: RoutingDecision) -> Dict[str, str]:
+        """
+        Return the annotation fields that say something about this decision.
+
+        Only a layer that was actually reached, or a reason that is not the
+        plain default, is reported — so a request decided by the collaboration
+        block annotates exactly what it always did, and the fields appear when
+        there is a cause worth reading about.
+
+        Parameters
+        ----------
+        decision : RoutingDecision
+            The decision just taken.
+
+        Returns
+        -------
+        Dict[str, str]
+            Zero or more of ``reason``, ``memory`` and ``semantic``.
+        """
+        fields: Dict[str, str] = {}
+        if decision.reason:
+            fields["reason"] = decision.reason
+        if decision.memory is not None:
+            fields["memory"] = decision.memory.state
+        if decision.semantic:
+            fields["semantic"] = decision.semantic
+        return fields
+
+    def _remember(self, request: Any, decision: RoutingDecision) -> None:
+        """
+        Carry a reliable phase into the next request of the same command.
+
+        Delegates to :func:`~codex.state.remember_decision`; kept as a method so
+        the plugin's own retry logging stays with the plugin.
+
+        Parameters
+        ----------
+        request : Any
+            The parsed request providing the identity of the session.
+        decision : RoutingDecision
+            The decision just taken.
+
+        Returns
+        -------
+        None
+        """
+        outcome = remember_decision(
+            self._memory, self._config.memory, request, decision
+        )
+        if outcome == "conflict":
+            self._info("Codex routing memory not written: version conflict")
 
     def _build_router(self) -> Any:
         """
