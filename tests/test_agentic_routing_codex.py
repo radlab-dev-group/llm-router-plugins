@@ -136,6 +136,44 @@ def _decide(request, payload=None, config=None):
     return classifier.classify(payload if payload is not None else {}, request)
 
 
+def test_phase_is_independent_of_keyword_heuristics():
+    config = dataclasses.replace(_config(), heuristic_enabled=False)
+    payload = main_payload()
+    payload["input"].append({
+        "type": "function_call", "name": "exec_command", "call_id": "tests",
+        "arguments": json.dumps({"cmd": "pytest -q"}),
+    })
+    assert _decide(_parse(payload), payload, config).mode == "test"
+
+
+def test_parser_preserves_incremental_tool_events_without_user_message():
+    payload = main_payload()
+    payload["input"] = [{
+        "type": "function_call_output", "call_id": "tests", "id": "result",
+        "output": "Process exited with code 1\nOutput:\nfailure",
+    }]
+    request = _parse(payload)
+    assert request.latest_user_text == ""
+    assert len(request.activity) == 1
+    assert request.activity[0].call_id == "tests"
+    assert request.activity[0].event_id == "result"
+    assert request.activity[0].name == ""
+
+
+def test_long_structured_test_output_keeps_execution_status():
+    payload = main_payload()
+    payload["input"].extend([
+        {"type": "function_call", "name": "exec_command", "call_id": "tests",
+         "arguments": '{"cmd":"pytest"}'},
+        {"type": "function_call_output", "call_id": "tests",
+         "output": json.dumps({"output": "x" * 10000, "exit_code": 1})},
+    ])
+    request = _parse(payload)
+    assert len(request.activity[-1].text) <= request.classify_max_chars
+    decision = _decide(request, payload)
+    assert (decision.mode, decision.source) == ("debug", SOURCE_PHASE)
+
+
 def _rebuild(config, **changes):
     """Return *config* with a rebuilt ``codex_modes`` tuple."""
     return dataclasses.replace(config, **changes)
@@ -295,6 +333,9 @@ def compaction_payload(collaboration=DEFAULT_BLOCK):
 
 
 def _plugin(config=None, emb_router=None):
+    config = config if config is not None else _config()
+    if emb_router is None:
+        config = dataclasses.replace(config, semantic_enabled=False)
     return CodexRoutingPlugin(logger=None, config=config, emb_router=emb_router)
 
 
@@ -1081,7 +1122,10 @@ class TestPassthrough:
             plugin_module, "CodexModeClassifier", ExplodingClassifier
         )
 
-        result = CodexRoutingPlugin(logger=RecordingLogger()).apply(main_payload())
+        config = dataclasses.replace(_config(), semantic_enabled=False)
+        result = CodexRoutingPlugin(
+            logger=RecordingLogger(), config=config,
+        ).apply(main_payload())
 
         assert "routing" not in result
         assert any("Codex routing failed" in entry for entry in logged)
@@ -1542,6 +1586,11 @@ class TestActiveWorkPhase:
         payload["input"].append(self._call("exec_command", '{"cmd":"pytest"}'))
         config = _rebuild(_config(), heuristic_enabled=False)
 
+        decision = _decide(_parse(payload), payload, config=config)
+        assert (decision.mode, decision.source) == ("test", SOURCE_PHASE)
+        config = dataclasses.replace(
+            config, phase=dataclasses.replace(config.phase, enabled=False),
+        )
         assert _decide(_parse(payload), payload, config=config).source == SOURCE_FALLBACK
 
     def test_phase_routing_changes_only_routing_keys_end_to_end(self):
@@ -2849,13 +2898,14 @@ class TestSemanticSimilarity:
             "similarity": 0.81,
             "agent_mode": "debug",
             "source": SOURCE_SEMANTIC,
+            "semantic": "accepted",
             "codex_class": REQUEST_CLASS_MAIN,
             "collaboration_mode": COLLABORATION_MODE_DEFAULT,
             "request_kind": "turn",
             "thread_id": "thread-1",
             "turn_id": "turn-7",
         }
-        assert set(result["routing"]) == _ROUTING_KEYS
+        assert set(result["routing"]) == _ROUTING_KEYS | {"semantic"}
 
     def test_injected_layer_takes_precedence_over_the_router_argument(self):
         strong, weak = _StubRouter("debug", 0.81), _StubRouter("review", 0.99)
@@ -2937,3 +2987,6 @@ class TestSemanticSimilarity:
         assert plugin.apply(main_payload("napraw testy"))["routing"][
             "similarity"
         ] == pytest.approx(3.0 / 4.0)
+        assert plugin.apply(main_payload("Dodaj pole"))["routing"][
+            "semantic"
+        ] == "unavailable"

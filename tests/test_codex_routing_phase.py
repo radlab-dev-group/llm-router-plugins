@@ -8,6 +8,7 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.phase import (
     collect_phase_evidence,
     detect_phase,
     detect_phase_evidence,
+    describe_activity,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.phase_config import CodexPhaseConfig
 
@@ -46,6 +47,34 @@ def patch(*paths):
         text += "*** Add File: " + path + "\n+content\n"
     text += "*** End Patch"
     return CodexActivity(kind="function_call", name="apply_patch", text=text)
+
+
+def test_late_test_failure_does_not_replace_newer_action(rules):
+    activity = (
+        command("pytest -q"), patch("src/main.py"),
+        output("Process exited with code 1\nOutput:\nfailure"),
+    )
+    assert detect_phase(activity, rules) == "implement"
+    assert collect_phase_evidence(activity, rules)[0].succeeded is False
+
+
+def test_duplicate_test_output_does_not_replace_newer_action(rules):
+    failed = output("Process exited with code 1\nOutput:\nfailure")
+    activity = (command("pytest -q"), failed, patch("src/main.py"), failed)
+    assert detect_phase(activity, rules) == "implement"
+
+
+def test_unknown_execution_status_is_not_described_as_failure(rules):
+    activity = (command("pytest"), output("Waiting for execution to finish"))
+    assert describe_activity(activity, rules) == "ran pytest"
+
+
+def test_intermediate_output_does_not_hide_final_failure(rules):
+    activity = (
+        command("pytest"), output("Waiting for execution to finish"),
+        output("Process exited with code 1\nOutput:\nfailure"),
+    )
+    assert detect_phase(activity, rules) == "debug"
 
 
 @pytest.mark.parametrize("text, expected", [
