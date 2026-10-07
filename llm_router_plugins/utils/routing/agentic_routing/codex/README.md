@@ -581,6 +581,11 @@ schema version or a value written by another format is dropped and treated as a 
 default to one second so a dead Redis costs at most that, not a stalled request. Restarting a worker keeps the state;
 restarting Redis without persistence loses it, which costs only the carried phase.
 
+When Redis memory is enabled, plugin construction checks the connection with `PING`, using the configured
+connection and socket timeouts. If the check fails, it logs `Codex routing memory disabled: …` at `WARNING`
+(also when no logger was supplied) and routing stays stateless until the plugin is recreated. Disabled memory
+and the in-memory backend do not connect to Redis.
+
 **Isolation.** `MEMORY_KEY_PREFIX` is the plugin's own space. To reset it: `redis-cli --scan --pattern '<prefix>*' | xargs redis-cli del` —
 with the prefix you chose, and only that one.
 
