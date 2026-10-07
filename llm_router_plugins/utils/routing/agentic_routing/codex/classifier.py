@@ -303,7 +303,7 @@ class CodexModeClassifier:
         memory_status: Optional[MemoryStatus] = None
         if config.heuristic_enabled:
             evidence = detect_phase_evidence(request.activity, config.phase)
-            remembered, memory_status = (None, None)
+            # remembered, memory_status = (None, None)
             if evidence is not None and evidence.mode in modes:
                 return RoutingDecision(
                     evidence.mode, SOURCE_PHASE, 1.0, 1.0,
