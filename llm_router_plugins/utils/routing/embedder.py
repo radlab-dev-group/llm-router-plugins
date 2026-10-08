@@ -139,7 +139,8 @@ class EmbeddingRouter:
         """
         self._config = config
         if getattr(config, "aggregation", "global_top_k") not in (
-            "global_top_k", "per_target_top_k",
+            "global_top_k",
+            "per_target_top_k",
         ):
             raise ValueError("Unknown embedding score aggregation")
         self._logger = logger
@@ -249,14 +250,19 @@ class EmbeddingRouter:
     def _route_embedding(self, user_embedding: np.ndarray) -> Dict[str, Any]:
         """Aggregate a query's similarities using the configured strategy."""
         assert self._faiss_index is not None
-        balanced = getattr(self._config, "aggregation", "global_top_k") == "per_target_top_k"
+        balanced = (
+            getattr(self._config, "aggregation", "global_top_k")
+            == "per_target_top_k"
+        )
         target_models: Dict[str, str] = {
             t.name: t.model_name for t in self._config.routing_targets
         }
 
         # FAISS query
-        k = self._faiss_index.ntotal if balanced else min(
-            self._config.top_k, self._faiss_index.ntotal
+        k = (
+            self._faiss_index.ntotal
+            if balanced
+            else min(self._config.top_k, self._faiss_index.ntotal)
         )
         if k < 1:
             raise ValueError("Routing index contains no vectors")
@@ -278,7 +284,9 @@ class EmbeddingRouter:
 
         if balanced:
             if not target_models or set(target_scores) != set(target_models):
-                raise ValueError("Routing index is missing configured targets; rebuild it")
+                raise ValueError(
+                    "Routing index is missing configured targets; rebuild it"
+                )
             per_target_k = min(
                 self._config.top_k, min(len(sims) for sims in target_scores.values())
             )

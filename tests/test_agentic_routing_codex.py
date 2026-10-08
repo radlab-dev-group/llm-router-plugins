@@ -87,6 +87,7 @@ _ROUTING_KEYS = {
     "turn_id",
 }
 
+
 @pytest.fixture(autouse=True)
 def clean_codex_env(monkeypatch):
     """Clear every Codex routing env var so tests never leak into each other."""
@@ -134,6 +135,61 @@ def _decide(request, payload=None, config=None):
     """Run the classifier cascade for an already parsed request."""
     classifier = CodexModeClassifier(config if config is not None else _config())
     return classifier.classify(payload if payload is not None else {}, request)
+
+
+def test_phase_is_independent_of_keyword_heuristics():
+    config = dataclasses.replace(_config(), heuristic_enabled=False)
+    payload = main_payload()
+    payload["input"].append(
+        {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "tests",
+            "arguments": json.dumps({"cmd": "pytest -q"}),
+        }
+    )
+    assert _decide(_parse(payload), payload, config).mode == "test"
+
+
+def test_parser_preserves_incremental_tool_events_without_user_message():
+    payload = main_payload()
+    payload["input"] = [
+        {
+            "type": "function_call_output",
+            "call_id": "tests",
+            "id": "result",
+            "output": "Process exited with code 1\nOutput:\nfailure",
+        }
+    ]
+    request = _parse(payload)
+    assert request.latest_user_text == ""
+    assert len(request.activity) == 1
+    assert request.activity[0].call_id == "tests"
+    assert request.activity[0].event_id == "result"
+    assert request.activity[0].name == ""
+
+
+def test_long_structured_test_output_keeps_execution_status():
+    payload = main_payload()
+    payload["input"].extend(
+        [
+            {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "tests",
+                "arguments": '{"cmd":"pytest"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "tests",
+                "output": json.dumps({"output": "x" * 10000, "exit_code": 1}),
+            },
+        ]
+    )
+    request = _parse(payload)
+    assert len(request.activity[-1].text) <= request.classify_max_chars
+    decision = _decide(request, payload)
+    assert (decision.mode, decision.source) == ("debug", SOURCE_PHASE)
 
 
 def _rebuild(config, **changes):
@@ -295,6 +351,9 @@ def compaction_payload(collaboration=DEFAULT_BLOCK):
 
 
 def _plugin(config=None, emb_router=None):
+    config = config if config is not None else _config()
+    if emb_router is None:
+        config = dataclasses.replace(config, semantic_enabled=False)
     return CodexRoutingPlugin(logger=None, config=config, emb_router=emb_router)
 
 
@@ -550,7 +609,10 @@ class TestHeuristicClassification:
             ("przejrzyj ten branch", SOURCE_SEMANTIC),
             ("przejrzyj zmiany na gałęzi", SOURCE_SEMANTIC),
             ("compare branches and summarize the changes", SOURCE_HEURISTIC),
-            ("Zobacz na commity na tym branczu, podsumuj co tam jest.", SOURCE_HEURISTIC),
+            (
+                "Zobacz na commity na tym branczu, podsumuj co tam jest.",
+                SOURCE_HEURISTIC,
+            ),
         ],
     )
     def test_git_review_prompts_select_git_review(self, text, expected_source):
@@ -737,35 +799,51 @@ class TestHeuristicClassification:
         assert decision.mode == "implement"
         assert decision.source == SOURCE_FALLBACK
 
-    @pytest.mark.parametrize("margin,expected_source", [(1.0, SOURCE_FALLBACK),
-                                                        (0.5, SOURCE_HEURISTIC)])
-    def test_minimum_margin_is_configurable_and_inclusive(self, margin, expected_source):
+    @pytest.mark.parametrize(
+        "margin,expected_source", [(1.0, SOURCE_FALLBACK), (0.5, SOURCE_HEURISTIC)]
+    )
+    def test_minimum_margin_is_configurable_and_inclusive(
+        self, margin, expected_source
+    ):
         config = _rebuild(
-            _config(), heuristic_min_margin=margin,
-            codex_modes=(_mode("implement"),
-                         _mode("test", keywords=("alpha",), weights={"alpha": 3.5}),
-                         _mode("review", keywords=("beta",), weights={"beta": 3})),
+            _config(),
+            heuristic_min_margin=margin,
+            codex_modes=(
+                _mode("implement"),
+                _mode("test", keywords=("alpha",), weights={"alpha": 3.5}),
+                _mode("review", keywords=("beta",), weights={"beta": 3}),
+            ),
         )
-        decision = _decide(CodexRequest(latest_user_text="alpha beta"), config=config)
+        decision = _decide(
+            CodexRequest(latest_user_text="alpha beta"), config=config
+        )
 
         assert decision.source == expected_source
-        assert decision.mode == ("test" if expected_source == SOURCE_HEURISTIC else "implement")
+        assert decision.mode == (
+            "test" if expected_source == SOURCE_HEURISTIC else "implement"
+        )
 
     def test_zero_margin_does_not_accept_a_tie(self):
         config = _rebuild(
-            _config(), heuristic_min_margin=0,
-            codex_modes=(_mode("implement"), _mode("test", phrases=("alpha:3",)),
-                         _mode("review", phrases=("beta:3",))),
+            _config(),
+            heuristic_min_margin=0,
+            codex_modes=(
+                _mode("implement"),
+                _mode("test", phrases=("alpha:3",)),
+                _mode("review", phrases=("beta:3",)),
+            ),
         )
 
-        decision = _decide(CodexRequest(latest_user_text="alpha beta"), config=config)
+        decision = _decide(
+            CodexRequest(latest_user_text="alpha beta"), config=config
+        )
 
         assert (decision.mode, decision.source) == ("implement", SOURCE_FALLBACK)
 
     def test_single_candidate_compares_against_zero(self):
         config = _rebuild(
-            _config(), codex_modes=(_mode("implement"),
-                                   _mode("test", phrases=("alpha:3",))),
+            _config(),
+            codex_modes=(_mode("implement"), _mode("test", phrases=("alpha:3",))),
         )
 
         decision = _decide(CodexRequest(latest_user_text="alpha"), config=config)
@@ -1081,7 +1159,11 @@ class TestPassthrough:
             plugin_module, "CodexModeClassifier", ExplodingClassifier
         )
 
-        result = CodexRoutingPlugin(logger=RecordingLogger()).apply(main_payload())
+        config = dataclasses.replace(_config(), semantic_enabled=False)
+        result = CodexRoutingPlugin(
+            logger=RecordingLogger(),
+            config=config,
+        ).apply(main_payload())
 
         assert "routing" not in result
         assert any("Codex routing failed" in entry for entry in logged)
@@ -1103,7 +1185,9 @@ class TestScoring:
 
     def test_overlapping_signals_count_once(self):
         mode = _mode(
-            "test", keywords=("test", "testy"), phrases=("napisz testy:3",),
+            "test",
+            keywords=("test", "testy"),
+            phrases=("napisz testy:3",),
             patterns=(r"\btest\w*", r"\bnapisz\b.{0,30}\btesty\b"),
             weights={"testy": 3},
         )
@@ -1116,72 +1200,95 @@ class TestScoring:
 
         for modes in ([test, review], [review, test]):
             assert _scorer.detect_mode("write tests and review code", modes) == (
-                None, 3.0
+                None,
+                3.0,
             )
 
     def test_forbidden_test_run_is_not_testing_intent(self):
         mode = _config().mode_by_name["test"]
 
-        assert _scorer.score_mode(
-            mode, "nie uruchamiaj testów, popraw dokumentację"
-        ) == 0.0
+        assert (
+            _scorer.score_mode(mode, "nie uruchamiaj testów, popraw dokumentację")
+            == 0.0
+        )
 
     def test_forbidden_run_does_not_suppress_writing_tests(self):
         mode = _config().mode_by_name["test"]
 
-        assert _scorer.score_mode(
-            mode, "nie uruchamiaj testów i napisz testy"
-        ) == 3.0
+        assert (
+            _scorer.score_mode(mode, "nie uruchamiaj testów i napisz testy") == 3.0
+        )
 
-    @pytest.mark.parametrize("text", [
-        "nie uruchamiaj pytest, popraw dokumentację",
-        "do not run the tests; edit the README",
-        "don't write tests. Implement the handler",
-        "without running pytest, update docs",
-        "bez uruchamiania testów popraw dokumentację",
-    ])
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "nie uruchamiaj pytest, popraw dokumentację",
+            "do not run the tests; edit the README",
+            "don't write tests. Implement the handler",
+            "without running pytest, update docs",
+            "bez uruchamiania testów popraw dokumentację",
+        ],
+    )
     def test_local_forbidden_actions_are_not_positive_signals(self, text):
         assert _scorer.score_mode(_config().mode_by_name["test"], text) == 0.0
 
-    @pytest.mark.parametrize("text", [
-        "nie uruchamiaj testów, napisz testy",
-        "do not run tests but write unit tests",
-        "write unit tests and do not run them",
-        "without running tests; add tests",
-    ])
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "nie uruchamiaj testów, napisz testy",
+            "do not run tests but write unit tests",
+            "write unit tests and do not run them",
+            "without running tests; add tests",
+        ],
+    )
     def test_positive_testing_clause_survives_a_local_ban(self, text):
         assert _scorer.score_mode(_config().mode_by_name["test"], text) == 3.0
 
     def test_bug_negation_is_not_an_action_ban(self):
-        assert _scorer.score_mode(
-            _config().mode_by_name["debug"], "dlaczego nie działa"
-        ) == 3.0
+        assert (
+            _scorer.score_mode(
+                _config().mode_by_name["debug"], "dlaczego nie działa"
+            )
+            == 3.0
+        )
 
     def test_custom_negation_rule_and_empty_rule(self):
         mode = _mode("test", phrases=("run tests:3",))
 
-        assert CodexModeScorer(negation_pattern=r"ignore:.*", weights=_config().heuristic_weights).score_mode(
-            mode, "ignore: run tests"
-        ) == 0.0
-        assert CodexModeScorer(negation_pattern="", weights=_config().heuristic_weights).score_mode(
-            mode, "do not run tests"
-        ) == 3.0
+        assert (
+            CodexModeScorer(
+                negation_pattern=r"ignore:.*", weights=_config().heuristic_weights
+            ).score_mode(mode, "ignore: run tests")
+            == 0.0
+        )
+        assert (
+            CodexModeScorer(
+                negation_pattern="", weights=_config().heuristic_weights
+            ).score_mode(mode, "do not run tests")
+            == 3.0
+        )
 
     def test_repeated_signals_do_not_amplify_the_score(self):
-        mode = _mode("test", keywords=("test", "test"), phrases=("test:2",),
-                     patterns=(r"\btest\b", r"\btest\b"))
+        mode = _mode(
+            "test",
+            keywords=("test", "test"),
+            phrases=("test:2",),
+            patterns=(r"\btest\b", r"\btest\b"),
+        )
 
         assert _scorer.score_mode(mode, "test test test") == 3.0
 
     def test_ranking_includes_zero_scores_and_non_overlapping_evidence(self):
-        mode = _mode("test", keywords=("testy",),
-                     phrases=("napisz testy:3", "coverage:4"))
+        mode = _mode(
+            "test", keywords=("testy",), phrases=("napisz testy:3", "coverage:4")
+        )
         text = "napisz testy; coverage"
 
         ranking = _scorer.rank_modes(text, [_mode("review"), mode])
 
         assert [(item.mode.name, item.score) for item in ranking] == [
-            ("test", 7.0), ("review", 0.0)
+            ("test", 7.0),
+            ("review", 0.0),
         ]
         assert ranking[0].matches == (
             scoring_module.SignalMatch("literal:napisz testy", 0, 12, 3.0),
@@ -1294,32 +1401,50 @@ class TestScoring:
             if not needle:
                 continue
             for match in re.finditer(r"(?<!\w)" + re.escape(needle), text_lower):
-                candidates.append((
-                    _scorer._keyword_weight(keyword, weights, _config().heuristic_weights["keyword"]),
-                    match.start(), match.end(), "literal:" + needle,
-                ))
+                candidates.append(
+                    (
+                        _scorer._keyword_weight(
+                            keyword, weights, _config().heuristic_weights["keyword"]
+                        ),
+                        match.start(),
+                        match.end(),
+                        "literal:" + needle,
+                    )
+                )
         for phrase in mode.phrases:
             needle, weight = _scorer._signal_weight(phrase, 2.0)
             if needle:
                 for match in re.finditer(r"(?<!\w)" + re.escape(needle), text_lower):
-                    candidates.append((
-                        weight, match.start(), match.end(), "literal:" + needle,
-                    ))
+                    candidates.append(
+                        (
+                            weight,
+                            match.start(),
+                            match.end(),
+                            "literal:" + needle,
+                        )
+                    )
         for pattern in mode.patterns:
             try:
                 for match in re.finditer(pattern, text_lower):
                     if match.start() < match.end():
-                        candidates.append((
-                            _config().heuristic_weights["pattern"], match.start(), match.end(),
-                            "pattern:" + pattern,
-                        ))
+                        candidates.append(
+                            (
+                                _config().heuristic_weights["pattern"],
+                                match.start(),
+                                match.end(),
+                                "pattern:" + pattern,
+                            )
+                        )
             except re.error:
                 continue
         accepted = []
         used = set()
-        blocked = [match.span() for match in re.finditer(
-            _config().heuristic_negation_pattern, text_lower
-        )]
+        blocked = [
+            match.span()
+            for match in re.finditer(
+                _config().heuristic_negation_pattern, text_lower
+            )
+        ]
         first_matches = {}
         for weight, start, end, signal in candidates:
             if any(start < right and left < end for left, right in blocked):
@@ -1327,7 +1452,7 @@ class TestScoring:
             first_matches.setdefault((signal, weight), (weight, start, end, signal))
         for weight, start, end, signal in sorted(
             first_matches.values(),
-            key=lambda item: (-item[0], item[1] - item[2], item[1], item[3])
+            key=lambda item: (-item[0], item[1] - item[2], item[1], item[3]),
         ):
             if signal in used or weight <= 0:
                 continue
@@ -1409,7 +1534,8 @@ class TestScoring:
         mode = _mode("probe", keywords=("test",), patterns=("(", r"test\w*"))
 
         assert (
-            _scorer.score_mode(mode, "testy") == _config().heuristic_weights["pattern"]
+            _scorer.score_mode(mode, "testy")
+            == _config().heuristic_weights["pattern"]
         )
 
     def test_plans_are_cached_per_signal_signature(self):
@@ -1426,9 +1552,13 @@ class TestScoring:
     def test_plans_are_not_shared_between_scorers(self):
         mode = _mode("isolation", keywords=("alpha",))
 
-        assert CodexModeScorer(negation_pattern="", weights=_config().heuristic_weights)._mode_plan(
+        assert CodexModeScorer(
+            negation_pattern="", weights=_config().heuristic_weights
+        )._mode_plan(mode) is not CodexModeScorer(
+            negation_pattern="", weights=_config().heuristic_weights
+        )._mode_plan(
             mode
-        ) is not CodexModeScorer(negation_pattern="", weights=_config().heuristic_weights)._mode_plan(mode)
+        )
 
     def test_the_cascade_scores_through_the_injected_scorer(self):
         queried = []
@@ -1439,10 +1569,13 @@ class TestScoring:
                 return super().rank_modes(text, modes)
 
         config = _config()
-        classifier = CodexModeClassifier(config, scorer=SpyScorer(
-            negation_pattern=config.heuristic_negation_pattern,
-            weights=config.heuristic_weights,
-        ))
+        classifier = CodexModeClassifier(
+            config,
+            scorer=SpyScorer(
+                negation_pattern=config.heuristic_negation_pattern,
+                weights=config.heuristic_weights,
+            ),
+        )
 
         decision = classifier.classify({}, _parse(main_payload("napraw testy")))
 
@@ -1458,20 +1591,34 @@ class TestActiveWorkPhase:
 
     @staticmethod
     def _call(name, arguments):
-        return {"type": "function_call", "name": name, "call_id": "active",
-                "arguments": arguments}
+        return {
+            "type": "function_call",
+            "name": name,
+            "call_id": "active",
+            "arguments": arguments,
+        }
 
     @pytest.mark.parametrize(
         "task,name,arguments,expected",
         [
             ("Dodaj endpoint", "exec_command", '{"cmd":"pytest tests/"}', "test"),
-            ("Dodaj CHANGELOG dla commitów", "exec_command", '{"cmd":"git log main..HEAD"}', "git_review"),
-            ("Przejrzyj commity", "apply_patch",
-             '*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n+Added endpoint\n*** End Patch',
-             "implement"),
+            (
+                "Dodaj CHANGELOG dla commitów",
+                "exec_command",
+                '{"cmd":"git log main..HEAD"}',
+                "git_review",
+            ),
+            (
+                "Przejrzyj commity",
+                "apply_patch",
+                "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n+Added endpoint\n*** End Patch",
+                "implement",
+            ),
         ],
     )
-    def test_current_phase_precedes_user_heuristics(self, task, name, arguments, expected):
+    def test_current_phase_precedes_user_heuristics(
+        self, task, name, arguments, expected
+    ):
         payload = main_payload(task)
         payload["input"].append(self._call(name, arguments))
         router = _StubRouter()
@@ -1496,11 +1643,21 @@ class TestActiveWorkPhase:
 
     def test_custom_patch_call_is_normalized_and_changes_the_phase(self):
         payload = main_payload("Przejrzyj commity")
-        payload["input"].extend([
-            {"type": "custom_tool_call", "name": "apply_patch", "call_id": "patch",
-             "input": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n+Entry\n*** End Patch"},
-            {"type": "custom_tool_call_output", "call_id": "patch", "output": "Success"},
-        ])
+        payload["input"].extend(
+            [
+                {
+                    "type": "custom_tool_call",
+                    "name": "apply_patch",
+                    "call_id": "patch",
+                    "input": "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n+Entry\n*** End Patch",
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "patch",
+                    "output": "Success",
+                },
+            ]
+        )
         request = _parse(payload)
 
         assert request.activity[0].kind == "function_call"
@@ -1512,8 +1669,10 @@ class TestActiveWorkPhase:
     @pytest.mark.parametrize("override", ["explicit", "plan", "compaction", "title"])
     def test_structural_layers_keep_priority(self, override):
         payload = {
-            "explicit": main_payload(), "plan": plan_payload(),
-            "compaction": compaction_payload(), "title": title_payload(),
+            "explicit": main_payload(),
+            "plan": plan_payload(),
+            "compaction": compaction_payload(),
+            "title": title_payload(),
         }[override]
         if override == "explicit":
             payload["agent_mode"] = "review"
@@ -1533,7 +1692,9 @@ class TestActiveWorkPhase:
         payload = main_payload("Dodaj endpoint")
         payload["input"].append(self._call("exec_command", '{"cmd":"pytest"}'))
 
-        decision = _decide(_parse(payload), payload, config=_without_mode(_config(), "test"))
+        decision = _decide(
+            _parse(payload), payload, config=_without_mode(_config(), "test")
+        )
 
         assert decision.mode == "implement"
 
@@ -1542,14 +1703,25 @@ class TestActiveWorkPhase:
         payload["input"].append(self._call("exec_command", '{"cmd":"pytest"}'))
         config = _rebuild(_config(), heuristic_enabled=False)
 
-        assert _decide(_parse(payload), payload, config=config).source == SOURCE_FALLBACK
+        decision = _decide(_parse(payload), payload, config=config)
+        assert (decision.mode, decision.source) == ("test", SOURCE_PHASE)
+        config = dataclasses.replace(
+            config,
+            phase=dataclasses.replace(config.phase, enabled=False),
+        )
+        assert (
+            _decide(_parse(payload), payload, config=config).source
+            == SOURCE_FALLBACK
+        )
 
     def test_phase_routing_changes_only_routing_keys_end_to_end(self):
         payload = main_payload("Przejrzyj commity")
-        payload["input"].append(self._call(
-            "apply_patch",
-            "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n+Entry\n*** End Patch",
-        ))
+        payload["input"].append(
+            self._call(
+                "apply_patch",
+                "*** Begin Patch\n*** Update File: CHANGELOG.md\n@@\n+Entry\n*** End Patch",
+            )
+        )
         before = copy.deepcopy(payload)
         router = _StubRouter()
         plugin = CodexRoutingPlugin(config=_config(), emb_router=router)
@@ -1560,10 +1732,11 @@ class TestActiveWorkPhase:
         assert result["model"] == _expected_model("implement")
         assert result["routing"]["source"] == SOURCE_PHASE
         assert result["agent_mode"] == "implement"
-        assert {key: value for key, value in result.items()
-                if key not in ("model", "routing", "agent_mode")} == {
-            key: value for key, value in before.items() if key != "model"
-        }
+        assert {
+            key: value
+            for key, value in result.items()
+            if key not in ("model", "routing", "agent_mode")
+        } == {key: value for key, value in before.items() if key != "model"}
         assert router.calls == []
 
 
@@ -1603,7 +1776,9 @@ class TestClassifyTextBudget:
 
         assert _parse(payload, max_chars=10).user_history == ("X" * 10,)
 
-    @pytest.mark.parametrize("reply", ["tak, zrób to", "Yes, do it!", "kontynuuj", "ok"])
+    @pytest.mark.parametrize(
+        "reply", ["tak, zrób to", "Yes, do it!", "kontynuuj", "ok"]
+    )
     def test_short_confirmation_resolves_only_the_nearest_task(self, reply):
         payload = self._history("git diff", "Przygotuj testy jednostkowe", reply)
         request = _parse(payload)
@@ -1833,13 +2008,23 @@ class TestPayloadRobustness:
 
     def test_old_assistant_and_tools_are_excluded_after_a_new_command(self):
         payload = main_payload("Przygotuj testy")
-        payload["input"].extend([
-            _assistant("Teraz uruchomię pytest."),
-            {"type": "function_call", "name": "exec_command", "call_id": "old",
-             "arguments": '{"cmd":"pytest"}'},
-            _user("Popraw dokumentację"),
-            {"type": "function_call_output", "call_id": "old", "output": "Traceback"},
-        ])
+        payload["input"].extend(
+            [
+                _assistant("Teraz uruchomię pytest."),
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "old",
+                    "arguments": '{"cmd":"pytest"}',
+                },
+                _user("Popraw dokumentację"),
+                {
+                    "type": "function_call_output",
+                    "call_id": "old",
+                    "output": "Traceback",
+                },
+            ]
+        )
         request = _parse(payload)
 
         assert request.assistant_messages == []
@@ -1849,10 +2034,12 @@ class TestPayloadRobustness:
 
     def test_environment_only_message_does_not_reset_the_active_turn(self):
         payload = main_payload("Dodaj endpoint")
-        payload["input"].extend([
-            _assistant("Teraz uruchomię pytest."),
-            _user("<environment_context>cwd=/repo</environment_context>"),
-        ])
+        payload["input"].extend(
+            [
+                _assistant("Teraz uruchomię pytest."),
+                _user("<environment_context>cwd=/repo</environment_context>"),
+            ]
+        )
 
         assert len(_parse(payload).activity) == 1
 
@@ -1865,16 +2052,27 @@ class TestPayloadRobustness:
 
     def test_active_tool_outputs_are_linked_to_their_calls(self):
         payload = main_payload("Dodaj endpoint")
-        payload["input"].extend([
-            {"type": "function_call", "name": "exec_command", "call_id": "new",
-             "arguments": '{"cmd":"pytest"}'},
-            {"type": "function_call_output", "call_id": "new", "output": "passed"},
-        ])
+        payload["input"].extend(
+            [
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "new",
+                    "arguments": '{"cmd":"pytest"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "new",
+                    "output": "passed",
+                },
+            ]
+        )
         before = copy.deepcopy(payload)
         request = _parse(payload)
 
         assert tuple(event.kind for event in request.activity) == (
-            "function_call", "function_call_output"
+            "function_call",
+            "function_call_output",
         )
         assert request.activity[-1].name == "exec_command"
         assert request.activity[-1].call_id == "new"
@@ -1908,11 +2106,19 @@ class TestConfig:
         assert config.heuristic_enabled is True
         assert config.heuristic_min_score == 3.0
         assert config.heuristic_min_margin == 1.0
-        assert config.heuristic_negation_pattern == _raw_config()["settings"]["heuristic_negation_pattern"]
+        assert (
+            config.heuristic_negation_pattern
+            == _raw_config()["settings"]["heuristic_negation_pattern"]
+        )
 
-    @pytest.mark.parametrize("field", [
-        "heuristic_min_margin", "heuristic_negation_pattern", "heuristic_weights",
-    ])
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "heuristic_min_margin",
+            "heuristic_negation_pattern",
+            "heuristic_weights",
+        ],
+    )
     def test_missing_heuristic_settings_are_reported(self, field):
         raw = _raw_config()
         del raw["settings"][field]
@@ -1923,26 +2129,49 @@ class TestConfig:
     def test_custom_heuristic_weights_reach_classifier(self):
         raw = _raw_config()
         raw["settings"]["heuristic_weights"] = {
-            "keyword": 4.0, "phrase": 5.0, "pattern": 7.0,
+            "keyword": 4.0,
+            "phrase": 5.0,
+            "pattern": 7.0,
         }
         config = CodexRoutingConfig._from_raw(raw)
         config.validate_args()
         classifier = CodexModeClassifier(config)
-        mode = CodexMode(name="test", model_name="test-model", description="test",
-                         examples=(), patterns=(r"\bunique\b",))
+        mode = CodexMode(
+            name="test",
+            model_name="test-model",
+            description="test",
+            examples=(),
+            patterns=(r"\bunique\b",),
+        )
 
         assert config.heuristic_weights["keyword"] == 4.0
         assert classifier._scorer.score_mode(mode, "unique") == 7.0
-        assert classifier._scorer.score_mode(_mode("test", keywords=("unique",)), "unique") == 4.0
-        assert classifier._scorer.score_mode(_mode("test", phrases=("unique",)), "unique") == 5.0
+        assert (
+            classifier._scorer.score_mode(
+                _mode("test", keywords=("unique",)), "unique"
+            )
+            == 4.0
+        )
+        assert (
+            classifier._scorer.score_mode(
+                _mode("test", phrases=("unique",)), "unique"
+            )
+            == 5.0
+        )
 
-    @pytest.mark.parametrize("weights", [
-        None, [], {"unknown": 2}, {"pattern": 3},
-        {"keyword": -1, "phrase": 2, "pattern": 3},
-        {"keyword": 1, "phrase": float("nan"), "pattern": 3},
-        {"keyword": 1, "phrase": 2, "pattern": True},
-        {"keyword": 1, "phrase": 2, "pattern": "3"},
-    ])
+    @pytest.mark.parametrize(
+        "weights",
+        [
+            None,
+            [],
+            {"unknown": 2},
+            {"pattern": 3},
+            {"keyword": -1, "phrase": 2, "pattern": 3},
+            {"keyword": 1, "phrase": float("nan"), "pattern": 3},
+            {"keyword": 1, "phrase": 2, "pattern": True},
+            {"keyword": 1, "phrase": 2, "pattern": "3"},
+        ],
+    )
     def test_invalid_heuristic_weights_are_rejected(self, weights):
         raw = _raw_config()
         raw["settings"]["heuristic_weights"] = weights
@@ -1953,7 +2182,11 @@ class TestConfig:
     def test_custom_config_does_not_read_packaged_rules(self, monkeypatch):
         raw = _raw_config()
         raw["settings"]["heuristic_negation_pattern"] = r"ignored:.*"
-        monkeypatch.setattr(pathlib.Path, "open", lambda *args, **kwargs: pytest.fail("Unexpected file read"))
+        monkeypatch.setattr(
+            pathlib.Path,
+            "open",
+            lambda *args, **kwargs: pytest.fail("Unexpected file read"),
+        )
 
         config = CodexRoutingConfig._from_raw(raw)
         classifier = CodexModeClassifier(config)
@@ -1962,12 +2195,18 @@ class TestConfig:
         assert classifier._scorer.score_mode(mode, "ignored: run tests") == 0.0
         assert classifier._scorer.score_mode(mode, "do not run tests") == 3.0
 
-    @pytest.mark.parametrize("field,value", [
-        ("heuristic_min_score", -1), ("heuristic_min_score", float("nan")),
-        ("heuristic_min_margin", -1), ("heuristic_min_margin", float("inf")),
-        ("heuristic_min_margin", float("nan")),
-        ("heuristic_negation_pattern", None), ("heuristic_negation_pattern", "("),
-    ])
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("heuristic_min_score", -1),
+            ("heuristic_min_score", float("nan")),
+            ("heuristic_min_margin", -1),
+            ("heuristic_min_margin", float("inf")),
+            ("heuristic_min_margin", float("nan")),
+            ("heuristic_negation_pattern", None),
+            ("heuristic_negation_pattern", "("),
+        ],
+    )
     def test_invalid_heuristic_settings_are_rejected(self, field, value):
         config = _rebuild(_config(), **{field: value})
 
@@ -2051,8 +2290,8 @@ class TestConfig:
         config = _config()
 
         assert config.semantic_enabled is True
-        assert config.similarity_threshold == 0.51
-        assert config.top_k == 3
+        assert config.similarity_threshold == 0.44
+        assert config.top_k == 4
         assert config.chunk_size == 256
         assert config.chunk_overlap == 64
         assert config.embedding_model
@@ -2434,12 +2673,20 @@ class _StubRouter:
             "target_name": self.target_name,
             "similarity": self.similarity,
         }
-        result["all_scores"] = self.all_scores if self.all_scores is not None else [
-            {"target": mode.name, "similarity": (
-                self.similarity if mode.name == self.target_name else -0.5
-            )}
-            for mode in _config().codex_modes if mode.name not in CLASS_ROUTED_MODES
-        ]
+        result["all_scores"] = (
+            self.all_scores
+            if self.all_scores is not None
+            else [
+                {
+                    "target": mode.name,
+                    "similarity": (
+                        self.similarity if mode.name == self.target_name else -0.5
+                    ),
+                }
+                for mode in _config().codex_modes
+                if mode.name not in CLASS_ROUTED_MODES
+            ]
+        )
         return result
 
 
@@ -2472,8 +2719,12 @@ class _CaptureLogger:
 
 
 def _semantic_layer(
-    router, threshold=0.5, modes=None, logger=None,
-    intent_max_chars=None, phase_max_chars=None,
+    router,
+    threshold=0.5,
+    modes=None,
+    logger=None,
+    intent_max_chars=None,
+    phase_max_chars=None,
 ):
     """Build a semantic layer over *router* for the shipped mode table."""
     config = _config()
@@ -2483,10 +2734,16 @@ def _semantic_layer(
         modes if modes is not None else config.mode_by_name,
         logger,
         min_margin=config.semantic_min_margin,
-        intent_max_chars=(config.semantic_intent_max_chars
-                          if intent_max_chars is None else intent_max_chars),
-        phase_max_chars=(config.semantic_phase_max_chars
-                         if phase_max_chars is None else phase_max_chars),
+        intent_max_chars=(
+            config.semantic_intent_max_chars
+            if intent_max_chars is None
+            else intent_max_chars
+        ),
+        phase_max_chars=(
+            config.semantic_phase_max_chars
+            if phase_max_chars is None
+            else phase_max_chars
+        ),
     )
 
 
@@ -2622,14 +2879,24 @@ class TestSemanticSimilarity:
     @pytest.mark.parametrize("scores", [(3.0, 3.0), (3.5, 3.0)])
     def test_tied_and_close_scores_defer_to_semantics_once(self, scores):
         config = _rebuild(
-            _config(), codex_modes=(_mode("implement"),
-                                   _mode("test", keywords=("alpha",), weights={"alpha": scores[0]}),
-                                   _mode("review", keywords=("beta",), weights={"beta": scores[1]})),
+            _config(),
+            codex_modes=(
+                _mode("implement"),
+                _mode("test", keywords=("alpha",), weights={"alpha": scores[0]}),
+                _mode("review", keywords=("beta",), weights={"beta": scores[1]}),
+            ),
         )
-        router = _StubRouter("review", 0.9, all_scores=[
-            {"target": mode.name, "similarity": 0.9 if mode.name == "review" else 0.2}
-            for mode in config.codex_modes
-        ])
+        router = _StubRouter(
+            "review",
+            0.9,
+            all_scores=[
+                {
+                    "target": mode.name,
+                    "similarity": 0.9 if mode.name == "review" else 0.2,
+                }
+                for mode in config.codex_modes
+            ],
+        )
         payload = main_payload("alpha beta")
         classifier = CodexModeClassifier(
             config, semantic=_semantic_layer(router, modes=config.mode_by_name)
@@ -2714,9 +2981,9 @@ class TestSemanticSimilarity:
 
     def test_new_task_excludes_old_assistant_and_user_from_semantic_query(self):
         payload = main_payload("Przygotuj testy")
-        payload["input"].extend([
-            _assistant("Testy są gotowe"), _user("Popraw README")
-        ])
+        payload["input"].extend(
+            [_assistant("Testy są gotowe"), _user("Popraw README")]
+        )
         router = _StubRouter()
 
         _semantic_layer(router).route(_parse(payload))
@@ -2729,7 +2996,9 @@ class TestSemanticSimilarity:
         request = _parse(payload, max_chars=100)
         router = _StubRouter()
 
-        _semantic_layer(router, intent_max_chars=50, phase_max_chars=49).route(request)
+        _semantic_layer(router, intent_max_chars=50, phase_max_chars=49).route(
+            request
+        )
 
         assert len(router.calls[0]) <= 100
         assert router.calls[0].endswith("Sprawdzam zgodność konfiguracji.")
@@ -2737,10 +3006,16 @@ class TestSemanticSimilarity:
 
     def test_semantic_query_describes_the_action_without_the_tool_output(self):
         payload = main_payload("Dodaj endpoint")
-        payload["input"].extend([
-            TestActiveWorkPhase._call("exec_command", '{"cmd":"git status"}'),
-            {"type": "function_call_output", "call_id": "active", "output": "clean"},
-        ])
+        payload["input"].extend(
+            [
+                TestActiveWorkPhase._call("exec_command", '{"cmd":"git status"}'),
+                {
+                    "type": "function_call_output",
+                    "call_id": "active",
+                    "output": "clean",
+                },
+            ]
+        )
         router = _StubRouter()
 
         _semantic_layer(router).route(_parse(payload))
@@ -2751,10 +3026,12 @@ class TestSemanticSimilarity:
 
     def test_long_assistant_does_not_exclude_the_latest_tool_from_semantics(self):
         payload = main_payload("Dodaj endpoint")
-        payload["input"].extend([
-            _assistant("X" * 1000),
-            TestActiveWorkPhase._call("exec_command", '{"cmd":"git status"}'),
-        ])
+        payload["input"].extend(
+            [
+                _assistant("X" * 1000),
+                TestActiveWorkPhase._call("exec_command", '{"cmd":"git status"}'),
+            ]
+        )
         router = _StubRouter()
 
         _semantic_layer(router, intent_max_chars=100, phase_max_chars=99).route(
@@ -2849,13 +3126,14 @@ class TestSemanticSimilarity:
             "similarity": 0.81,
             "agent_mode": "debug",
             "source": SOURCE_SEMANTIC,
+            "semantic": "accepted",
             "codex_class": REQUEST_CLASS_MAIN,
             "collaboration_mode": COLLABORATION_MODE_DEFAULT,
             "request_kind": "turn",
             "thread_id": "thread-1",
             "turn_id": "turn-7",
         }
-        assert set(result["routing"]) == _ROUTING_KEYS
+        assert set(result["routing"]) == _ROUTING_KEYS | {"semantic"}
 
     def test_injected_layer_takes_precedence_over_the_router_argument(self):
         strong, weak = _StubRouter("debug", 0.81), _StubRouter("review", 0.99)
@@ -2937,3 +3215,7 @@ class TestSemanticSimilarity:
         assert plugin.apply(main_payload("napraw testy"))["routing"][
             "similarity"
         ] == pytest.approx(3.0 / 4.0)
+        assert (
+            plugin.apply(main_payload("Dodaj pole"))["routing"]["semantic"]
+            == "unavailable"
+        )

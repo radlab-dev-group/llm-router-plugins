@@ -49,6 +49,7 @@ __all__ = [
     "collect_phase_evidence",
     "detect_phase_evidence",
     "detect_phase",
+    "describe_activity",
 ]
 
 #: An announcement of the current action by the assistant.
@@ -195,10 +196,9 @@ def _match_announcement(
     match = rules.announcement_prefix.match(text)
     if not match:
         return None
-    action = text[match.end():].rstrip(".! ").replace("`", "")
+    action = text[match.end() :].rstrip(".! ").replace("`", "")
     phases = [
-        phase for phase, pattern in rules.announcements
-        if pattern.fullmatch(action)
+        phase for phase, pattern in rules.announcements if pattern.fullmatch(action)
     ]
     return phases[0] if len(phases) == 1 else None
 
@@ -223,9 +223,7 @@ def _tokenize(text: str) -> Optional[List[str]]:
         arguments = json.loads(text)
         if not isinstance(arguments, dict):
             return None
-        commands = [
-            arguments[key] for key in ("cmd", "command") if key in arguments
-        ]
+        commands = [arguments[key] for key in ("cmd", "command") if key in arguments]
         if not commands or any(not isinstance(cmd, str) for cmd in commands):
             return None
         if len(set(commands)) != 1:
@@ -244,9 +242,7 @@ def _tokenize(text: str) -> Optional[List[str]]:
         return None
 
 
-def _split_command(
-    text: str, rules: CodexPhaseConfig
-) -> Optional[List[List[str]]]:
+def _split_command(text: str, rules: CodexPhaseConfig) -> Optional[List[List[str]]]:
     """
     Reduce a command to the producers whose phases must agree.
 
@@ -322,14 +318,10 @@ def _is_filter(stage: List[str], rules: CodexPhaseConfig) -> bool:
     if not stage:
         return False
     executable = PurePosixPath(stage[0]).name
-    return any(
-        pattern.fullmatch(executable) for pattern in rules.neutral_filters
-    )
+    return any(pattern.fullmatch(executable) for pattern in rules.neutral_filters)
 
 
-def _command_phase(
-    text: str, rules: CodexPhaseConfig
-) -> Tuple[Optional[str], str]:
+def _command_phase(text: str, rules: CodexPhaseConfig) -> Tuple[Optional[str], str]:
     """
     Return the phase of an executed command and the reason naming its rule.
 
@@ -370,9 +362,10 @@ def _command_phase(
                 else:
                     break
         matches = {
-            rule for rule in rules.commands
+            rule
+            for rule in rules.commands
             if rule.executable.fullmatch(executable)
-            and tuple(args[:len(rule.args_prefix)]) == rule.args_prefix
+            and tuple(args[: len(rule.args_prefix)]) == rule.args_prefix
         }
         if len(matches) != 1:
             return None, ""
@@ -400,9 +393,7 @@ def _test_path(path: str, rules: CodexPhaseConfig) -> bool:
     )
 
 
-def _patch_phase(
-    text: str, rules: CodexPhaseConfig
-) -> Tuple[Optional[str], str]:
+def _patch_phase(text: str, rules: CodexPhaseConfig) -> Tuple[Optional[str], str]:
     """
     Return the phase of a Codex patch envelope, by the paths it touches.
 
@@ -441,12 +432,11 @@ def _patch_phase(
             operation = match[1]
             paths.append(match[2])
         elif line.startswith("*** Move to: ") and operation == "Update":
-            paths.append(line[len("*** Move to: "):])
+            paths.append(line[len("*** Move to: ") :])
         elif operation == "Add" and line.startswith("+"):
             continue
         elif operation == "Update" and (
-            line.startswith((" ", "+", "-", "@@"))
-            or line == "*** End of File"
+            line.startswith((" ", "+", "-", "@@")) or line == "*** End of File"
         ):
             continue
         else:
@@ -455,8 +445,11 @@ def _patch_phase(
         return None, ""
     for path in paths:
         if (
-            not path.strip() or path != path.strip() or "\\" in path
-            or not PurePosixPath(path).parts or ":" in path
+            not path.strip()
+            or path != path.strip()
+            or "\\" in path
+            or not PurePosixPath(path).parts
+            or ":" in path
             or any(ord(char) < 32 for char in path)
             or PurePosixPath(path).is_absolute()
             or ".." in PurePosixPath(path).parts
@@ -464,7 +457,8 @@ def _patch_phase(
         ):
             return None, ""
     mode = (
-        rules.test_mode if all(_test_path(path, rules) for path in paths)
+        rules.test_mode
+        if all(_test_path(path, rules) for path in paths)
         else rules.implement_mode
     )
     return mode, f"patch {len(paths)} file(s)"
@@ -503,7 +497,7 @@ def _execution_status(text: str) -> Optional[bool]:
         return code == 0
 
     match = _OUTPUT_MARKER.search(text)
-    envelope = text[:match.start()] if match else text
+    envelope = text[: match.start()] if match else text
     codes = [int(found[1]) for found in _EXIT_CODE.finditer(envelope)]
     if codes:
         return not all(code != 0 for code in codes)
@@ -513,7 +507,8 @@ def _execution_status(text: str) -> Optional[bool]:
 
 
 def collect_phase_evidence(
-    activity: Tuple[CodexActivity, ...], rules: CodexPhaseConfig,
+    activity: Tuple[CodexActivity, ...],
+    rules: CodexPhaseConfig,
 ) -> Tuple[PhaseEvidence, ...]:
     """
     Return every phase evidence of the active turn, oldest first.
@@ -543,10 +538,15 @@ def collect_phase_evidence(
         if item.kind == "assistant":
             mode = _announcement(item.text, rules)
             if mode is not None:
-                evidence.append(PhaseEvidence(
-                    mode=mode, kind=EVIDENCE_ANNOUNCEMENT, reason="announcement",
-                    event_id=item.event_id, completed=True,
-                ))
+                evidence.append(
+                    PhaseEvidence(
+                        mode=mode,
+                        kind=EVIDENCE_ANNOUNCEMENT,
+                        reason="announcement",
+                        event_id=item.event_id,
+                        completed=True,
+                    )
+                )
         elif item.kind == "function_call":
             if item.name in rules.command_tools:
                 mode, reason = _command_phase(item.text, rules)
@@ -560,31 +560,48 @@ def collect_phase_evidence(
                 continue
             if item.call_id:
                 calls.setdefault(item.call_id, (item.name, len(evidence)))
-            evidence.append(PhaseEvidence(
-                mode=mode, kind=kind, reason=reason,
-                event_id=item.event_id, call_id=item.call_id,
-            ))
+            evidence.append(
+                PhaseEvidence(
+                    mode=mode,
+                    kind=kind,
+                    reason=reason,
+                    event_id=item.event_id,
+                    call_id=item.call_id,
+                )
+            )
         elif item.kind == "function_call_output" and item.call_id and item.name:
             linked = calls.get(item.call_id)
             if linked is None or linked[0] != item.name:
                 continue
             settled = evidence[linked[1]]
             status = _execution_status(item.text)
+            if status is None:
+                continue
+            calls.pop(item.call_id)
             evidence[linked[1]] = settled.settle(status)
             if (
-                settled.mode == rules.test_mode and status is False
+                settled.mode == rules.test_mode
+                and status is False
                 and settled.kind == EVIDENCE_COMMAND
+                and linked[1] == len(evidence) - 1
             ):
-                evidence.append(PhaseEvidence(
-                    mode=rules.failure_mode, kind=EVIDENCE_TEST_FAILURE,
-                    reason="test command failed", event_id=item.event_id,
-                    call_id=item.call_id, completed=True, succeeded=False,
-                ))
+                evidence.append(
+                    PhaseEvidence(
+                        mode=rules.failure_mode,
+                        kind=EVIDENCE_TEST_FAILURE,
+                        reason="test command failed",
+                        event_id=item.event_id,
+                        call_id=item.call_id,
+                        completed=True,
+                        succeeded=False,
+                    )
+                )
     return tuple(evidence)
 
 
 def detect_phase_evidence(
-    activity: Tuple[CodexActivity, ...], rules: CodexPhaseConfig,
+    activity: Tuple[CodexActivity, ...],
+    rules: CodexPhaseConfig,
 ) -> Optional[PhaseEvidence]:
     """
     Return the latest phase evidence, or ``None`` when there is none.
@@ -606,7 +623,8 @@ def detect_phase_evidence(
 
 
 def detect_phase(
-    activity: Tuple[CodexActivity, ...], rules: CodexPhaseConfig,
+    activity: Tuple[CodexActivity, ...],
+    rules: CodexPhaseConfig,
 ) -> Optional[str]:
     """
     Return the latest unambiguous phase, without retaining cross-turn state.
@@ -677,13 +695,18 @@ def describe_activity(
         if item.name and rules is not None and item.name in rules.patch_tools:
             clause = (
                 f"editing files ({evidence.reason})"
-                if evidence is not None else "editing files"
+                if evidence is not None
+                else "editing files"
             )
         elif evidence is not None and evidence.kind == EVIDENCE_COMMAND:
             clause = f"ran {evidence.reason}"
         else:
             clause = f"called {item.name or 'a tool'}"
-        if evidence is not None and evidence.completed:
+        if (
+            evidence is not None
+            and evidence.completed
+            and evidence.succeeded is not None
+        ):
             clause += ": succeeded" if evidence.succeeded else ": failed"
         clauses.append(clause)
     if limit > 0:

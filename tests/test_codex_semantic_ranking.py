@@ -28,7 +28,6 @@ from llm_router_plugins.utils.routing.embedder import (
     EmbeddingRouterConfig,
 )
 
-
 _MODE_NAMES = ("plan", "implement", "test", "review", "git_review", "debug")
 _SPECIAL_NAMES = ("aux_title", "compaction")
 _CONFIG_PATH = (
@@ -39,8 +38,17 @@ _CONFIG_PATH = (
     / "agentic_routing_codex.json"
 )
 _INVALID_COSINES = (
-    None, True, False, "0.8", [], {}, float("nan"),
-    float("inf"), float("-inf"), 1.01, -1.01,
+    None,
+    True,
+    False,
+    "0.8",
+    [],
+    {},
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+    1.01,
+    -1.01,
 )
 _INVALID_SETTINGS = (
     ("aggregation", "unknown"),
@@ -110,11 +118,17 @@ def _make_router(documents, names=_MODE_NAMES, aggregation="per_target_top_k"):
 
 
 def _make_layer(
-    mode_by_name, router=None, threshold=0.51, min_margin=0.05,
-    intent_max_chars=2000, phase_max_chars=2000,
+    mode_by_name,
+    router=None,
+    threshold=0.51,
+    min_margin=0.05,
+    intent_max_chars=2000,
+    phase_max_chars=2000,
 ):
     return CodexSemanticLayer(
-        router, threshold, mode_by_name,
+        router,
+        threshold,
+        mode_by_name,
         min_margin=min_margin,
         intent_max_chars=intent_max_chars,
         phase_max_chars=phase_max_chars,
@@ -141,12 +155,13 @@ def _assistant(text):
 @pytest.mark.parametrize("scarce_count", [1, 2, 3])
 def test_per_target_top_k_balances_all_six_modes(scarce_count):
     fragments = {
-        name: [0.1 - index * 0.1, 0.9 - index * 0.1,
-               -0.9, 0.7 - index * 0.1, -0.95]
+        name: [0.1 - index * 0.1, 0.9 - index * 0.1, -0.9, 0.7 - index * 0.1, -0.95]
         for index, name in enumerate(_MODE_NAMES)
     }
     fragments["debug"] = [-0.8, -0.2, -0.5][:scarce_count]
-    documents = [(name, score) for name, scores in fragments.items() for score in scores]
+    documents = [
+        (name, score) for name, scores in fragments.items() for score in scores
+    ]
     documents += [("aux_title", 1.0), ("compaction", 1.0), ("unconfigured", 1.0)]
     router = _make_router(documents)
 
@@ -177,9 +192,9 @@ def test_shared_k_changes_winner_instead_of_using_each_targets_own_k():
         "implement": [0.8, 0.79],
         **{name: [0.4, 0.3, 0.2] for name in _MODE_NAMES[2:]},
     }
-    router = _make_router([
-        (name, score) for name, scores in fragments.items() for score in scores
-    ])
+    router = _make_router(
+        [(name, score) for name, scores in fragments.items() for score in scores]
+    )
 
     result = router.route("request")
 
@@ -192,11 +207,13 @@ def test_shared_k_changes_winner_instead_of_using_each_targets_own_k():
 
 
 def test_per_target_ranking_preserves_negative_cosines():
-    router = _make_router([
-        (name, score - index * 0.1)
-        for index, name in enumerate(_MODE_NAMES)
-        for score in (-0.3, -0.1, -0.2)
-    ])
+    router = _make_router(
+        [
+            (name, score - index * 0.1)
+            for index, name in enumerate(_MODE_NAMES)
+            for score in (-0.3, -0.1, -0.2)
+        ]
+    )
 
     result = router.route("request")
 
@@ -204,7 +221,9 @@ def test_per_target_ranking_preserves_negative_cosines():
     assert result["similarity"] == pytest.approx(-0.2)
     assert {
         entry["target"]: entry["similarity"] for entry in result["all_scores"]
-    } == pytest.approx({name: -0.2 - index * 0.1 for index, name in enumerate(_MODE_NAMES)})
+    } == pytest.approx(
+        {name: -0.2 - index * 0.1 for index, name in enumerate(_MODE_NAMES)}
+    )
 
 
 @pytest.mark.parametrize("aggregation", [None, "global_top_k"])
@@ -226,7 +245,9 @@ def test_global_top_k_keeps_legacy_partial_ranking(aggregation):
 
 
 def test_global_top_k_clamps_search_to_index_size():
-    router = _make_router([("plan", 0.8)], names=("plan",), aggregation="global_top_k")
+    router = _make_router(
+        [("plan", 0.8)], names=("plan",), aggregation="global_top_k"
+    )
     result = router.route("request")
     assert router._faiss_index.search.call_args.args[1] == 1
     assert result["target_name"] == "plan"
@@ -235,16 +256,18 @@ def test_global_top_k_clamps_search_to_index_size():
 
 @pytest.mark.parametrize("missing_name", _MODE_NAMES)
 def test_per_target_top_k_rejects_missing_configured_vectors(missing_name):
-    router = _make_router([(name, 0.8) for name in _MODE_NAMES if name != missing_name])
+    router = _make_router(
+        [(name, 0.8) for name in _MODE_NAMES if name != missing_name]
+    )
     with pytest.raises(ValueError):
         router.route("request")
     assert router._faiss_index.search.call_args.args[1] == router._faiss_index.ntotal
 
 
 def test_route_context_encodes_sections_separately_and_searches_once():
-    router = _make_router([
-        (name, 0.8 - index * 0.1) for index, name in enumerate(_MODE_NAMES)
-    ])
+    router = _make_router(
+        [(name, 0.8 - index * 0.1) for index, name in enumerate(_MODE_NAMES)]
+    )
     intent = "intent " * 2000
     phase = "pytest failed"
     router._model.encode.side_effect = [
@@ -263,7 +286,9 @@ def test_route_context_encodes_sections_separately_and_searches_once():
     router._faiss_index.search.assert_called_once()
     vector, k = router._faiss_index.search.call_args.args
     assert vector.shape == (1, 2)
-    np.testing.assert_allclose(vector, [[1 / math.sqrt(2), 1 / math.sqrt(2)]], atol=1e-6)
+    np.testing.assert_allclose(
+        vector, [[1 / math.sqrt(2), 1 / math.sqrt(2)]], atol=1e-6
+    )
     assert np.linalg.norm(vector) == pytest.approx(1.0)
     assert k == router._faiss_index.ntotal
     assert len(result["all_scores"]) == 6
@@ -329,7 +354,8 @@ def test_accept_single_semantic_mode_needs_no_runner_up(mode_by_name, similarity
     modes = {name: mode_by_name[name] for name in ("plan",) + _SPECIAL_NAMES}
     layer = _make_layer(modes, threshold=-1.0, min_margin=2.0)
     result = {
-        "target_name": "plan", "similarity": similarity,
+        "target_name": "plan",
+        "similarity": similarity,
         "all_scores": [{"target": "plan", "similarity": similarity}],
     }
     mode, actual = layer.accept(result)
@@ -347,7 +373,9 @@ def test_accept_requires_every_configured_semantic_mode(mode_by_name, missing_na
 
 
 @pytest.mark.parametrize("value", _INVALID_COSINES)
-def test_accept_rejects_malformed_top_similarity_without_raising(mode_by_name, value):
+def test_accept_rejects_malformed_top_similarity_without_raising(
+    mode_by_name, value
+):
     result = _ranking()
     result["similarity"] = value
     mode, similarity = _make_layer(mode_by_name).accept(result)
@@ -357,20 +385,26 @@ def test_accept_rejects_malformed_top_similarity_without_raising(mode_by_name, v
 
 
 @pytest.mark.parametrize("value", _INVALID_COSINES)
-def test_accept_rejects_malformed_ranked_similarity_preserving_top(mode_by_name, value):
+def test_accept_rejects_malformed_ranked_similarity_preserving_top(
+    mode_by_name, value
+):
     result = _ranking()
     result["all_scores"][-1]["similarity"] = value
     assert _make_layer(mode_by_name).accept(result) == (None, 0.8)
 
 
-@pytest.mark.parametrize("entries", [None, [], "ranking", {}, [None], ["plan"], [{}]])
+@pytest.mark.parametrize(
+    "entries", [None, [], "ranking", {}, [None], ["plan"], [{}]]
+)
 def test_accept_rejects_malformed_ranking_containers(mode_by_name, entries):
     result = _ranking()
     result["all_scores"] = entries
     assert _make_layer(mode_by_name).accept(result) == (None, 0.8)
 
 
-@pytest.mark.parametrize("name", ["plan", "aux_title", "compaction", "unknown", None, 3])
+@pytest.mark.parametrize(
+    "name", ["plan", "aux_title", "compaction", "unknown", None, 3]
+)
 def test_accept_rejects_duplicate_or_unconfigured_ranked_targets(mode_by_name, name):
     result = _ranking()
     result["all_scores"].append({"target": name, "similarity": 0.1})
@@ -390,7 +424,9 @@ def test_accept_rejects_missing_ranked_fields(mode_by_name, key):
     assert _make_layer(mode_by_name).accept(result) == (None, 0.8)
 
 
-@pytest.mark.parametrize("target", ["implement", "aux_title", "compaction", "unknown", None])
+@pytest.mark.parametrize(
+    "target", ["implement", "aux_title", "compaction", "unknown", None]
+)
 def test_accept_rejects_inconsistent_top_target(mode_by_name, target):
     result = _ranking()
     result["target_name"] = target
@@ -407,7 +443,10 @@ def test_accept_rejects_inconsistent_top_score(mode_by_name):
 def test_accept_rejects_missing_top_level_fields(mode_by_name, key):
     result = _ranking()
     del result[key]
-    assert _make_layer(mode_by_name).accept(result) == (None, 0.0 if key == "similarity" else 0.8)
+    assert _make_layer(mode_by_name).accept(result) == (
+        None,
+        0.0 if key == "similarity" else 0.8,
+    )
 
 
 @pytest.mark.parametrize("result", [None, {}, [], "ranking", 1])
@@ -415,7 +454,9 @@ def test_accept_rejects_non_results_without_raising(mode_by_name, result):
     assert _make_layer(mode_by_name).accept(result) == (None, 0.0)
 
 
-@pytest.mark.parametrize("missing", ["min_margin", "intent_max_chars", "phase_max_chars"])
+@pytest.mark.parametrize(
+    "missing", ["min_margin", "intent_max_chars", "phase_max_chars"]
+)
 def test_semantic_constructor_requires_new_keyword_arguments(mode_by_name, missing):
     kwargs = {"min_margin": 0.05, "intent_max_chars": 2000, "phase_max_chars": 2000}
     del kwargs[missing]
@@ -435,16 +476,22 @@ def test_semantic_parts_keep_intent_and_phase_budgets_independent():
 def test_semantic_phase_contains_latest_assistant_and_linked_call_output():
     request = CodexRequest(
         latest_user_text="continue this task",
-        assistant_messages=[_assistant("old announcement"), _assistant("running checks")],
+        assistant_messages=[
+            _assistant("old announcement"),
+            _assistant("running checks"),
+        ],
         activity=(
             CodexActivity("function_call", "old command", "shell", "old"),
             CodexActivity("function_call_output", "old output", "shell", "old"),
             CodexActivity("function_call", "pytest", "exec_command", "latest"),
-            CodexActivity("function_call_output", "FAILED check", "exec_command", "latest"),
+            CodexActivity(
+                "function_call_output", "FAILED check", "exec_command", "latest"
+            ),
         ),
     )
     assert CodexSemanticLayer._build_semantic_parts(request, 2000, 2000) == (
-        "continue this task", "running checks\ncalled shell\ncalled exec_command",
+        "continue this task",
+        "running checks\ncalled shell\ncalled exec_command",
     )
 
 
@@ -458,7 +505,8 @@ def test_semantic_phase_includes_latest_call_before_output_arrives():
         ),
     )
     assert CodexSemanticLayer._build_semantic_parts(request, 2000, 2000) == (
-        "task", "called shell\ncalled exec_command",
+        "task",
+        "called shell\ncalled exec_command",
     )
 
 
@@ -467,27 +515,37 @@ def test_semantic_phase_reports_a_call_once_and_an_orphan_output_never():
         latest_user_text="task",
         activity=(
             CodexActivity("function_call", "old command", "shell", "old"),
-            CodexActivity("function_call_output", "unlinked output", "shell", "missing"),
+            CodexActivity(
+                "function_call_output", "unlinked output", "shell", "missing"
+            ),
         ),
     )
     assert CodexSemanticLayer._build_semantic_parts(request, 2000, 2000) == (
-        "task", "called shell",
+        "task",
+        "called shell",
     )
 
 
 def test_semantic_phase_describes_the_action_not_the_file_it_read():
     """The topic of a read file must not stand in for the work."""
+
     def request_with(content):
         return CodexRequest(
             latest_user_text="task",
             activity=(
-                CodexActivity("function_call", '{"cmd":"cat recipe.md"}', "exec_command", "c1"),
+                CodexActivity(
+                    "function_call", '{"cmd":"cat recipe.md"}', "exec_command", "c1"
+                ),
                 CodexActivity("function_call_output", content, "exec_command", "c1"),
             ),
         )
 
-    lasagne = CodexSemanticLayer._build_semantic_parts(request_with("lasagne"), 2000, 2000)
-    engine = CodexSemanticLayer._build_semantic_parts(request_with("turbocharger"), 2000, 2000)
+    lasagne = CodexSemanticLayer._build_semantic_parts(
+        request_with("lasagne"), 2000, 2000
+    )
+    engine = CodexSemanticLayer._build_semantic_parts(
+        request_with("turbocharger"), 2000, 2000
+    )
     assert lasagne == engine
     assert "lasagne" not in lasagne[1]
     assert "turbocharger" not in engine[1]
@@ -499,17 +557,29 @@ def test_semantic_phase_names_recognized_actions_and_their_status(mode_by_name):
     )
     import json
     import pathlib as _pathlib
-    raw = json.loads((_pathlib.Path(__file__).resolve().parents[1]
-                      / "llm_router_plugins/resources/routing/agentic_routing_codex.json")
-                     .read_text(encoding="utf-8"))["settings"]["phase"]
+
+    raw = json.loads(
+        (
+            _pathlib.Path(__file__).resolve().parents[1]
+            / "llm_router_plugins/resources/routing/agentic_routing_codex.json"
+        ).read_text(encoding="utf-8")
+    )["settings"]["phase"]
     rules = CodexPhaseConfig.from_raw(raw)
     request = CodexRequest(
         latest_user_text="task",
         activity=(
-            CodexActivity("function_call", json.dumps({"cmd": "python -m pytest"}),
-                          "exec_command", "c1"),
-            CodexActivity("function_call_output", "Process exited with code 1",
-                          "exec_command", "c1"),
+            CodexActivity(
+                "function_call",
+                json.dumps({"cmd": "python -m pytest"}),
+                "exec_command",
+                "c1",
+            ),
+            CodexActivity(
+                "function_call_output",
+                "Process exited with code 1",
+                "exec_command",
+                "c1",
+            ),
         ),
     )
     _, phase = CodexSemanticLayer._build_semantic_parts(
@@ -524,7 +594,9 @@ def test_semantic_phase_preserves_each_source_under_a_small_budget():
         assistant_messages=[_assistant("A" * 10000)],
         activity=(
             CodexActivity("function_call", "C" * 10000, "exec_command", "latest"),
-            CodexActivity("function_call_output", "O" * 10000, "exec_command", "latest"),
+            CodexActivity(
+                "function_call_output", "O" * 10000, "exec_command", "latest"
+            ),
         ),
     )
     intent, phase = CodexSemanticLayer._build_semantic_parts(request, 11, 101)
@@ -536,21 +608,31 @@ def test_semantic_phase_preserves_each_source_under_a_small_budget():
 
 @pytest.mark.parametrize(
     "intent,phase,expected",
-    [("", "", ()), (" \n ", " \n ", ()),
-     ("intent", "", ("intent",)), ("", "phase", ("phase",))],
+    [
+        ("", "", ()),
+        (" \n ", " \n ", ()),
+        ("intent", "", ("intent",)),
+        ("", "phase", ("phase",)),
+    ],
 )
 def test_semantic_parts_return_only_nonempty_sections(intent, phase, expected):
-    request = CodexRequest(latest_user_text=intent, assistant_messages=[_assistant(phase)])
+    request = CodexRequest(
+        latest_user_text=intent, assistant_messages=[_assistant(phase)]
+    )
     assert CodexSemanticLayer._build_semantic_parts(request, 20, 20) == expected
 
 
 @pytest.mark.parametrize("supports_context", [True, False])
-def test_semantic_route_uses_parts_or_legacy_join(mode_by_name, monkeypatch, supports_context):
+def test_semantic_route_uses_parts_or_legacy_join(
+    mode_by_name, monkeypatch, supports_context
+):
     result = _ranking()
     router = SimpleNamespace(route=Mock(return_value=result))
     if supports_context:
         router.route_context = Mock(return_value=result)
-    layer = _make_layer(mode_by_name, router, intent_max_chars=17, phase_max_chars=31)
+    layer = _make_layer(
+        mode_by_name, router, intent_max_chars=17, phase_max_chars=31
+    )
     request = CodexRequest(latest_user_text="task")
     parts = ("intent", "phase")
     builder = Mock(return_value=parts)
@@ -567,8 +649,12 @@ def test_semantic_route_uses_parts_or_legacy_join(mode_by_name, monkeypatch, sup
 
 
 def test_semantic_route_sends_real_independently_limited_parts(mode_by_name):
-    router = SimpleNamespace(route_context=Mock(return_value=_ranking()), route=Mock())
-    layer = _make_layer(mode_by_name, router, intent_max_chars=17, phase_max_chars=31)
+    router = SimpleNamespace(
+        route_context=Mock(return_value=_ranking()), route=Mock()
+    )
+    layer = _make_layer(
+        mode_by_name, router, intent_max_chars=17, phase_max_chars=31
+    )
     request = CodexRequest(
         latest_user_text="I" * 10000, assistant_messages=[_assistant("P" * 10000)]
     )
@@ -588,14 +674,16 @@ def test_shipped_config_has_balanced_semantic_defaults(raw_config):
     config = CodexRoutingConfig._from_raw(raw_config)
     config.validate_args()
     assert config.semantic_aggregation == "per_target_top_k"
-    assert config.semantic_min_margin == pytest.approx(0.05)
+    assert config.semantic_min_margin == pytest.approx(0.005)
     assert config.semantic_intent_max_chars == 2000
     assert config.semantic_phase_max_chars == 2000
-    assert config.top_k == 3
+    assert config.top_k == 4
     assert set(config.mode_names) - set(_SPECIAL_NAMES) == set(_MODE_NAMES)
 
 
-@pytest.mark.parametrize("key", ["aggregation", "min_margin", "intent_max_chars", "phase_max_chars"])
+@pytest.mark.parametrize(
+    "key", ["aggregation", "min_margin", "intent_max_chars", "phase_max_chars"]
+)
 def test_config_requires_new_semantic_settings(raw_config, key):
     del raw_config["settings"]["semantic"][key]
     with pytest.raises(KeyError, match=key):
@@ -626,9 +714,14 @@ def test_validate_args_rejects_invalid_semantic_settings(raw_config, key, value)
 
 @pytest.mark.parametrize("aggregation", ["global_top_k", "per_target_top_k"])
 @pytest.mark.parametrize("margin", [0.0, 2.0])
-def test_config_accepts_both_strategies_and_margin_endpoints(raw_config, aggregation, margin):
+def test_config_accepts_both_strategies_and_margin_endpoints(
+    raw_config, aggregation, margin
+):
     raw_config["settings"]["semantic"].update(
-        aggregation=aggregation, min_margin=margin, intent_max_chars=1, phase_max_chars=1
+        aggregation=aggregation,
+        min_margin=margin,
+        intent_max_chars=1,
+        phase_max_chars=1,
     )
     config = CodexRoutingConfig._from_raw(raw_config)
     config.validate_args()

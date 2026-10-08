@@ -310,7 +310,7 @@ class CodexPayloadParser:
             text = self._user_text(item)
             if text:
                 user_turns.append((index, text))
-        active_items = items[user_turns[-1][0] + 1:] if user_turns else []
+        active_items = items[user_turns[-1][0] + 1 :] if user_turns else items
         assistant_messages = self._assistant_messages(active_items)
 
         return CodexRequest(
@@ -641,7 +641,10 @@ class CodexPayloadParser:
         ):
             return ""
         return re.sub(
-            r"<environment_context>.*?</environment_context>", "", text, flags=re.DOTALL
+            r"<environment_context>.*?</environment_context>",
+            "",
+            text,
+            flags=re.DOTALL,
         ).strip()
 
     def _user_history(self, turns: List[Tuple[int, str]]) -> Tuple[str, ...]:
@@ -670,34 +673,58 @@ class CodexPayloadParser:
                 messages = self._assistant_messages([item]) or []
                 for message in messages:
                     text = "\n".join(part["text"] for part in message["content"])
-                    events.append(CodexActivity("assistant", text, event_id=event_id))
+                    events.append(
+                        CodexActivity("assistant", text, event_id=event_id)
+                    )
             elif kind in ("function_call", "custom_tool_call"):
                 name = self._text(item.get("name"))
                 call_id = self._text(item.get("call_id"))
                 if call_id:
                     calls[call_id] = name
                 arguments = (
-                    item.get("input") if kind == "custom_tool_call"
+                    item.get("input")
+                    if kind == "custom_tool_call"
                     else item.get("arguments")
                 )
                 events.append(
                     CodexActivity(
-                        "function_call", self._text(arguments), name, call_id,
+                        "function_call",
+                        self._text(arguments),
+                        name,
+                        call_id,
                         event_id,
                     )
                 )
             elif kind in ("function_call_output", "custom_tool_call_output"):
                 call_id = self._text(item.get("call_id"))
-                text = self._text(item.get("output"))
-                if self._max_chars > 0:
-                    text = text[:self._max_chars]
+                text = self._activity_output(item.get("output"))
                 events.append(
                     CodexActivity(
-                        "function_call_output", text, calls.get(call_id, ""), call_id,
+                        "function_call_output",
+                        text,
+                        calls.get(call_id, ""),
+                        call_id,
                         event_id,
                     )
                 )
         return tuple(events)
+
+    def _activity_output(self, value: Any) -> str:
+        """Keep a structured execution status when bounding a long result."""
+        text = self._text(value)
+        if self._max_chars <= 0 or len(text) <= self._max_chars:
+            return text
+        try:
+            envelope = json.loads(text)
+        except (ValueError, RecursionError):
+            envelope = None
+        if isinstance(envelope, dict):
+            status = envelope.get("exit_code")
+            if isinstance(status, int) and not isinstance(status, bool):
+                text = f"Exit code: {status}\nOutput:\n" + self._text(
+                    envelope.get("output")
+                )
+        return text[: self._max_chars]
 
     @staticmethod
     def _assistant_messages(items: List[Any]) -> Optional[List[Dict[str, Any]]]:
@@ -741,7 +768,8 @@ class CodexPayloadParser:
                 continue
             messages.append(
                 {
-                    "type": "message", "role": "assistant",
+                    "type": "message",
+                    "role": "assistant",
                     "content": [
                         {"type": "output_text", "text": part["text"]}
                         for part in output_parts

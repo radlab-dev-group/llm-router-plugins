@@ -124,7 +124,10 @@ class CodexModeScorer:
     """
 
     def __init__(
-        self, *, negation_pattern: str, weights: Dict[str, float],
+        self,
+        *,
+        negation_pattern: str,
+        weights: Dict[str, float],
         cache_max: int = DEFAULT_PLAN_CACHE_MAX,
     ) -> None:
         """
@@ -181,7 +184,9 @@ class CodexModeScorer:
             return None, best.score
         return best.mode, best.score
 
-    def rank_modes(self, text: str, modes: Iterable[CodexMode]) -> Tuple[ModeScore, ...]:
+    def rank_modes(
+        self, text: str, modes: Iterable[CodexMode]
+    ) -> Tuple[ModeScore, ...]:
         """Return every candidate, descending by score, then by mode name.
 
         Ranking order is diagnostic only: it never resolves a tied decision.
@@ -189,7 +194,8 @@ class CodexModeScorer:
         """
         text_lower = text.lower()
         blocked = tuple(
-            match.span() for match in self._negation.finditer(text_lower)
+            match.span()
+            for match in self._negation.finditer(text_lower)
             if match.end() > match.start()
         )
         scores = [self._score_evidence(mode, text_lower, blocked) for mode in modes]
@@ -220,7 +226,10 @@ class CodexModeScorer:
         return self.rank_modes(text_lower, (mode,))[0].score
 
     def _score_evidence(
-        self, mode: CodexMode, text: str, blocked: Tuple[Tuple[int, int], ...],
+        self,
+        mode: CodexMode,
+        text: str,
+        blocked: Tuple[Tuple[int, int], ...],
     ) -> ModeScore:
         plan = self._mode_plan(mode)
         candidates = []
@@ -237,33 +246,48 @@ class CodexModeScorer:
                 if found < 0:
                     break
                 if (
-                    (found == 0 or not self._is_word_char(text[found - 1]))
-                    and allowed(found, found + len(needle))
-                ):
-                    candidates.append(SignalMatch(
-                        "literal:" + needle, found, found + len(needle), weight
-                    ))
+                    found == 0 or not self._is_word_char(text[found - 1])
+                ) and allowed(found, found + len(needle)):
+                    candidates.append(
+                        SignalMatch(
+                            "literal:" + needle, found, found + len(needle), weight
+                        )
+                    )
                     break
                 start = found + 1
         for pattern in plan.patterns:
             for match in pattern.finditer(text):
                 if allowed(match.start(), match.end()):
-                    candidates.append(SignalMatch(
-                        "pattern:" + pattern.pattern, match.start(), match.end(),
-                        self._weights["pattern"],
-                    ))
+                    candidates.append(
+                        SignalMatch(
+                            "pattern:" + pattern.pattern,
+                            match.start(),
+                            match.end(),
+                            self._weights["pattern"],
+                        )
+                    )
                     break
         accepted = []
         used = set()
         for match in sorted(
-            (item for item in candidates if math.isfinite(item.weight) and item.weight > 0),
+            (
+                item
+                for item in candidates
+                if math.isfinite(item.weight) and item.weight > 0
+            ),
             key=lambda item: (
-                -item.weight, -(item.end - item.start), item.start, item.signal
+                -item.weight,
+                -(item.end - item.start),
+                item.start,
+                item.signal,
             ),
         ):
             if match.signal in used:
                 continue
-            if any(match.start < item.end and item.start < match.end for item in accepted):
+            if any(
+                match.start < item.end and item.start < match.end
+                for item in accepted
+            ):
                 continue
             accepted.append(match)
             used.add(match.signal)
@@ -386,9 +410,14 @@ class CodexModeScorer:
         for keyword in mode.keywords:
             needle = keyword.strip().lower()
             if needle:
-                literals.append((needle, cls._keyword_weight(
-                    keyword, weights, default_weights["keyword"]
-                )))
+                literals.append(
+                    (
+                        needle,
+                        cls._keyword_weight(
+                            keyword, weights, default_weights["keyword"]
+                        ),
+                    )
+                )
         for phrase in mode.phrases:
             needle, weight = cls._signal_weight(phrase, default_weights["phrase"])
             if needle:

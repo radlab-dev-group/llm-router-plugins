@@ -628,6 +628,14 @@ The subpackage is self-contained — its own config, scorer, semantic layer and 
 generic infrastructure (`common.py`, `constants.py`, `target.py`, `plugin_interface.py`). It never reads the other
 plugins' configuration: `auto` traffic stays with the semantic plugins, `auto_codex` comes here.
 
+**Calibration and evaluation:** the Codex subpackage contains
+[CODEX_EVAL_HOWTO_PL.md (Polski)](agentic_routing/codex/CODEX_EVAL_HOWTO_PL.md) and
+[CODEX_EVAL_HOWTO_EN.md (English)](agentic_routing/codex/CODEX_EVAL_HOWTO_EN.md).
+These guides explain configuration roles, heuristic scores versus embedding similarity, threshold/margin tuning,
+calibration/holdout datasets, evaluation commands, report variants and mode-quality metrics, and deployment/index rebuilding.
+They include the automated tuning and evaluation workflow using
+[`scripts/codex-tune-eval.sh`](../../../scripts/codex-tune-eval.sh) in this repository.
+
 ### 3.1 Module Layout
 
 | Module          | Contents                                                                              |
@@ -760,12 +768,12 @@ Notes:
     "vector_store_path": "",
     "semantic": {
       "enabled": true,
-      "threshold": 0.51,
+      "threshold": 0.44,
       "aggregation": "per_target_top_k",
-      "min_margin": 0.05,
+      "min_margin": 0.005,
       "intent_max_chars": 2000,
       "phase_max_chars": 2000,
-      "top_k": 3,
+      "top_k": 4,
       "chunk_size": 256,
       "chunk_overlap": 64
     }

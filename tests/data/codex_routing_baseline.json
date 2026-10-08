@@ -1,5 +1,6 @@
 {
-  "description": "Replay baseline of the stateless cascade, recorded 2026-10-06 before the phase-evidence and shared-memory work. Generated from tests/data/codex_routing_quality.json with the deterministic variant (no semantic layer); a later variant is compared against it per case.",
+  "description": "Frozen stateless replay snapshot originally described as recorded 2026-10-06 before phase-evidence/shared-memory work. Original per-case decisions and summaries are preserved, not regenerated. No commit/config/dataset hashes were recorded; compound Git already has source=phase, so pre-change provenance cannot be independently verified. Not historical server decisions and not a baseline for newly added cases.",
+  "provenance": {"kind": "frozen_replay_snapshot", "recorded_date_claim": "2026-10-06", "implementation_commit": null, "config_sha256": null, "dataset_sha256": null, "verified_pre_change": false, "comparison_policy": "Compare only common IDs with unchanged labels/split/sequence/ambiguous; recompute all variants using the current metric definitions. Report added cases separately; never fill baseline predictions with current replay."},
   "per_case": {
     "calibration-changelog-phase": {
       "ambiguous": false,
