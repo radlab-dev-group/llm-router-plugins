@@ -366,9 +366,9 @@ Enabled with `settings.semantic.enabled`, disabled for a single process with
   number of its best fragments: `min(top_k, smallest indexed mode's fragment count)`. Their cosines are averaged,
   producing a complete `all_scores` ranking, including negative similarities. Larger example collections do not
   contribute more votes. A missing indexed mode rejects the lookup rather than inventing a score.
-- Acceptance requires both `threshold` (shipped value `0.51`) and a strictly positive lead over the runner-up of
-  at least `min_margin` (shipped value `0.05`). Ties, incomplete rankings, inconsistent winners and malformed scores
-  abstain. A single configured semantic mode needs only the threshold. Margin `0.05` is a starting setting,
+- Acceptance requires both `threshold` (shipped value `0.44`) and a strictly positive lead over the runner-up of
+  at least `min_margin` (shipped value `0.005`). Ties, incomplete rankings, inconsistent winners and malformed scores
+  abstain. A single configured semantic mode needs only the threshold. Margin `0.005` is a starting setting,
   not a measured or calibrated optimum.
 - `CodexSemanticLayer._build_semantic_parts` separately budgets current `request.intent_text` and phase context
   (last active-turn utterance plus bounded tool action descriptions and linked execution status,
@@ -477,12 +477,12 @@ it after logging — the plugin itself only guarantees that the request shape Co
     "vector_store_path": "",             // "" = index lives in memory only
     "semantic": {
       "enabled": true,
-      "threshold": 0.51,
+      "threshold": 0.44,
       "aggregation": "per_target_top_k",  // required
-      "min_margin": 0.05,                 // required
+      "min_margin": 0.005,               // required
       "intent_max_chars": 2000,           // required
       "phase_max_chars": 2000,            // required
-      "top_k": 3,
+      "top_k": 4,
       "chunk_size": 256,
       "chunk_overlap": 64
     }
@@ -956,7 +956,7 @@ The final audit results and limits of this small, previously known holdout are i
 | `plan` never selected in Plan Mode                            | no `<collaboration_mode>` block reached the plugin (stripped/rewritten) | verify the `developer` message survives to the router; `"agent_mode": "plan"` as override |
 | Titles or compaction on the coding model                      | `client_metadata` / `x-codex-turn-metadata` missing or unparsable   | stop stripping metadata; `routing.codex_class` in the logs tells you what was seen |
 | Ambiguous intent reaches semantic/fallback                     | tied heuristic scores or insufficient lead over the runner-up    | add specific signals or re-weight; lowering the margin never accepts a tie |
-| `similarity` just under `0.51` on good matches                 | embedding model / threshold mismatch for your phrasing              | lower `…_SIMILARITY_THRESHOLD` gradually (0.45–0.5 is the usual band)     |
+| `similarity` just under `0.44` on good matches                 | embedding model / threshold mismatch for your phrasing              | lower `…_SIMILARITY_THRESHOLD` gradually (0.40–0.44 is the usual band)     |
 | `model not found` after a routing decision                     | `model_name` not declared in the router model config                | add/fix the model in `LLM_ROUTER_MODELS_CONFIG`                            |
 | Agent stops calling tools on some turns                        | routed model/provider without tool parsing                          | `tool_calling: true` + a server with tool parsing for that model           |
 | Longest turns fail with context errors                        | provider `input_size` < Codex `model_context_window`                 | align them; compaction requests carry the whole transcript                 |
@@ -997,11 +997,11 @@ The final audit results and limits of this small, previously known holdout are i
 | `settings.memory.ttl_seconds` | `900`                                |
 | `…_REDIS_HOST`               | empty — no connection configured      |
 | `settings.semantic.enabled`  | `true`                                |
-| `settings.semantic.threshold`| `0.51`                                |
+| `settings.semantic.threshold`| `0.44`                                |
 | `settings.semantic.aggregation` | `per_target_top_k`                  |
-| `settings.semantic.min_margin` | `0.05`                               |
+| `settings.semantic.min_margin` | `0.005`                              |
 | `settings.semantic.intent_max_chars` / `phase_max_chars` | `2000` / `2000` |
-| `settings.semantic.top_k`    | `3`                                   |
+| `settings.semantic.top_k`    | `4`                                   |
 | `settings.semantic.chunk_size` / `chunk_overlap` | `256` / `64`          |
 | keyword / phrase / pattern weight | `1.0` / `2.0` / `3.0`            |
 | heuristic candidate order    | `test`, `git_review`, `review`, `debug` |

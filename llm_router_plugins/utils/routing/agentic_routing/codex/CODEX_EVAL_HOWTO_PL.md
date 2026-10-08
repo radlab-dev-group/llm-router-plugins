@@ -136,7 +136,7 @@ Efektywna liczba fragmentów na tryb wynosi:
 min(top_k, liczba fragmentów w najmniejszej klasie)
 ```
 
-Dlatego `top_k: 3` **nie oznacza trzech trybów w wyniku**. Oznacza do trzech najlepszych fragmentów na każdy tryb.
+Dlatego `top_k: 4` **nie oznacza czterech trybów w wyniku**. Oznacza do czterech najlepszych fragmentów na każdy tryb.
 
 Akceptacja wymaga:
 
@@ -152,8 +152,8 @@ Obecne ustawienia:
 
 ```json
 {
-  "threshold": 0.51,
-  "min_margin": 0.05,
+  "threshold": 0.44,
+  "min_margin": 0.005,
   "aggregation": "per_target_top_k"
 }
 ```
@@ -163,8 +163,8 @@ Przykłady:
 | Najlepszy wynik | Drugi wynik | Decyzja przy obecnych progach |
 |---:|---:|---|
 | `0.62` | `0.54` | Akceptacja: wystarczający wynik i przewaga. |
-| `0.62` | `0.60` | Odrzucenie: za mała przewaga. |
-| `0.49` | `0.35` | Odrzucenie: za niski wynik. |
+| `0.62` | `0.615` | Odrzucenie: za mała przewaga. |
+| `0.40` | `0.35` | Odrzucenie: za niski wynik. |
 | `0.62` | `0.62` | Odrzucenie: remis. |
 
 **Kosinus `0.62` też nie oznacza 62% prawdopodobieństwa poprawności.** Nie porównuj go bezpośrednio z heurystycznym `0.75` ani strukturalnym `1.0`.
@@ -194,7 +194,7 @@ Sekcje intencji i fazy są embedowane oddzielnie, następnie ich wektory są uś
 | `classify_max_chars` | Osobny budżet parsera historii; nie jest wagą intencji względem fazy. |
 | `chunk_size` | Rozmiar fragmentów indeksowanych opisów/przykładów; obecnie `256`. |
 | `chunk_overlap` | Nakładanie fragmentów; obecnie `64`. |
-| `top_k` | Liczba najlepszych fragmentów uwzględnianych na tryb; obecnie `3`. |
+| `top_k` | Liczba najlepszych fragmentów uwzględnianych na tryb; obecnie `4`. |
 
 Zwiększenie `phase_max_chars` nie jest bezpośrednim ustawieniem „daj fazie dwa razy większą wagę”. Zmienia ilość dostępnego tekstu.
 
@@ -286,8 +286,8 @@ Skrypt Bash uruchamia całą procedurę (wymaga `jq`, Pythona z projektem i zale
 ```bash
 bash scripts/codex-tune-eval.sh \
   --python /sciezka/do/venv/bin/python \
-  --thresholds "0.45 0.50 0.51 0.55 0.60" \
-  --margins "0.02 0.05 0.08 0.10" \
+  --thresholds "0.40 0.44 0.48 0.52 0.56" \
+  --margins "0.001 0.005 0.02 0.05" \
   --output-dir ./workdir/codex-tuning-01
 ```
 
@@ -473,8 +473,8 @@ Jeżeli poprawna klasa regularnie jest druga w rankingu, samo obniżenie `thresh
 Po ustabilizowaniu opisów przetestuj niewielką siatkę wartości, np.:
 
 ```text
-threshold:  0.45, 0.50, 0.51, 0.55, 0.60
-min_margin: 0.02, 0.05, 0.08, 0.10
+threshold:  0.40, 0.44, 0.48, 0.52, 0.56
+min_margin: 0.001, 0.005, 0.02, 0.05
 ```
 
 To **przykładowy zakres eksperymentu**, nie zalecane optimum. Dla innego modelu embeddingowego sensowny zakres może być inny.

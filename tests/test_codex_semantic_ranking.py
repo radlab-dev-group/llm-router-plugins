@@ -674,10 +674,10 @@ def test_shipped_config_has_balanced_semantic_defaults(raw_config):
     config = CodexRoutingConfig._from_raw(raw_config)
     config.validate_args()
     assert config.semantic_aggregation == "per_target_top_k"
-    assert config.semantic_min_margin == pytest.approx(0.05)
+    assert config.semantic_min_margin == pytest.approx(0.005)
     assert config.semantic_intent_max_chars == 2000
     assert config.semantic_phase_max_chars == 2000
-    assert config.top_k == 3
+    assert config.top_k == 4
     assert set(config.mode_names) - set(_SPECIAL_NAMES) == set(_MODE_NAMES)
 
 

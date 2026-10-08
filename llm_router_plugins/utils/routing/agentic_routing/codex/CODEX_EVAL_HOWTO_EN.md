@@ -136,7 +136,7 @@ The effective number of chunks per mode is:
 min(top_k, number of chunks in the smallest class)
 ```
 
-Therefore, `top_k: 3` **does not mean three modes in the result**. It means up to three best chunks for each mode.
+Therefore, `top_k: 4` **does not mean four modes in the result**. It means up to four best chunks for each mode.
 
 Acceptance requires:
 
@@ -152,8 +152,8 @@ Current settings:
 
 ```json
 {
-  "threshold": 0.51,
-  "min_margin": 0.05,
+  "threshold": 0.44,
+  "min_margin": 0.005,
   "aggregation": "per_target_top_k"
 }
 ```
@@ -163,8 +163,8 @@ Examples:
 | Best score | Second score | Decision with the current thresholds |
 |---:|---:|---|
 | `0.62` | `0.54` | Accept: sufficient score and margin. |
-| `0.62` | `0.60` | Reject: insufficient margin. |
-| `0.49` | `0.35` | Reject: score too low. |
+| `0.62` | `0.615` | Reject: insufficient margin. |
+| `0.40` | `0.35` | Reject: score too low. |
 | `0.62` | `0.62` | Reject: tie. |
 
 **A cosine similarity of `0.62` does not mean a 62% probability of correctness either.** Do not compare it directly with heuristic `0.75` or structural `1.0`.
@@ -194,7 +194,7 @@ Intent and phase sections are embedded separately, then their vectors are averag
 | `classify_max_chars` | Separate history-parser budget; not an intent-versus-phase weight. |
 | `chunk_size` | Chunk size for indexed descriptions/examples; currently `256`. |
 | `chunk_overlap` | Chunk overlap; currently `64`. |
-| `top_k` | Number of best chunks considered per mode; currently `3`. |
+| `top_k` | Number of best chunks considered per mode; currently `4`. |
 
 Increasing `phase_max_chars` does not directly mean “give the phase twice the weight.” It changes how much text is available.
 
@@ -286,8 +286,8 @@ The Bash script runs the complete workflow (requires `jq`, Python with the proje
 ```bash
 bash scripts/codex-tune-eval.sh \
   --python /path/to/venv/bin/python \
-  --thresholds "0.45 0.50 0.51 0.55 0.60" \
-  --margins "0.02 0.05 0.08 0.10" \
+  --thresholds "0.40 0.44 0.48 0.52 0.56" \
+  --margins "0.001 0.005 0.02 0.05" \
   --output-dir ./workdir/codex-tuning-01
 ```
 
@@ -473,8 +473,8 @@ If the correct class regularly ranks second, lowering `threshold` alone usually 
 Once descriptions are stable, test a small grid of values, for example:
 
 ```text
-threshold:  0.45, 0.50, 0.51, 0.55, 0.60
-min_margin: 0.02, 0.05, 0.08, 0.10
+threshold:  0.40, 0.44, 0.48, 0.52, 0.56
+min_margin: 0.001, 0.005, 0.02, 0.05
 ```
 
 This is **an example experimental range**, not a recommended optimum. A different embedding model may require a different range.

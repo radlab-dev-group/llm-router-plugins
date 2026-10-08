@@ -15,12 +15,12 @@ JSON structure::
         "vector_store_path": "",
         "semantic": {
           "enabled": true,
-          "threshold": 0.51,
+          "threshold": 0.44,
           "aggregation": "per_target_top_k",
-          "min_margin": 0.05,
+          "min_margin": 0.005,
           "intent_max_chars": 2000,
           "phase_max_chars": 2000,
-          "top_k": 3,
+          "top_k": 4,
           "chunk_size": 256,
           "chunk_overlap": 64
         }
@@ -285,7 +285,7 @@ class CodexRoutingConfig(RoutingConfigBase):
             raise ValueError("settings.phase must be an object")
         chunk_size = int(semantic.get("chunk_size", 256))
         chunk_overlap = int(semantic.get("chunk_overlap", 64))
-        top_k = int(semantic.get("top_k", 3))
+        top_k = int(semantic.get("top_k", 4))
         RoutingConfigBase.validate_semantic_params(chunk_size, chunk_overlap, top_k)
 
         memory, memory_status = cls._resolve_memory(settings.get("memory"))
@@ -297,7 +297,7 @@ class CodexRoutingConfig(RoutingConfigBase):
             vector_store_path=raw.get("vector_store_path")
             or settings.get("vector_store_path"),
             semantic_enabled=bool(semantic.get("enabled", True)),
-            similarity_threshold=float(semantic.get("threshold", 0.51)),
+            similarity_threshold=float(semantic.get("threshold", 0.44)),
             semantic_aggregation=semantic["aggregation"],
             semantic_min_margin=float(margin),
             semantic_intent_max_chars=semantic["intent_max_chars"],

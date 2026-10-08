@@ -2290,8 +2290,8 @@ class TestConfig:
         config = _config()
 
         assert config.semantic_enabled is True
-        assert config.similarity_threshold == 0.51
-        assert config.top_k == 3
+        assert config.similarity_threshold == 0.44
+        assert config.top_k == 4
         assert config.chunk_size == 256
         assert config.chunk_overlap == 64
         assert config.embedding_model

@@ -7,8 +7,8 @@ DATASET="$ROOT/tests/data/codex_routing_quality.json"
 PYTHON=${PYTHON:-python3}
 OUTPUT=""
 BASELINE=""
-THRESHOLDS="0.45 0.50 0.51 0.55 0.60"
-MARGINS="0.02 0.05 0.08 0.10"
+THRESHOLDS="0.40 0.44 0.48 0.52 0.56"
+MARGINS="0.001 0.005 0.02 0.05"
 NO_SEMANTIC=false
 MODULE=llm_router_plugins.utils.routing.agentic_routing.codex.evaluation
 
@@ -19,8 +19,8 @@ usage() {
         '  --dataset FILE      Corpus with calibration and holdout splits' \
         '  --python EXECUTABLE Interpreter with the project and [ml] installed' \
         '  --output-dir DIR    New directory for configs, reports and logs' \
-        '  --thresholds LIST   Space-separated values (default: 0.45 0.50 0.51 0.55 0.60)' \
-        '  --margins LIST      Space-separated values (default: 0.02 0.05 0.08 0.10)' \
+        '  --thresholds LIST   Space-separated values (default: 0.40 0.44 0.48 0.52 0.56)' \
+        '  --margins LIST      Space-separated values (default: 0.001 0.005 0.02 0.05)' \
         '  --baseline FILE     Optional frozen baseline, used only on holdout' \
         '  --no-semantic       Deterministic eval only; no tuning or ML required' \
         '  --help              Show this help' \
