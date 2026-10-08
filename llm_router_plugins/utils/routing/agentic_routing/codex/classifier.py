@@ -242,9 +242,13 @@ class CodexModeClassifier:
         self._config = config
         self._semantic = semantic
         self._memory = memory
-        self._scorer = scorer if scorer is not None else CodexModeScorer(
-            negation_pattern=config.heuristic_negation_pattern,
-            weights=config.heuristic_weights,
+        self._scorer = (
+            scorer
+            if scorer is not None
+            else CodexModeScorer(
+                negation_pattern=config.heuristic_negation_pattern,
+                weights=config.heuristic_weights,
+            )
         )
 
     @property
@@ -308,24 +312,36 @@ class CodexModeClassifier:
             evidence = remembered.evidence
         if evidence is not None and evidence.mode in modes:
             return RoutingDecision(
-                evidence.mode, SOURCE_PHASE, 1.0, 1.0,
-                reason=evidence.reason, evidence=evidence,
-                memory=memory_status, memory_version=memory_version,
+                evidence.mode,
+                SOURCE_PHASE,
+                1.0,
+                1.0,
+                reason=evidence.reason,
+                evidence=evidence,
+                memory=memory_status,
+                memory_version=memory_version,
             )
         if (
-            remembered is not None and remembered.carried is not None
+            remembered is not None
+            and remembered.carried is not None
             and remembered.carried.mode in modes
         ):
             return RoutingDecision(
-                remembered.carried.mode, SOURCE_MEMORY, 1.0, 1.0,
-                reason="carried phase", memory=memory_status,
+                remembered.carried.mode,
+                SOURCE_MEMORY,
+                1.0,
+                1.0,
+                reason="carried phase",
+                memory=memory_status,
                 memory_version=memory_version,
             )
         if config.heuristic_enabled:
             decision = self._heuristic_mode(request.intent_text, modes)
             if decision is not None:
                 return replace(
-                    decision, memory=memory_status, memory_version=memory_version,
+                    decision,
+                    memory=memory_status,
+                    memory_version=memory_version,
                 )
 
         routed = (
@@ -338,8 +354,12 @@ class CodexModeClassifier:
         )
         if mode is not None:
             return RoutingDecision(
-                mode.name, SOURCE_SEMANTIC, similarity, similarity,
-                memory=memory_status, memory_version=memory_version,
+                mode.name,
+                SOURCE_SEMANTIC,
+                similarity,
+                similarity,
+                memory=memory_status,
+                memory_version=memory_version,
                 semantic="accepted",
             )
         semantic_outcome = self._semantic_outcome(semantic, routed, similarity)
@@ -383,7 +403,8 @@ class CodexModeClassifier:
         """
         store = self._memory
         if (
-            store is None or self._config.phase is None
+            store is None
+            or self._config.phase is None
             or not self._config.phase.enabled
         ):
             return None, None, None
@@ -400,7 +421,10 @@ class CodexModeClassifier:
         if status.state not in ("hit", "miss", "expired"):
             return None, status, None
         resolved = resolve_memory(
-            stored, request, self._config.phase, self._config.memory,
+            stored,
+            request,
+            self._config.phase,
+            self._config.memory,
         )
         if resolved.status.state == "conflict":
             return None, resolved.status, version

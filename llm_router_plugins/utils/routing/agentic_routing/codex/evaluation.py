@@ -46,9 +46,15 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.classifier import (
     CLASS_ROUTED_MODES,
     CodexModeClassifier,
 )
-from llm_router_plugins.utils.routing.agentic_routing.codex.config import CodexRoutingConfig
-from llm_router_plugins.utils.routing.agentic_routing.codex.payload import CodexPayloadParser
-from llm_router_plugins.utils.routing.agentic_routing.codex.semantic import CodexSemanticLayer
+from llm_router_plugins.utils.routing.agentic_routing.codex.config import (
+    CodexRoutingConfig,
+)
+from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
+    CodexPayloadParser,
+)
+from llm_router_plugins.utils.routing.agentic_routing.codex.semantic import (
+    CodexSemanticLayer,
+)
 from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
     InMemoryRoutingStateStore,
     remember_decision,
@@ -124,7 +130,11 @@ def load_cases(path, config, split):
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     if split not in (*SPLITS, "all"):
         raise ValueError(f"Invalid split selection: {split}")
-    if not isinstance(data, dict) or data.get("schema_version") != 1 or not isinstance(data.get("cases"), list):
+    if (
+        not isinstance(data, dict)
+        or data.get("schema_version") != 1
+        or not isinstance(data.get("cases"), list)
+    ):
         raise ValueError("Expected schema_version=1 and a cases list")
     seen = set()
     sequence_splits = {}
@@ -162,7 +172,9 @@ def load_cases(path, config, split):
         if sequence:
             known = sequence_splits.setdefault(sequence, case["split"])
             if known != case["split"]:
-                raise ValueError(f"Sequence {sequence} spans two splits in {identifier}")
+                raise ValueError(
+                    f"Sequence {sequence} spans two splits in {identifier}"
+                )
         request = parser.parse(build_payload(case, config))
         for session in (request.session_id, case.get("source_session")):
             if session:
@@ -179,7 +191,9 @@ def load_cases(path, config, split):
     return cases
 
 
-def build_payload(case: Dict[str, Any], config: CodexRoutingConfig) -> Dict[str, Any]:
+def build_payload(
+    case: Dict[str, Any], config: CodexRoutingConfig
+) -> Dict[str, Any]:
     """
     Rebuild the request payload of *case*, replaying its session metadata.
 
@@ -201,7 +215,8 @@ def build_payload(case: Dict[str, Any], config: CodexRoutingConfig) -> Dict[str,
     metadata = case.get("metadata")
     if isinstance(metadata, dict) and metadata:
         payload["client_metadata"] = {
-            **payload.get("client_metadata", {}), **copy.deepcopy(metadata),
+            **payload.get("client_metadata", {}),
+            **copy.deepcopy(metadata),
         }
     return payload
 
@@ -234,26 +249,29 @@ def _transition_metrics(
     Dict[str, Any]
         Counters plus ``mean_switch_delay`` over the expected switches.
     """
-    counters: Counter = Counter({
-        "pairs": 0, "expected_switches": 0, "actual_switches": 0,
-        "unnecessary_switches": 0, "missed_switches": 0,
-        "censored_switches": 0,
-    })
+    counters: Counter = Counter(
+        {
+            "pairs": 0,
+            "expected_switches": 0,
+            "actual_switches": 0,
+            "unnecessary_switches": 0,
+            "missed_switches": 0,
+            "censored_switches": 0,
+        }
+    )
     delays: List[int] = []
     expected_key = "expected_mode" if field == "mode" else "expected_model"
     for sequence in _sequences(records):
         for index in range(1, len(sequence)):
             previous, current = sequence[index - 1], sequence[index]
-            expected_switch = (
-                previous[expected_key] != current[expected_key]
-            )
-            actual_switch = (
-                previous[prediction][field] != current[prediction][field]
-            )
+            expected_switch = previous[expected_key] != current[expected_key]
+            actual_switch = previous[prediction][field] != current[prediction][field]
             counters["pairs"] += 1
             counters["expected_switches"] += int(expected_switch)
             counters["actual_switches"] += int(actual_switch)
-            counters["unnecessary_switches"] += int(actual_switch and not expected_switch)
+            counters["unnecessary_switches"] += int(
+                actual_switch and not expected_switch
+            )
             counters["missed_switches"] += int(expected_switch and not actual_switch)
             if not expected_switch:
                 continue
@@ -269,8 +287,7 @@ def _transition_metrics(
                 cursor += 1
             delays.append(delay)
             counters["censored_switches"] += int(
-                cursor == len(sequence)
-                or sequence[cursor][expected_key] != target
+                cursor == len(sequence) or sequence[cursor][expected_key] != target
             )
     metrics: Dict[str, Any] = dict(counters)
     metrics["mean_switch_delay"] = sum(delays) / len(delays) if delays else None
@@ -349,8 +366,12 @@ def summarize(records, prediction):
         if result["source"] == "fallback":
             fallback_reasons[result.get("reason") or "unspecified"] += 1
     for counts in modes.values():
-        counts["recall"] = counts["correct"] / counts["total"] if counts["total"] else None
-        counts["precision"] = counts["correct"] / counts["predicted"] if counts["predicted"] else None
+        counts["recall"] = (
+            counts["correct"] / counts["total"] if counts["total"] else None
+        )
+        counts["precision"] = (
+            counts["correct"] / counts["predicted"] if counts["predicted"] else None
+        )
     total = len(records)
     main = [r for r in scored if r["expected_mode"] not in CLASS_ROUTED_MODES]
     special = [r for r in scored if r["expected_mode"] in CLASS_ROUTED_MODES]
@@ -368,27 +389,32 @@ def summarize(records, prediction):
         "main_turn_count": len(main),
         "main_mode_accuracy": (
             sum(r[prediction]["mode"] == r["expected_mode"] for r in main)
-            / len(main) if main else None
+            / len(main)
+            if main
+            else None
         ),
         "special_cases": {
             "count": len(special),
             "correct": sum(
                 r[prediction]["mode"] == r["expected_mode"] for r in special
             ),
-            "per_mode": {mode: dict(modes[mode]) for mode in CLASS_ROUTED_MODES
-                         if mode in modes},
+            "per_mode": {
+                mode: dict(modes[mode])
+                for mode in CLASS_ROUTED_MODES
+                if mode in modes
+            },
         },
-        "ambiguous_sources": dict(Counter(
-            r[prediction]["source"] for r in records if r.get("ambiguous")
-        )),
+        "ambiguous_sources": dict(
+            Counter(r[prediction]["source"] for r in records if r.get("ambiguous"))
+        ),
         "mode_transitions": _transition_metrics(records, prediction, "mode"),
         "model_transitions": _transition_metrics(records, prediction, "model"),
         "mean_routing_ms": (
-            sum(r[prediction]["elapsed_ms"] for r in records) / total if total else None
+            sum(r[prediction]["elapsed_ms"] for r in records) / total
+            if total
+            else None
         ),
-        "semantic_acceptance_rate": (
-            sources["semantic"] / count if count else None
-        ),
+        "semantic_acceptance_rate": (sources["semantic"] / count if count else None),
     }
 
 
@@ -422,7 +448,9 @@ def evaluate(config, cases, router=None):
     checked = CheckedRouter(router) if router is not None else None
     layer = (
         CodexSemanticLayer(
-            checked, config.similarity_threshold, config.mode_by_name,
+            checked,
+            config.similarity_threshold,
+            config.mode_by_name,
             min_margin=config.semantic_min_margin,
             intent_max_chars=config.semantic_intent_max_chars,
             phase_max_chars=config.semantic_phase_max_chars,
@@ -460,7 +488,8 @@ def evaluate(config, cases, router=None):
         if pair is None:
             store = InMemoryRoutingStateStore(memory_policy)
             pair = memory_classifiers[bucket] = (
-                CodexModeClassifier(config, memory=store), store
+                CodexModeClassifier(config, memory=store),
+                store,
             )
         memory_classifier, memory_store = pair
         if layer is not None:
@@ -480,11 +509,18 @@ def evaluate(config, cases, router=None):
         started = time.perf_counter()
         memory_decision = memory_classifier.classify(payload, request)
         remember_decision(
-            memory_store, memory_policy, request, memory_decision,
-            rules=config.phase, expected_version=memory_decision.memory_version,
+            memory_store,
+            memory_policy,
+            request,
+            memory_decision,
+            rules=config.phase,
+            expected_version=memory_decision.memory_version,
         )
         variants[STATEFUL_VARIANT] = _variant(
-            config, memory_decision.mode, memory_decision.source, started,
+            config,
+            memory_decision.mode,
+            memory_decision.source,
+            started,
             memory_decision.reason,
         )
         if layer is None:
@@ -500,12 +536,15 @@ def evaluate(config, cases, router=None):
         routed = layer.route(request)
         semantic_ms = (time.perf_counter() - started) * 1000
         if checked.error is not None:
-            raise RuntimeError(f"Semantic lookup failed: {case['id']}") from checked.error
+            raise RuntimeError(
+                f"Semantic lookup failed: {case['id']}"
+            ) from checked.error
         accepted, _ = layer.accept(routed)
         semantic_mode = accepted.name if accepted else config.fallback_mode
         ranking = routed.get("all_scores", []) if routed else []
         if (
-            not isinstance(ranking, list) or len(ranking) != len(expected_targets)
+            not isinstance(ranking, list)
+            or len(ranking) != len(expected_targets)
             or any(not isinstance(entry, dict) for entry in ranking)
             or {entry.get("target") for entry in ranking} != expected_targets
             or any(
@@ -539,8 +578,9 @@ def evaluate(config, cases, router=None):
     return report
 
 
-def _variant(config: CodexRoutingConfig, mode: str, source: str, started: float,
-             reason=None) -> Dict[str, Any]:
+def _variant(
+    config: CodexRoutingConfig, mode: str, source: str, started: float, reason=None
+) -> Dict[str, Any]:
     """Snapshot one variant's answer, with the model mapped back from the mode."""
     return {
         "mode": mode,
@@ -551,7 +591,11 @@ def _variant(config: CodexRoutingConfig, mode: str, source: str, started: float,
     }
 
 
-def _record(config: CodexRoutingConfig, case: Dict[str, Any], variants: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+def _record(
+    config: CodexRoutingConfig,
+    case: Dict[str, Any],
+    variants: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
     """Assemble one report record from the case and the variants that ran."""
     return {
         "id": case["id"],
@@ -587,11 +631,18 @@ def compare_baseline(config, records, baseline):
         mode = previous["mode"]
         if mode not in config.mode_by_name:
             raise ValueError(f"Unknown baseline mode: {mode}")
-        common.append({**record, "baseline": {
-            "mode": mode, "model": config.mode_by_name[mode].model_name,
-            "source": previous["source"], "reason": "not_recorded",
-            "elapsed_ms": 0,
-        }})
+        common.append(
+            {
+                **record,
+                "baseline": {
+                    "mode": mode,
+                    "model": config.mode_by_name[mode].model_name,
+                    "source": previous["source"],
+                    "reason": "not_recorded",
+                    "elapsed_ms": 0,
+                },
+            }
+        )
     identifiers = {r["id"] for r in records}
     variants = ("baseline", DETERMINISTIC_VARIANT, STATEFUL_VARIANT)
     summaries = {name: summarize(common, name) for name in variants}
@@ -601,9 +652,12 @@ def compare_baseline(config, records, baseline):
         "provenance": baseline.get("provenance", {}),
         "common_count": len(common),
         "added_case_ids": [r["id"] for r in records if r["id"] not in frozen],
-        "baseline_only_case_ids": [key for key, value in frozen.items()
-                                   if key not in identifiers and value["split"]
-                                   in {r["split"] for r in records}],
+        "baseline_only_case_ids": [
+            key
+            for key, value in frozen.items()
+            if key not in identifiers
+            and value["split"] in {r["split"] for r in records}
+        ],
         "variants": summaries,
     }
 
@@ -624,7 +678,8 @@ def main():
     config = CodexRoutingConfig._from_raw(json.loads(raw))
     config.validate_args()
     if not args.no_semantic and (
-        not config.semantic_enabled or config.semantic_aggregation != "per_target_top_k"
+        not config.semantic_enabled
+        or config.semantic_aggregation != "per_target_top_k"
     ):
         parser.error(
             "Semantic evaluation requires enabled semantic routing and "
@@ -636,9 +691,12 @@ def main():
     if not args.no_semantic:
         router = build_embedding_router(
             embedding_model=config.embedding_model,
-            chunk_size=config.chunk_size, chunk_overlap=config.chunk_overlap,
+            chunk_size=config.chunk_size,
+            chunk_overlap=config.chunk_overlap,
             top_k=config.top_k,
-            routing_targets=tuple(m for m in config.codex_modes if m.name not in CLASS_ROUTED_MODES),
+            routing_targets=tuple(
+                m for m in config.codex_modes if m.name not in CLASS_ROUTED_MODES
+            ),
             aggregation=config.semantic_aggregation,
         )
     initialization_ms = (time.perf_counter() - started) * 1000
@@ -653,15 +711,18 @@ def main():
         "dataset_sha256": hashlib.sha256(args.dataset.read_bytes()).hexdigest(),
         "baseline_sha256": (
             hashlib.sha256(args.baseline.read_bytes()).hexdigest()
-            if args.baseline else None
+            if args.baseline
+            else None
         ),
         "metrics_version": 2,
         "transition_policy": "ambiguous boundaries; special calls excluded",
         "embedding_model": config.embedding_model,
         "threshold": config.similarity_threshold,
         "min_margin": config.semantic_min_margin,
-        "split": args.split, "initialization_ms": initialization_ms,
-        "environment_overrides": False, "persistent_index": False,
+        "split": args.split,
+        "initialization_ms": initialization_ms,
+        "environment_overrides": False,
+        "persistent_index": False,
     }
     print(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))
 

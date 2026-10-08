@@ -356,13 +356,15 @@ class CodexRoutingPlugin(PluginInterface):
         """
         try:
             outcome = remember_decision(
-                self._memory, self._config.memory, request, decision,
-                rules=self._config.phase, expected_version=decision.memory_version,
+                self._memory,
+                self._config.memory,
+                request,
+                decision,
+                rules=self._config.phase,
+                expected_version=decision.memory_version,
             )
         except Exception as exc:
-            self._warn(
-                "Codex routing memory write failed: %s", type(exc).__name__
-            )
+            self._warn("Codex routing memory write failed: %s", type(exc).__name__)
             return "unavailable"
         if outcome == "conflict":
             self._info("Codex routing memory not written: version conflict")

@@ -213,8 +213,12 @@ class CodexRoutingConfig(RoutingConfigBase):
 
         settings = raw["settings"]
         for setting_key in (
-            "trigger_model", "fallback_mode", "heuristic_min_margin",
-            "heuristic_negation_pattern", "heuristic_weights", "phase",
+            "trigger_model",
+            "fallback_mode",
+            "heuristic_min_margin",
+            "heuristic_negation_pattern",
+            "heuristic_weights",
+            "phase",
         ):
             if setting_key not in settings:
                 raise KeyError(
@@ -247,21 +251,36 @@ class CodexRoutingConfig(RoutingConfigBase):
         semantic = settings.get("semantic")
         if not isinstance(semantic, dict):
             raise ValueError("settings.semantic must be an object")
-        for key in ("aggregation", "min_margin", "intent_max_chars", "phase_max_chars"):
+        for key in (
+            "aggregation",
+            "min_margin",
+            "intent_max_chars",
+            "phase_max_chars",
+        ):
             if key not in semantic:
-                raise KeyError(f"Missing required field '{key}' in settings.semantic")
+                raise KeyError(
+                    f"Missing required field '{key}' in settings.semantic"
+                )
         if semantic["aggregation"] not in ("global_top_k", "per_target_top_k"):
-            raise ValueError("settings.semantic.aggregation is not a supported strategy")
+            raise ValueError(
+                "settings.semantic.aggregation is not a supported strategy"
+            )
         margin = semantic["min_margin"]
         if (
-            isinstance(margin, bool) or not isinstance(margin, (int, float))
-            or not math.isfinite(margin) or not 0 <= margin <= 2
+            isinstance(margin, bool)
+            or not isinstance(margin, (int, float))
+            or not math.isfinite(margin)
+            or not 0 <= margin <= 2
         ):
-            raise ValueError("settings.semantic.min_margin must be finite and in [0, 2]")
+            raise ValueError(
+                "settings.semantic.min_margin must be finite and in [0, 2]"
+            )
         for key in ("intent_max_chars", "phase_max_chars"):
             value = semantic[key]
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ValueError(f"settings.semantic.{key} must be a positive integer")
+                raise ValueError(
+                    f"settings.semantic.{key} must be a positive integer"
+                )
         if "phase" in settings and not isinstance(settings["phase"], dict):
             raise ValueError("settings.phase must be an object")
         chunk_size = int(semantic.get("chunk_size", 256))
@@ -302,7 +321,9 @@ class CodexRoutingConfig(RoutingConfigBase):
         )
 
     @staticmethod
-    def _resolve_memory(raw: Any) -> Tuple[CodexMemoryConfig, Optional[MemoryStatus]]:
+    def _resolve_memory(
+        raw: Any,
+    ) -> Tuple[CodexMemoryConfig, Optional[MemoryStatus]]:
         """Resolve optional memory without exposing parser errors or raw values."""
         try:
             if raw is not None and not isinstance(raw, dict):
@@ -319,14 +340,20 @@ class CodexRoutingConfig(RoutingConfigBase):
         if not isinstance(raw, dict):
             raise ValueError("settings.heuristic_weights must be an object")
         if set(raw) != {"keyword", "phrase", "pattern"}:
-            raise ValueError("settings.heuristic_weights requires keyword, phrase and pattern")
+            raise ValueError(
+                "settings.heuristic_weights requires keyword, phrase and pattern"
+            )
         result = dict(raw)
         for name, value in result.items():
             if (
-                isinstance(value, bool) or not isinstance(value, (int, float))
-                or not math.isfinite(value) or value < 0
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
             ):
-                raise ValueError(f"settings.heuristic_weights.{name} must be finite and >= 0")
+                raise ValueError(
+                    f"settings.heuristic_weights.{name} must be finite and >= 0"
+                )
         return result
 
     def _override_from_env(self, logger: Optional[logging.Logger] = None) -> None:
@@ -364,17 +391,25 @@ class CodexRoutingConfig(RoutingConfigBase):
         None
         """
         if self.memory_status is None and any(
-            name.startswith((
-                f"{AGENTIC_CODEX_ROUTING_PREFIX}MEMORY_",
-                f"{AGENTIC_CODEX_ROUTING_PREFIX}REDIS_",
-            ))
+            name.startswith(
+                (
+                    f"{AGENTIC_CODEX_ROUTING_PREFIX}MEMORY_",
+                    f"{AGENTIC_CODEX_ROUTING_PREFIX}REDIS_",
+                )
+            )
             for name in os.environ
         ):
             policy = {
                 name: getattr(self.memory, name)
                 for name in (
-                    "enabled", "backend", "ttl_seconds", "max_sessions",
-                    "max_events", "max_calls", "key_prefix", "max_retries",
+                    "enabled",
+                    "backend",
+                    "ttl_seconds",
+                    "max_sessions",
+                    "max_events",
+                    "max_calls",
+                    "key_prefix",
+                    "max_retries",
                 )
             }
             self.memory, self.memory_status = self._resolve_memory(policy)
@@ -654,7 +689,9 @@ class CodexRoutingConfig(RoutingConfigBase):
             or not math.isfinite(self.semantic_min_margin)
             or not 0 <= self.semantic_min_margin <= 2
         ):
-            raise ValueError("CodexRouting: semantic_min_margin must be finite and in [0, 2]")
+            raise ValueError(
+                "CodexRouting: semantic_min_margin must be finite and in [0, 2]"
+            )
         for name in ("semantic_intent_max_chars", "semantic_phase_max_chars"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -668,11 +705,15 @@ class CodexRoutingConfig(RoutingConfigBase):
                 raise ValueError(f"CodexRouting: {name} must be finite and >= 0")
         self._heuristic_weights(self.heuristic_weights)
         if not isinstance(self.heuristic_negation_pattern, str):
-            raise ValueError("CodexRouting: heuristic_negation_pattern must be a string")
+            raise ValueError(
+                "CodexRouting: heuristic_negation_pattern must be a string"
+            )
         try:
             re.compile(self.heuristic_negation_pattern, re.IGNORECASE)
         except re.error as exc:
-            raise ValueError("CodexRouting: invalid heuristic_negation_pattern") from exc
+            raise ValueError(
+                "CodexRouting: invalid heuristic_negation_pattern"
+            ) from exc
 
     def _validate_memory(self) -> None:
         """A bad optional memory policy disables only memory, not the router."""
@@ -682,7 +723,10 @@ class CodexRoutingConfig(RoutingConfigBase):
             if self.memory.backend not in ("redis", "memory"):
                 raise ValueError("invalid backend")
             for name in (
-                "ttl_seconds", "max_sessions", "max_events", "max_calls",
+                "ttl_seconds",
+                "max_sessions",
+                "max_events",
+                "max_calls",
                 "max_retries",
             ):
                 value = getattr(self.memory, name)
@@ -692,8 +736,10 @@ class CodexRoutingConfig(RoutingConfigBase):
                 if value < minimum:
                     raise ValueError("invalid limit range")
             prefix = self.memory.key_prefix
-            if not isinstance(prefix, str) or not prefix or any(
-                char.isspace() for char in prefix
+            if (
+                not isinstance(prefix, str)
+                or not prefix
+                or any(char.isspace() for char in prefix)
             ):
                 raise ValueError("invalid key prefix")
             if self.memory.enabled and self.memory.backend == "redis":

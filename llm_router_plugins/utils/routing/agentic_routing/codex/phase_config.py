@@ -4,7 +4,6 @@ import re
 from dataclasses import dataclass
 from typing import Optional, Pattern, Tuple
 
-
 #: Phase fields a configuration may omit.  Each has a safe default that keeps
 #: the behaviour of the version that predates it, so an older config file keeps
 #: working untouched; nothing is merged in from the shipped default file.
@@ -75,7 +74,9 @@ class CodexPhaseConfig:
             try:
                 return re.compile(value, flags)
             except re.error as exc:
-                raise ValueError(f"Invalid settings.phase.{label} regex: {exc}") from exc
+                raise ValueError(
+                    f"Invalid settings.phase.{label} regex: {exc}"
+                ) from exc
 
         def mode(value, label, nullable=False):
             if value is None and nullable:
@@ -103,16 +104,20 @@ class CodexPhaseConfig:
         for index, rule in enumerate(commands):
             label = f"commands[{index}]"
             if not isinstance(rule, dict) or set(rule) != {
-                "executable", "args_prefix", "mode"
+                "executable",
+                "args_prefix",
+                "mode",
             }:
                 raise ValueError(
                     f"settings.phase.{label} requires executable, args_prefix and mode"
                 )
-            compiled_commands.append(PhaseCommandRule(
-                pattern(rule["executable"], label + ".executable"),
-                strings(rule["args_prefix"], label + ".args_prefix"),
-                mode(rule["mode"], label + ".mode", nullable=True),
-            ))
+            compiled_commands.append(
+                PhaseCommandRule(
+                    pattern(rule["executable"], label + ".executable"),
+                    strings(rule["args_prefix"], label + ".args_prefix"),
+                    mode(rule["mode"], label + ".mode", nullable=True),
+                )
+            )
         result = cls(
             enabled=data["enabled"],
             announcement_prefix=pattern(
@@ -152,10 +157,13 @@ class CodexPhaseConfig:
                     rule.mode for rule in result.commands if rule.mode is not None
                 )
             references.update(
-                raw[key] for key in ("test_mode", "implement_mode", "failure_mode")
+                raw[key]
+                for key in ("test_mode", "implement_mode", "failure_mode")
                 if key in raw
             )
             unknown_modes = references - set(mode_names)
             if unknown_modes:
-                raise ValueError(f"Unknown settings.phase modes: {sorted(unknown_modes)}")
+                raise ValueError(
+                    f"Unknown settings.phase modes: {sorted(unknown_modes)}"
+                )
         return result

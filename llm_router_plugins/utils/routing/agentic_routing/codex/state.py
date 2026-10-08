@@ -101,9 +101,19 @@ _FINGERPRINT_CHARS = 16
 #: Deliberately *not* read from the JSON config and never inherited from the
 #: host application's ``AUTH_REDIS_*`` or generic ``REDIS_*`` variables.
 CONNECTION_ENV_FIELDS = (
-    "host", "port", "db", "password", "protocol", "username", "ssl",
-    "ssl_ca_certs", "ssl_certfile", "ssl_keyfile", "ssl_cert_reqs",
-    "socket_connect_timeout", "socket_timeout",
+    "host",
+    "port",
+    "db",
+    "password",
+    "protocol",
+    "username",
+    "ssl",
+    "ssl_ca_certs",
+    "ssl_certfile",
+    "ssl_keyfile",
+    "ssl_cert_reqs",
+    "socket_connect_timeout",
+    "socket_timeout",
 )
 
 
@@ -269,7 +279,9 @@ class CodexMemoryConfig:
     max_calls: int = 32
     key_prefix: str = "llm-router:codex-routing"
     max_retries: int = 1
-    connection: RedisConnectionSettings = field(default_factory=RedisConnectionSettings)
+    connection: RedisConnectionSettings = field(
+        default_factory=RedisConnectionSettings
+    )
 
     @property
     def usable(self) -> bool:
@@ -378,7 +390,9 @@ def connection_from_env(prefix: str) -> RedisConnectionSettings:
         ssl_certfile=_env_secret(prefix, "REDIS_SSL_CERTFILE"),
         ssl_keyfile=_env_secret(prefix, "REDIS_SSL_KEYFILE"),
         ssl_cert_reqs=cert_reqs,
-        socket_connect_timeout=_env_float(prefix, "REDIS_SOCKET_CONNECT_TIMEOUT", 1.0),
+        socket_connect_timeout=_env_float(
+            prefix, "REDIS_SOCKET_CONNECT_TIMEOUT", 1.0
+        ),
         socket_timeout=_env_float(prefix, "REDIS_SOCKET_TIMEOUT", 1.0),
     )
 
@@ -409,8 +423,14 @@ def memory_config_from_raw(raw: Any, prefix: str) -> CodexMemoryConfig:
     """
     data: Dict[str, Any] = raw if isinstance(raw, dict) else {}
     unknown = set(data) - {
-        "enabled", "backend", "ttl_seconds", "max_sessions", "max_events",
-        "max_calls", "key_prefix", "max_retries",
+        "enabled",
+        "backend",
+        "ttl_seconds",
+        "max_sessions",
+        "max_events",
+        "max_calls",
+        "key_prefix",
+        "max_retries",
     }
     if unknown:
         raise ValueError(f"Unknown settings.memory fields: {sorted(unknown)}")
@@ -419,9 +439,9 @@ def memory_config_from_raw(raw: Any, prefix: str) -> CodexMemoryConfig:
         return _resolve(data, key, f"{prefix}{env_name}", default)
 
     enabled = _as_bool(pick("enabled", "MEMORY_ENABLED", False))
-    backend = str(
-        pick("backend", "MEMORY_BACKEND", MEMORY_BACKEND_REDIS)
-    ).strip().lower()
+    backend = (
+        str(pick("backend", "MEMORY_BACKEND", MEMORY_BACKEND_REDIS)).strip().lower()
+    )
     config = CodexMemoryConfig(
         enabled=enabled,
         backend=backend,
@@ -435,9 +455,9 @@ def memory_config_from_raw(raw: Any, prefix: str) -> CodexMemoryConfig:
             pick("max_events", "MEMORY_MAX_EVENTS", 64), "max_events"
         ),
         max_calls=_positive(pick("max_calls", "MEMORY_MAX_CALLS", 32), "max_calls"),
-        key_prefix=str(pick(
-            "key_prefix", "MEMORY_KEY_PREFIX", "llm-router:codex-routing"
-        )).strip(),
+        key_prefix=str(
+            pick("key_prefix", "MEMORY_KEY_PREFIX", "llm-router:codex-routing")
+        ).strip(),
         max_retries=_non_negative(
             pick("max_retries", "MEMORY_MAX_RETRIES", 1), "max_retries"
         ),
@@ -447,9 +467,7 @@ def memory_config_from_raw(raw: Any, prefix: str) -> CodexMemoryConfig:
         raise ValueError(
             f"settings.memory.backend must be one of {VALID_MEMORY_BACKENDS}"
         )
-    if not config.key_prefix or any(
-        char.isspace() for char in config.key_prefix
-    ):
+    if not config.key_prefix or any(char.isspace() for char in config.key_prefix):
         raise ValueError(
             "settings.memory.key_prefix must be a non-empty, space-free prefix"
         )
@@ -537,9 +555,12 @@ def validate_connection(connection: RedisConnectionSettings) -> None:
         raise ValueError("Redis ssl_cert_reqs must be required, optional or none")
     for name in ("socket_connect_timeout", "socket_timeout"):
         value = getattr(connection, name)
-        if not isinstance(value, (int, float)) or isinstance(value, bool) or (
-            not math.isfinite(value)
-        ) or value <= 0:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or (not math.isfinite(value))
+            or value <= 0
+        ):
             raise ValueError(f"Redis {name} must be a positive number of seconds")
 
 
@@ -556,7 +577,9 @@ def _safe_component(value: str) -> str:
         return "-"
     if _SAFE_COMPONENT.fullmatch(text):
         return text
-    return "~" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:_FINGERPRINT_CHARS]
+    return (
+        "~" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:_FINGERPRINT_CHARS]
+    )
 
 
 def session_key(
@@ -591,13 +614,15 @@ def session_key(
     """
     if not session_id or not thread_id:
         return None
-    return ":".join((
-        key_prefix,
-        f"v{STATE_SCHEMA_VERSION}",
-        _safe_component(session_id),
-        _safe_component(thread_id),
-        _safe_component(agent_name),
-    ))
+    return ":".join(
+        (
+            key_prefix,
+            f"v{STATE_SCHEMA_VERSION}",
+            _safe_component(session_id),
+            _safe_component(thread_id),
+            _safe_component(agent_name),
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -690,26 +715,30 @@ class SessionRoutingState:
         str
             A compact JSON object tagged with :data:`STATE_SCHEMA_VERSION`.
         """
-        return json.dumps({
-            "v": STATE_SCHEMA_VERSION,
-            "mode": self.mode,
-            "kind": self.kind,
-            "reason": self.reason,
-            "gen": self.generation,
-            "ev": self.event_id,
-            "fp": self.fingerprint,
-            "pending": list(self.pending_calls),
-            "seen": list(self.seen_events),
-            "ver": self.version,
-            "ts": self.updated_at,
-            "calls": [vars(call) for call in self.pending_evidence],
-            "history": list(self.history),
-            "action": self.action_token,
-            "retired": list(self.retired_generations),
-            "context": self.context_id,
-            "reset": self.reset,
-            "seen_calls": list(self.seen_calls),
-        }, separators=(",", ":"), ensure_ascii=True)
+        return json.dumps(
+            {
+                "v": STATE_SCHEMA_VERSION,
+                "mode": self.mode,
+                "kind": self.kind,
+                "reason": self.reason,
+                "gen": self.generation,
+                "ev": self.event_id,
+                "fp": self.fingerprint,
+                "pending": list(self.pending_calls),
+                "seen": list(self.seen_events),
+                "ver": self.version,
+                "ts": self.updated_at,
+                "calls": [vars(call) for call in self.pending_evidence],
+                "history": list(self.history),
+                "action": self.action_token,
+                "retired": list(self.retired_generations),
+                "context": self.context_id,
+                "reset": self.reset,
+                "seen_calls": list(self.seen_calls),
+            },
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
 
     @classmethod
     def from_json(cls, raw: Any) -> Optional["SessionRoutingState"]:
@@ -749,14 +778,18 @@ class SessionRoutingState:
         reset = data.get("reset", False)
         if not isinstance(reset, bool):
             return None
-        if not isinstance(mode, str) or (not mode and not (reset and data.get("gen"))):
+        if not isinstance(mode, str) or (
+            not mode and not (reset and data.get("gen"))
+        ):
             return None
         strings = ("mode", "kind", "reason", "gen", "ev", "fp", "action", "context")
         if any(not isinstance(data.get(key, ""), str) for key in strings):
             return None
         for key in ("pending", "seen", "history", "retired", "seen_calls"):
             values = data.get(key, [])
-            if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
+            if not isinstance(values, list) or any(
+                not isinstance(v, str) for v in values
+            ):
                 return None
         version = data.get("ver", 0)
         timestamp = data.get("ts", 0.0)
@@ -767,12 +800,15 @@ class SessionRoutingState:
         try:
             if not math.isfinite(timestamp) or timestamp < 0:
                 return None
-            calls = tuple(PendingRoutingCall(**call) for call in data.get("calls", []))
+            calls = tuple(
+                PendingRoutingCall(**call) for call in data.get("calls", [])
+            )
         except (TypeError, ValueError, OverflowError):
             return None
         if any(
             not isinstance(value, str)
-            for call in calls for value in vars(call).values()
+            for call in calls
+            for value in vars(call).values()
         ):
             return None
         return cls(
@@ -890,13 +926,17 @@ class RoutingStateStore:
 
 
 def _limit_state(
-    state: SessionRoutingState, config: CodexMemoryConfig,
+    state: SessionRoutingState,
+    config: CodexMemoryConfig,
 ) -> SessionRoutingState:
     """Apply this worker's limits also to records written by older policies."""
     return replace(
-        state, pending_calls=_bounded(state.pending_calls, config.max_calls),
+        state,
+        pending_calls=_bounded(state.pending_calls, config.max_calls),
         pending_evidence=(
-            tuple(state.pending_evidence[-config.max_calls:]) if config.max_calls else ()
+            tuple(state.pending_evidence[-config.max_calls :])
+            if config.max_calls
+            else ()
         ),
         seen_events=_bounded(state.seen_events, config.max_events),
         history=_bounded(state.history, config.max_events),
@@ -1007,14 +1047,21 @@ class InMemoryRoutingStateStore(RoutingStateStore):
             preserve = stored is not None and all(
                 getattr(stored[0], name) == getattr(state, name)
                 for name in (
-                    "generation", "mode", "kind", "reason", "event_id",
-                    "fingerprint", "action_token", "reset",
+                    "generation",
+                    "mode",
+                    "kind",
+                    "reason",
+                    "event_id",
+                    "fingerprint",
+                    "action_token",
+                    "reset",
                 )
             )
             now = self._clock()
             self._records[key] = (
                 _limit_state(state, self._config).set_version(
-                    current + 1, stored[0].updated_at if preserve else now,
+                    current + 1,
+                    stored[0].updated_at if preserve else now,
                 ),
                 stored[1] if preserve else now + self._config.ttl_seconds,
             )
@@ -1039,7 +1086,9 @@ class InMemoryRoutingStateStore(RoutingStateStore):
         overflow = len(self._records) - self._config.max_sessions
         if overflow <= 0:
             return
-        oldest = sorted(self._records, key=lambda key: self._records[key][1])[:overflow]
+        oldest = sorted(self._records, key=lambda key: self._records[key][1])[
+            :overflow
+        ]
         for key in oldest:
             self._records.pop(key, None)
 
@@ -1096,7 +1145,9 @@ def build_state_store(
     try:
         import redis  # noqa: PLC0415 - optional dependency, imported on demand
     except ImportError:
-        status = MemoryStatus(STATUS_UNCONFIGURED.state, "redis client not installed")
+        status = MemoryStatus(
+            STATUS_UNCONFIGURED.state, "redis client not installed"
+        )
         if logger is not None:
             logger.warning(
                 "Codex routing memory needs the redis client — install it or "
@@ -1105,15 +1156,18 @@ def build_state_store(
         return None, status
     try:
         validate_connection(config.connection)
-        redis_client = client if client is not None else redis.Redis(
-            **config.connection.client_kwargs()
+        redis_client = (
+            client
+            if client is not None
+            else redis.Redis(**config.connection.client_kwargs())
         )
         redis_client.ping()
     except Exception as exc:  # a bad deployment must not break routing
         status = MemoryStatus("unavailable", _reason(exc))
         if logger is not None:
             logger.warning(
-                "Codex routing memory disabled: %s\n%s", _reason(exc),
+                "Codex routing memory disabled: %s\n%s",
+                _reason(exc),
                 _failure_traceback(exc, config.connection),
             )
         return None, status
@@ -1135,7 +1189,9 @@ def _reason(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-def _failure_traceback(exc: BaseException, connection: RedisConnectionSettings) -> str:
+def _failure_traceback(
+    exc: BaseException, connection: RedisConnectionSettings
+) -> str:
     """Format the exception chain and stack without Redis connection credentials."""
     text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     text = re.sub(r"(rediss?://)[^\s/@]+@", r"\1[REDACTED]@", text)
@@ -1244,10 +1300,12 @@ class RedisRoutingStateStore(RoutingStateStore):
         self._script: Any = None
         self._factory: Optional[Callable[[], Any]] = None
         if client is None:
+
             def _build() -> Any:
                 import redis  # noqa: PLC0415 - optional dependency
 
                 return redis.Redis(**config.connection.client_kwargs())
+
             self._factory = _build
 
     def _connection(self) -> Any:
@@ -1340,9 +1398,14 @@ class RedisRoutingStateStore(RoutingStateStore):
             ``unavailable``.
         """
         now = time.time()
-        payload = _limit_state(state, self._config).set_version(
-            expected_version + 1, now,
-        ).to_json()
+        payload = (
+            _limit_state(state, self._config)
+            .set_version(
+                expected_version + 1,
+                now,
+            )
+            .to_json()
+        )
         try:
             client = self._connection()
             with self._lock:
@@ -1377,7 +1440,9 @@ class RedisRoutingStateStore(RoutingStateStore):
             removed = client.eval(
                 "local removed = redis.call('DEL', KEYS[1]); "
                 "redis.call('ZREM', KEYS[2], KEYS[1]); return removed",
-                2, key, self._session_index(),
+                2,
+                key,
+                self._session_index(),
             )
         except Exception as exc:
             return self._unavailable("clear", exc)
@@ -1390,17 +1455,23 @@ class RedisRoutingStateStore(RoutingStateStore):
                 "if redis.call('GET', KEYS[1]) == ARGV[1] then "
                 "redis.call('DEL', KEYS[1]); "
                 "redis.call('ZREM', KEYS[2], KEYS[1]); return 1 end; return 0",
-                2, key, self._session_index(), raw,
+                2,
+                key,
+                self._session_index(),
+                raw,
             )
         except Exception as exc:  # a cleanup must never surface on the routing path
             self._unavailable("cleanup", exc)
 
     def _unavailable(self, operation: str, exc: BaseException) -> MemoryStatus:
         """Log and wrap an infrastructure failure as an ``unavailable`` status."""
-        status = MemoryStatus(STATUS_UNAVAILABLE.state, f"{operation}: {_reason(exc)}")
+        status = MemoryStatus(
+            STATUS_UNAVAILABLE.state, f"{operation}: {_reason(exc)}"
+        )
         if self._logger is not None:
             self._logger.warning(
-                "Codex routing memory %s\n%s", status.detail,
+                "Codex routing memory %s\n%s",
+                status.detail,
                 _failure_traceback(exc, self._config.connection),
             )
         return status
@@ -1568,15 +1639,20 @@ def _event_token(item: Any) -> str:
     if item.event_id:
         return fingerprint("event", item.event_id)
     return fingerprint(
-        item.kind, item.event_id, item.call_id, item.name,
+        item.kind,
+        item.event_id,
+        item.call_id,
+        item.name,
         "" if item.event_id else item.text,
     )
 
 
 def _context_id(request: Any) -> str:
-    return fingerprint(request.window_id, request.context_window_id) if (
-        request.window_id or request.context_window_id
-    ) else ""
+    return (
+        fingerprint(request.window_id, request.context_window_id)
+        if (request.window_id or request.context_window_id)
+        else ""
+    )
 
 
 def resolve_memory(
@@ -1598,15 +1674,20 @@ def resolve_memory(
     IDs evicted by the bound no longer prove order.
     """
     from .phase import (
-        EVIDENCE_COMMAND, EVIDENCE_TEST_FAILURE, PhaseEvidence,
-        _execution_status, collect_phase_evidence,
+        EVIDENCE_COMMAND,
+        EVIDENCE_TEST_FAILURE,
+        PhaseEvidence,
+        _execution_status,
+        collect_phase_evidence,
     )
 
     generation = _identifier(getattr(request, "turn_id", ""))
     if not generation or getattr(request, "request_class", "main") != "main":
         return MemoryResolution(status=MemoryStatus("miss", "no main generation"))
     if previous and generation in previous.retired_generations:
-        return MemoryResolution(status=MemoryStatus("conflict", "retired generation"))
+        return MemoryResolution(
+            status=MemoryStatus("conflict", "retired generation")
+        )
     same = previous is not None and previous.generation == generation
     base = previous if same else None
     unique = {}
@@ -1627,7 +1708,8 @@ def resolve_memory(
                     status=MemoryStatus("conflict", "context changed"),
                 )
             return MemoryResolution(
-                carried=base if base.mode else None, state=base,
+                carried=base if base.mode else None,
+                state=base,
                 status=MemoryStatus("hit" if base.mode else "miss", "neutral"),
             )
         if frontier in tokens:
@@ -1644,13 +1726,16 @@ def resolve_memory(
         elif all(token in history for token in tokens):
             return MemoryResolution(status=MemoryStatus("conflict", "stale history"))
         elif (
-            context == base.context_id and rules is not None and evidence is None
+            context == base.context_id
+            and rules is not None
+            and evidence is None
             and all(item.kind == "assistant" for item in activity)
             and not any(token in history for token in tokens)
             and not collect_phase_evidence(activity, rules)
         ):
             return MemoryResolution(
-                carried=base if base.mode else None, state=base,
+                carried=base if base.mode else None,
+                state=base,
                 status=MemoryStatus("hit" if base.mode else "miss", "neutral"),
             )
         elif all(
@@ -1667,7 +1752,9 @@ def resolve_memory(
                 status=MemoryStatus("conflict", "incomparable history"),
             )
     elif base and not base.reset:
-        return MemoryResolution(status=MemoryStatus("conflict", "no causal frontier"))
+        return MemoryResolution(
+            status=MemoryStatus("conflict", "no causal frontier")
+        )
 
     current = base
     fresh = None
@@ -1691,14 +1778,19 @@ def resolve_memory(
                     pending.pop(_identifier(item.call_id))
                 test_mode = rules.test_mode if rules else "test"
                 if (
-                    linked.token == action_token and linked.mode == test_mode
-                    and linked.kind == EVIDENCE_COMMAND and succeeded is False
+                    linked.token == action_token
+                    and linked.mode == test_mode
+                    and linked.kind == EVIDENCE_COMMAND
+                    and succeeded is False
                 ):
                     produced = PhaseEvidence(
                         mode=rules.failure_mode if rules else "debug",
-                        kind=EVIDENCE_TEST_FAILURE, reason="test command failed",
-                        event_id=item.event_id, call_id=linked.call_id,
-                        completed=True, succeeded=False,
+                        kind=EVIDENCE_TEST_FAILURE,
+                        reason="test command failed",
+                        event_id=item.event_id,
+                        call_id=linked.call_id,
+                        completed=True,
+                        succeeded=False,
                     )
         else:
             call_id = _identifier(item.call_id)
@@ -1711,7 +1803,8 @@ def resolve_memory(
                 (evidence.event_id and evidence.event_id == item.event_id)
                 or (evidence.call_id and evidence.call_id == item.call_id)
                 or (
-                    not evidence.event_id and not evidence.call_id
+                    not evidence.event_id
+                    and not evidence.call_id
                     and item.kind == "assistant"
                 )
             ):
@@ -1720,34 +1813,51 @@ def resolve_memory(
                 action_token = token
                 if produced.call_id and not produced.completed:
                     pending[_identifier(produced.call_id)] = PendingRoutingCall(
-                        _identifier(produced.call_id), item.name,
-                        produced.mode, produced.kind,
-                        produced.reason, _identifier(produced.event_id), token,
+                        _identifier(produced.call_id),
+                        item.name,
+                        produced.mode,
+                        produced.kind,
+                        produced.reason,
+                        _identifier(produced.event_id),
+                        token,
                     )
                 if produced.call_id:
                     seen_calls = _bounded(
-                        seen_calls + (_identifier(produced.call_id),), config.max_events,
+                        seen_calls + (_identifier(produced.call_id),),
+                        config.max_events,
                     )
         history = _bounded(history + (token,), config.max_events)
         if item.event_id:
             event_id = _identifier(item.event_id)
             seen = _bounded(
-                tuple(v for v in seen if v != event_id) + (event_id,), config.max_events,
+                tuple(v for v in seen if v != event_id) + (event_id,),
+                config.max_events,
             )
         if produced is not None:
             fresh = produced
             current = record_state(
-                produced.mode, produced.kind, produced.reason, generation,
+                produced.mode,
+                produced.kind,
+                produced.reason,
+                generation,
                 produced.event_id,
                 fingerprint(
-                    produced.mode, produced.kind, produced.reason,
-                    produced.event_id, produced.call_id, str(produced.completed),
-                    str(produced.succeeded), action_token,
+                    produced.mode,
+                    produced.kind,
+                    produced.reason,
+                    produced.event_id,
+                    produced.call_id,
+                    str(produced.completed),
+                    str(produced.succeeded),
+                    action_token,
                 ),
-                current, config,
+                current,
+                config,
             )
         pending = (
-            dict(list(pending.items())[-config.max_calls:]) if config.max_calls else {}
+            dict(list(pending.items())[-config.max_calls :])
+            if config.max_calls
+            else {}
         )
     if relation == "replay" and rules:
         found = collect_phase_evidence(activity, rules)
@@ -1756,9 +1866,13 @@ def resolve_memory(
         current = SessionRoutingState(generation=generation, reset=True)
     if current is not None:
         current = replace(
-            current, history=history, seen_events=seen,
-            pending_calls=tuple(pending), pending_evidence=tuple(pending.values()),
-            action_token=action_token, retired_generations=retired,
+            current,
+            history=history,
+            seen_events=seen,
+            pending_calls=tuple(pending),
+            pending_evidence=tuple(pending.values()),
+            action_token=action_token,
+            retired_generations=retired,
             context_id=(
                 context if not base or history != base.history else base.context_id
             ),
@@ -1767,7 +1881,9 @@ def resolve_memory(
             seen_calls=seen_calls,
         )
     return MemoryResolution(
-        evidence=fresh, carried=base if base and base.mode else None, state=current,
+        evidence=fresh,
+        carried=base if base and base.mode else None,
+        state=current,
         status=MemoryStatus("hit" if base else "miss", relation),
     )
 
@@ -1850,7 +1966,8 @@ def remember_decision(
         record = resolved.state
         if not reliable:
             record = SessionRoutingState(
-                generation=generation, reset=True,
+                generation=generation,
+                reset=True,
                 retired_generations=_bounded(
                     stored.retired_generations + (stored.generation,),
                     config.max_events,

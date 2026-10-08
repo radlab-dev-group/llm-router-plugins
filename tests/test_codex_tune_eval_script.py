@@ -6,7 +6,6 @@ import sys
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/codex-tune-eval.sh"
 
@@ -14,18 +13,33 @@ SCRIPT = ROOT / "scripts/codex-tune-eval.sh"
 @pytest.fixture
 def runner(tmp_path):
     config = tmp_path / "source config.json"
-    config.write_text(json.dumps({"settings": {"semantic": {
-        "threshold": 0.51, "min_margin": 0.05,
-    }}}))
+    config.write_text(
+        json.dumps(
+            {
+                "settings": {
+                    "semantic": {
+                        "threshold": 0.51,
+                        "min_margin": 0.05,
+                    }
+                }
+            }
+        )
+    )
     dataset = tmp_path / "dataset.json"
-    dataset.write_text(json.dumps({"cases": [
-        {"split": split, "expected_mode": "review"}
-        for split in ("calibration", "holdout")
-    ]}))
+    dataset.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {"split": split, "expected_mode": "review"}
+                    for split in ("calibration", "holdout")
+                ]
+            }
+        )
+    )
     # A process-boundary fixture: controllable scores test Bash selection,
     # argument forwarding and failure handling without loading an ML model.
     interpreter = tmp_path / "fixture interpreter"
-    interpreter.write_text('''#!/usr/bin/env bash
+    interpreter.write_text("""#!/usr/bin/env bash
 set -euo pipefail
 shift 2
 config=""; split=""; baseline=""
@@ -48,19 +62,34 @@ jq --arg split "$split" --arg tie "${TIE:-0}" '
         mode_accuracy: $t,
         mode_transitions: {missed_switches: 0, unnecessary_switches: 0}}}
     | if $tie == "1" then .cascade.mode_accuracy = 0.7 else . end' "$config"
-''')
+""")
     interpreter.chmod(0o755)
     output = tmp_path / "output reports"
     calls = tmp_path / "calls"
 
     def run(*args, **env):
         return subprocess.run(
-            ["bash", str(SCRIPT), "--config", str(config),
-             "--dataset", str(dataset), "--python", str(interpreter),
-             "--output-dir", str(output), "--thresholds", "0.45 0.60",
-             "--margins", "0.05", *args],
-            cwd=tmp_path, env={**os.environ, "CALLS": str(calls), **env},
-            capture_output=True, text=True,
+            [
+                "bash",
+                str(SCRIPT),
+                "--config",
+                str(config),
+                "--dataset",
+                str(dataset),
+                "--python",
+                str(interpreter),
+                "--output-dir",
+                str(output),
+                "--thresholds",
+                "0.45 0.60",
+                "--margins",
+                "0.05",
+                *args,
+            ],
+            cwd=tmp_path,
+            env={**os.environ, "CALLS": str(calls), **env},
+            capture_output=True,
+            text=True,
         )
 
     return run, config, output, calls
@@ -75,7 +104,11 @@ def test_selects_using_calibration_only_and_preserves_source(runner):
     selected = json.loads((output / "selected-config.json").read_text())
     assert selected["settings"]["semantic"]["threshold"] == 0.60
     assert [line.split("|")[0] for line in calls.read_text().splitlines()] == [
-        "calibration", "calibration", "calibration", "holdout", "holdout",
+        "calibration",
+        "calibration",
+        "calibration",
+        "holdout",
+        "holdout",
     ]
     assert (output / "holdout-comparison.json").exists()
 
@@ -94,10 +127,16 @@ def test_failure_retains_log_and_does_not_publish_selection(runner):
     assert not (output / "selected-config.json").exists()
 
 
-@pytest.mark.parametrize("arguments", [
-    ["--thresholds", "bad"], ["--margins", "-1"],
-    ["--thresholds", "1.1"], ["--unknown"], ["--dataset"],
-])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--thresholds", "bad"],
+        ["--margins", "-1"],
+        ["--thresholds", "1.1"],
+        ["--unknown"],
+        ["--dataset"],
+    ],
+)
 def test_invalid_arguments_fail_before_evaluation(runner, arguments):
     run, _, _, calls = runner
     assert run(*arguments).returncode != 0
@@ -128,9 +167,19 @@ def test_baseline_is_only_used_on_holdout(runner, tmp_path):
 def test_real_deterministic_evaluation(tmp_path):
     output = tmp_path / "real reports"
     result = subprocess.run(
-        ["bash", str(SCRIPT), "--python", sys.executable,
-         "--output-dir", str(output), "--no-semantic"],
-        cwd=tmp_path, capture_output=True, text=True, timeout=90,
+        [
+            "bash",
+            str(SCRIPT),
+            "--python",
+            sys.executable,
+            "--output-dir",
+            str(output),
+            "--no-semantic",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=90,
     )
     assert result.returncode == 0, result.stderr
     report = json.loads((output / "holdout-selected.json").read_text())

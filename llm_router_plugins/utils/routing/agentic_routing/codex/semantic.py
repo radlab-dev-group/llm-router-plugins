@@ -113,7 +113,8 @@ class CodexSemanticLayer:
         self._phase_max_chars = phase_max_chars
         self._phase_rules = phase_rules
         self._semantic_modes = {
-            name for name in mode_by_name
+            name
+            for name in mode_by_name
             if name not in (REQUEST_CLASS_AUX_TITLE, REQUEST_CLASS_COMPACTION)
         }
 
@@ -181,7 +182,9 @@ class CodexSemanticLayer:
 
         try:
             parts = self._build_semantic_parts(
-                request, self._intent_max_chars, self._phase_max_chars,
+                request,
+                self._intent_max_chars,
+                self._phase_max_chars,
                 phase_rules=self._phase_rules,
             )
         except Exception as exc:  # never let context building break routing
@@ -194,7 +197,8 @@ class CodexSemanticLayer:
         try:
             route_context = getattr(self._router, "route_context", None)
             result = (
-                route_context(parts) if callable(route_context)
+                route_context(parts)
+                if callable(route_context)
                 else self._router.route("\n".join(parts))
             )
         except Exception as exc:
@@ -243,8 +247,10 @@ class CodexSemanticLayer:
             name = entry.get("target")
             score = self._cosine(entry.get("similarity"))
             if (
-                not isinstance(name, str) or name not in self._semantic_modes
-                or name in scores or score is None
+                not isinstance(name, str)
+                or name not in self._semantic_modes
+                or name in scores
+                or score is None
             ):
                 return None, similarity
             scores[name] = score
@@ -259,18 +265,33 @@ class CodexSemanticLayer:
         margin = scores[target] - runner_up if runner_up is not None else None
         self._info(
             "CodexRouting: semantic target=%s similarity=%.4f runner_up=%s margin=%s",
-            target, similarity, runner_up, margin,
+            target,
+            similarity,
+            runner_up,
+            margin,
         )
         if similarity < self._threshold:
             self._info(
                 "CodexRouting: semantic match '%s' similarity=%.4f is below threshold %.4f",
-                target, similarity, self._threshold,
+                target,
+                similarity,
+                self._threshold,
             )
-        if mode is not None and similarity >= self._threshold and (
-            margin is None or (margin > 0 and (
-                margin >= self._min_margin
-                or math.isclose(margin, self._min_margin, rel_tol=0, abs_tol=1e-12)
-            ))
+        if (
+            mode is not None
+            and similarity >= self._threshold
+            and (
+                margin is None
+                or (
+                    margin > 0
+                    and (
+                        margin >= self._min_margin
+                        or math.isclose(
+                            margin, self._min_margin, rel_tol=0, abs_tol=1e-12
+                        )
+                    )
+                )
+            )
         ):
             return mode, similarity
         return None, similarity
@@ -356,20 +377,25 @@ class CodexSemanticLayer:
         """Compatibility view of the request's budgeted semantic sections."""
         budget = request.classify_max_chars
         parts = CodexSemanticLayer._build_semantic_parts(
-            request, budget, budget // 2 if request.intent_text else budget,
+            request,
+            budget,
+            budget // 2 if request.intent_text else budget,
             last_agent_messages,
         )
         if not parts:
             return None
         if budget > 0 and len(parts) == 2:
             intent, phase = parts
-            return "\n".join((intent[:max(0, budget - len(phase) - 1)], phase))
+            return "\n".join((intent[: max(0, budget - len(phase) - 1)], phase))
         return "\n".join(parts)
 
     @staticmethod
     def _build_semantic_parts(
-        request: CodexRequest, intent_max_chars: int, phase_max_chars: int,
-        last_agent_messages: int = 1, phase_rules: Optional[Any] = None,
+        request: CodexRequest,
+        intent_max_chars: int,
+        phase_max_chars: int,
+        last_agent_messages: int = 1,
+        phase_rules: Optional[Any] = None,
     ) -> Tuple[str, ...]:
         """
         Assemble the text embedded for the semantic lookup.
@@ -416,7 +442,7 @@ class CodexSemanticLayer:
         phase_parts = [part for part in phase_parts if part.strip()]
         if phase_parts and phase_max_chars > 0:
             phase_parts = [
-                part[:phase_max_chars // len(phase_parts)] for part in phase_parts
+                part[: phase_max_chars // len(phase_parts)] for part in phase_parts
             ]
         if phase_parts:
             part_budget = max(
