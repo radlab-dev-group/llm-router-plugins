@@ -10,13 +10,13 @@ configured for that mode:
 Mode                    Routed by                                   Model
 ======================  ==========================================  ==============
 ``plan``                ``<collaboration_mode>`` Plan Mode block    Flash-Next
-``implement``           fallback for plain main turns               27B
+``implement``           fallback for plain main turns               Flash-Next
 ``test``                keyword scoring of the latest message       27B
 ``git_review``          keyword scoring of the latest message       27B
-``review``              keyword scoring of the latest message       27B
-``debug``               keyword scoring of the latest message       27B
-``aux_title``           request class (system title generation)     Flash-Next
-``compaction``          request class (context compaction)          Flash-Next
+``review``              keyword scoring of the latest message       Flash-Next
+``debug``               keyword scoring of the latest message       Flash-Next
+``aux_title``           request class (system title generation)     27B
+``compaction``          request class (context compaction)          27B
 ======================  ==========================================  ==============
 
 Modules
