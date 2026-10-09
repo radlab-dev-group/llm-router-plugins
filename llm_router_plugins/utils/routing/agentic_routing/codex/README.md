@@ -402,6 +402,9 @@ Enabled with `settings.semantic.enabled`, disabled for a single process with
   never the raw content of files or tool output). `intent_max_chars` and `phase_max_chars`
   are both `2000` in the shipped JSON and are independent of the parser's `classify_max_chars` history budget.
   Earlier assistant turns never cross a new user-command boundary. Empty context does not call the router.
+  `intent_text` is the genuine user command only: the `<environment_context>` and
+  `<codex_internal_context>` blocks the CLI injects around it (for example the goal blob that drives a
+  continuation turn) are stripped, so a long internal objective can no longer stand in for the user's instruction.
 - The shared router's `route_context(parts)` encodes those sections separately, then averages and normalizes their
   vectors for one FAISS lookup. Each section has its own bounded token-window budget (`MAX_QUERY_WINDOWS = 4`),
   so a long intent cannot displace the phase before embedding. One lookup serves acceptance and fallback similarity.

@@ -101,6 +101,17 @@ _FOLLOW_UP_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: Blocks the CLI injects around a user message instead of from it: the
+#: environment of the container and the goal that drives a continuation
+#: turn.  Neither names the action the user asked for, so it never reaches
+#: the intent text; the command the CLI attaches to the same message does.
+_INTERNAL_CONTEXT_RE = re.compile(
+    r"<(?:environment_context|codex_internal_context)\b[^>]*>"
+    r".*?"
+    r"</(?:environment_context|codex_internal_context)>",
+    re.DOTALL,
+)
+
 
 @dataclass(frozen=True)
 class CodexActivity:
@@ -190,6 +201,10 @@ class CodexRequest:
         Separate history budget and total semantic-query character cap.
     request_class : str
         One of ``main``, ``aux_title``, ``compaction``.
+    input_items : int
+        Number of ``input`` items in the request.  Within one command
+        generation it only ever grows, which makes it the ordinal the session
+        memory uses to refuse a hint written by an older request.
     """
 
     session_id: str = ""
@@ -216,6 +231,7 @@ class CodexRequest:
     user_history: Tuple[str, ...] = ()
     activity: Tuple[CodexActivity, ...] = ()
     classify_max_chars: int = DEFAULT_CLASSIFY_MAX_CHARS
+    input_items: int = 0
 
     @property
     def intent_text(self) -> str:
@@ -343,6 +359,7 @@ class CodexPayloadParser:
             user_history=self._user_history(user_turns),
             activity=self._activity(active_items),
             classify_max_chars=self._max_chars,
+            input_items=len(items),
             request_class=self._request_class(
                 request_kind,
                 thread_source,
@@ -629,7 +646,7 @@ class CodexPayloadParser:
 
     @classmethod
     def _user_text(cls, item: Any) -> str:
-        """Exclude environment-only messages without losing attached commands."""
+        """Exclude injected-context-only messages without losing commands."""
         if not isinstance(item, dict):
             return ""
         if item.get("type") != "message" or item.get("role") != "user":
@@ -640,12 +657,7 @@ class CodexPayloadParser:
             and "</environment_context>" not in text
         ):
             return ""
-        return re.sub(
-            r"<environment_context>.*?</environment_context>",
-            "",
-            text,
-            flags=re.DOTALL,
-        ).strip()
+        return _INTERNAL_CONTEXT_RE.sub("", text).strip()
 
     def _user_history(self, turns: List[Tuple[int, str]]) -> Tuple[str, ...]:
         """Keep a bounded, separate history; never truncate the current command."""
