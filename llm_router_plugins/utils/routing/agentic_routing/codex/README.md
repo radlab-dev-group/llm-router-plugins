@@ -253,10 +253,16 @@ Notes:
   `compaction` are class-routed and are left out of the index too.
 - The phase layer recognises explicit current-action announcements and concrete executed commands/patches, rather
   than arbitrary mentions of tests or Git. Thus commit inspection can route to `git_review`, then editing `CHANGELOG`
-  to `implement`; helper commands such as `git status` do not create a Git phase. The newest clear action wins.
-  Unknown or ambiguous activity leaves the remaining cascade to decide. `heuristic_enabled=false` disables only
-  keyword scoring, not phase detection or memory. A phase must name a configured mode.
+  to `implement`; helper commands such as `git status` do not create a Git phase. The phase that dominates the last
+  `settings.phase.evidence_window` strong signals wins (a window of `1` means the latest strong action alone); a weak
+  signal (a linter) only carries the turn while no strong signal exists, so `ruff` after `git log` does not make the
+  turn a style review. Unknown or ambiguous activity leaves the remaining cascade to decide. `heuristic_enabled=false`
+  disables only keyword scoring, not phase detection or memory. A phase must name a configured mode.
   `settings.phase.enabled=false` disables phase evidence and carried phases, leaving keyword scoring active.
+  Shell noise (redirects, `$(…)` substitutions, `2>&1`, quoted operators) is read as noise, and an executable the
+  `neutral_executables` list names (or that the table simply does not name) carries no phase of its own instead of
+  vetoes the segments beside it; a here-document fed to an interpreter counts as an edit when its body matches
+  `implement_write_patterns`.
 - Incremental payloads without a user message retain tool events. A result linked to
   a pending test call may produce fresh `test_failure` evidence; unknown execution
   status does not settle the call, and an older test result cannot replace a newer
@@ -281,6 +287,19 @@ Phase signals live in `settings.phase` in `agentic_routing_codex.json`, not in P
   directory names and prefixes should be lower-case, since paths are compared in lower-case.
 - `test_mode`, `implement_mode`, `failure_mode`: modes for test-only patches, other patches and linked test failures.
   Failure transitions apply only to command calls routed to `test_mode`, never to unrelated tool outputs.
+- `evidence_window` (optional, default `1`): how many of the most recent strong signals the phase is the mode of;
+  the most recent action breaks a tie. Larger windows keep one interleaved commit between edits from flipping the
+  whole turn to `git_review`.
+- `neutral_executables` (optional): executables that carry no phase of their own (`echo`, `ls`, `rg`, …). They do not
+  silence a recognized command beside them, and an executable the table does not name at all is skipped rather than
+  treated as a veto.
+- `implement_write_patterns` (optional): case-insensitive regexes over a here-document body; a match makes a
+  `python3 - <<'EOF' …` interpreter call an `implement` ("scripted edit") instead of no evidence.
+- `activity_description_limit` (optional, default `6`): how many of the newest distinct actions the semantic
+  activity section names; repeated actions collapse into one `… xN` clause, so a long turn of reads does not spend
+  the whole phase budget on one repeated action.
+- A `commands` entry may also declare `"strength": "weak"`: a weak rule (a linter, a type checker) only carries the
+  turn while it holds no strong signal.
 
 All phase fields must be supplied in the loaded configuration. No fields are inherited from another JSON file.
 Empty maps/lists disable those signals. Regexes are compiled when configuration is loaded. Missing fields,
