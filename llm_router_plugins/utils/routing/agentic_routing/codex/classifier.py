@@ -76,6 +76,9 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
     MemoryResolution,
     MemoryStatus,
     RoutingStateStore,
+    CodexMemoryConfig,
+    SessionRoutingState,
+    decision_hint,
     resolve_memory,
     session_key,
 )
@@ -321,7 +324,7 @@ class CodexModeClassifier:
             return RoutingDecision("plan", SOURCE_COLLABORATION_MODE, 1.0, 1.0)
 
         evidence = detect_phase_evidence(request.activity, config.phase)
-        remembered, memory_status, memory_version = self._remembered(request)
+        remembered, memory_status, memory_version, stored_record = self._remembered(request)
         if remembered is not None and remembered.evidence is not None:
             evidence = remembered.evidence
         if evidence is not None and evidence.mode in modes:
@@ -368,7 +371,26 @@ class CodexModeClassifier:
             if semantic is not None
             else SemanticDecision(outcome=self._semantic_availability(semantic))
         )
+        carried = self._carried_decision(
+            stored_record,
+            request,
+            assessment,
+            modes,
+            config.memory,
+        )
         if assessment.mode is not None:
+            if carried is not None:
+                return RoutingDecision(
+                    carried,
+                    SOURCE_MEMORY,
+                    1.0,
+                    1.0,
+                    reason="carried decision",
+                    memory=memory_status,
+                    memory_version=memory_version,
+                    semantic=OUTCOME_ACCEPTED,
+                    used_carry=True,
+                )
             return RoutingDecision(
                 assessment.mode.name,
                 SOURCE_SEMANTIC,
@@ -387,6 +409,18 @@ class CodexModeClassifier:
             cosine = semantic.similarity_for(config.fallback_mode, routed)
             if cosine is not None:
                 fallback_similarity = cosine
+        if carried is not None:
+            return RoutingDecision(
+                carried,
+                SOURCE_MEMORY,
+                1.0,
+                fallback_similarity,
+                reason="carried decision",
+                memory=memory_status,
+                memory_version=memory_version,
+                semantic=semantic_outcome,
+                used_carry=True,
+            )
         return RoutingDecision(
             config.fallback_mode,
             SOURCE_FALLBACK,
@@ -404,6 +438,7 @@ class CodexModeClassifier:
         Optional[MemoryResolution],
         Optional[MemoryStatus],
         Optional[int],
+        Optional[SessionRoutingState],
     ]:
         """
         Return the phase the session memory still vouches for, if any.
@@ -420,17 +455,19 @@ class CodexModeClassifier:
 
         Returns
         -------
-        Tuple[Optional[MemoryResolution], Optional[MemoryStatus], Optional[int]]
-            Safe evidence/carry, diagnostic status and the version used for
-            optimistic persistence; all absent when memory was not consulted.
+        Tuple[
+            Optional[MemoryResolution],
+            Optional[MemoryStatus],
+            Optional[int],
+            Optional[SessionRoutingState],
+        ]
+            Safe evidence/carry, diagnostic status, the version used for
+            optimistic persistence and the raw record read (so the remembered
+            decision can be weighed); all absent when memory was not consulted.
         """
         store = self._memory
-        if (
-            store is None
-            or self._config.phase is None
-            or not self._config.phase.enabled
-        ):
-            return None, None, None
+        if store is None:
+            return None, None, None, None
         key = session_key(
             self._config.memory.key_prefix,
             request.session_id,
@@ -438,11 +475,16 @@ class CodexModeClassifier:
             request.agent_name,
         )
         if key is None or not request.turn_id:
-            return None, MemoryStatus("miss", "no session identity"), None
+            return None, MemoryStatus("miss", "no session identity"), None, None
         stored, status = store.read(key)
         version = stored.version if stored is not None else 0
         if status.state not in ("hit", "miss", "expired"):
-            return None, status, None
+            return None, status, None, None
+        if (
+            self._config.phase is None
+            or not self._config.phase.enabled
+        ):
+            return None, status, version, stored
         resolved = resolve_memory(
             stored,
             request,
@@ -450,10 +492,10 @@ class CodexModeClassifier:
             self._config.memory,
         )
         if resolved.status.state == "conflict":
-            return None, resolved.status, version
+            return None, resolved.status, version, None
         if status.state == "expired" and resolved.evidence is None:
-            return resolved, status, version
-        return resolved, resolved.status, version
+            return resolved, status, version, stored
+        return resolved, resolved.status, version, stored
 
     def _semantic_availability(self, semantic: Optional[CodexSemanticLayer]) -> str:
         """
@@ -482,6 +524,55 @@ class CodexModeClassifier:
                 else OUTCOME_DISABLED
             )
         return OUTCOME_UNAVAILABLE
+
+    @staticmethod
+    @staticmethod
+    def _carried_decision(
+        stored: Optional[SessionRoutingState],
+        request: CodexRequest,
+        assessment: SemanticDecision,
+        modes: Dict[str, Any],
+        memory_config: "CodexMemoryConfig",
+    ) -> Optional[str]:
+        """
+        Return the remembered decision when this ranking is too weak to unsettle it.
+
+        A fresh acceptance of the same mode renews the hint at the caller; a
+        different mode replaces it only when it leads by
+        ``memory.decision_switch_margin``.  A ranking with no margin at all
+        cannot say the mode changed, so the decision is carried.  The hint
+        answers only inside its own generation and while its request and age
+        budgets hold — see :func:`~codex.state.decision_hint`.
+
+        Parameters
+        ----------
+        stored : SessionRoutingState or None
+            The record read for this session, if any.
+        request : CodexRequest
+            The request asking; its turn identifies the generation.
+        assessment : SemanticDecision
+            What the current ranking says.
+        modes : Dict[str, Any]
+            The mode table, so a remembered name must still be routable.
+        memory_config : CodexMemoryConfig
+            Policy carrying the switch margin and the hint budgets.
+
+        Returns
+        -------
+        Optional[str]
+            The mode to carry, or ``None`` to decide on the ranking's own merits.
+        """
+        hint = decision_hint(stored, request.turn_id, memory_config)
+        if hint is None or hint not in modes:
+            return None
+        if assessment.target == hint:
+            return hint
+        if (
+            assessment.margin is None
+            or assessment.margin < memory_config.decision_switch_margin
+        ):
+            return hint
+        return None
 
     @staticmethod
     def _explicit_mode(

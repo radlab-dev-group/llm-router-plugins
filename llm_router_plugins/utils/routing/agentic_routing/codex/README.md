@@ -167,7 +167,8 @@ Codex CLI ──POST /v1/responses (model=auto_codex)──▶ llm-router
 ```
 
 The plugin sees the prepared request payload as a plain `dict` and returns it. Routing is stateless by default.
-Explicitly enabled Redis memory can carry reliable phase evidence between requests and workers; it is optional,
+Explicitly enabled Redis memory can carry reliable phase evidence between requests and workers, and — when
+`memory.carry_decisions` is on — the last accepted semantic decision of the command generation; it is optional,
 and the full-history payload remains usable when memory is disabled or unavailable.
 
 ### Step 1 — payload normalization
@@ -389,6 +390,13 @@ Enabled with `settings.semantic.enabled`, disabled for a single process with
   at least `min_margin` (shipped value `0.005`). Ties, incomplete rankings, inconsistent winners and malformed scores
   abstain. A single configured semantic mode needs only the threshold. Margin `0.005` is a starting setting,
   not a measured or calibrated optimum.
+- The decision the semantic layer accepts is remembered for the rest of the command generation when
+  `settings.memory.carry_decisions` is on: a ranking that wavers between two modes does not send the many requests of
+  one long agent turn to different models. The remembered decision only yields to a fresh phase, to a new user
+  command, to a mode that leads it by `memory.decision_switch_margin` (shipped `0.008`, deliberately larger than
+  `min_margin` — staying is cheap, moving is not), or to its own bounds, `memory.decision_max_requests` (shipped
+  `12`) and `memory.decision_max_age_seconds` (shipped `180`). It is a different memory from the carried phase: it
+  never resets a phase and survives a disabled phase layer.
 - `CodexSemanticLayer._build_semantic_parts` separately budgets current `request.intent_text` and phase context
   (last active-turn utterance plus bounded tool action descriptions and linked execution status,
   never the raw content of files or tool output). `intent_max_chars` and `phase_max_chars`
