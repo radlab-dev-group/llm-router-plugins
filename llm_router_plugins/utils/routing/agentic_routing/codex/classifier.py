@@ -66,6 +66,12 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.phase import (
 from llm_router_plugins.utils.routing.agentic_routing.codex.semantic import (
     CodexSemanticLayer,
 )
+from llm_router_plugins.utils.routing.agentic_routing.codex.semantic import (
+    OUTCOME_ACCEPTED,
+    OUTCOME_DISABLED,
+    OUTCOME_UNAVAILABLE,
+    SemanticDecision,
+)
 from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
     MemoryResolution,
     MemoryStatus,
@@ -165,6 +171,12 @@ class RoutingDecision:
         ``"accepted"``, ``"below threshold"``, ``"ambiguous"`` or ``""`` when
         the layer was never reached.  A refusal is reported as a reason, never
         as a probability.
+    carry_mode : str
+        Mode the session memory should remember from this decision, because a
+        ranking accepted it.  Empty when there is nothing to remember.
+    used_carry : bool
+        Whether this decision kept the mode an earlier request of the same
+        generation had accepted, instead of taking the current ranking's word.
     """
 
     mode: str
@@ -176,6 +188,8 @@ class RoutingDecision:
     memory: Optional[MemoryStatus] = None
     semantic: str = ""
     memory_version: Optional[int] = None
+    carry_mode: str = ""
+    used_carry: bool = False
 
 
 class CodexModeClassifier:
@@ -349,20 +363,24 @@ class CodexModeClassifier:
             if semantic is not None and semantic.available
             else None
         )
-        mode, similarity = (
-            semantic.accept(routed) if semantic is not None else (None, 0.0)
+        assessment = (
+            semantic.assess(routed, config.fallback_mode)
+            if semantic is not None
+            else SemanticDecision(outcome=self._semantic_availability(semantic))
         )
-        if mode is not None:
+        if assessment.mode is not None:
             return RoutingDecision(
-                mode.name,
+                assessment.mode.name,
                 SOURCE_SEMANTIC,
-                similarity,
-                similarity,
+                assessment.similarity,
+                assessment.similarity,
+                reason=assessment.reason,
                 memory=memory_status,
                 memory_version=memory_version,
-                semantic="accepted",
+                semantic=OUTCOME_ACCEPTED,
+                carry_mode=assessment.mode.name,
             )
-        semantic_outcome = self._semantic_outcome(semantic, routed, similarity)
+        semantic_outcome = assessment.outcome or self._semantic_availability(semantic)
 
         fallback_similarity = 0.0
         if semantic is not None:
@@ -382,7 +400,11 @@ class CodexModeClassifier:
 
     def _remembered(
         self, request: CodexRequest
-    ) -> Tuple[Optional[MemoryResolution], Optional[MemoryStatus], Optional[int]]:
+    ) -> Tuple[
+        Optional[MemoryResolution],
+        Optional[MemoryStatus],
+        Optional[int],
+    ]:
         """
         Return the phase the session memory still vouches for, if any.
 
@@ -395,6 +417,7 @@ class CodexModeClassifier:
         ----------
         request : CodexRequest
             The request being routed.
+
         Returns
         -------
         Tuple[Optional[MemoryResolution], Optional[MemoryStatus], Optional[int]]
@@ -432,30 +455,33 @@ class CodexModeClassifier:
             return resolved, status, version
         return resolved, resolved.status, version
 
-    def _semantic_outcome(
-        self,
-        semantic: Optional[CodexSemanticLayer],
-        routed: Any,
-        similarity: float,
-    ) -> str:
+    def _semantic_availability(self, semantic: Optional[CodexSemanticLayer]) -> str:
         """
-        Name the reason the semantic layer did not decide, without a probability.
+        Name why the semantic layer could not rank at all, ignoring its scores.
 
-        Distinguishing "off", "broken" and "genuinely ambiguous" is the point:
+        Distinguishing "off", "broken" and "genuinely undecided" is the point:
         an outage and an unclear ranking call for different fixes, and neither
-        is a statement about how likely the fallback is to be right.
+        is a statement about how likely the fallback is to be right.  A ranking
+        that did happen reports its own outcome; this answers only for the case
+        where there was no ranking to read.
+
+        Parameters
+        ----------
+        semantic : CodexSemanticLayer or None
+            The layer of this cascade, if it has one.
+
+        Returns
+        -------
+        str
+            :data:`OUTCOME_DISABLED` or :data:`OUTCOME_UNAVAILABLE`.
         """
-        if semantic is None:
-            return "unavailable" if self._config.semantic_enabled else "disabled"
-        if not semantic.available:
-            return "unavailable"
-        if not routed:
-            return "unavailable"
-        if similarity <= 0:
-            return "no ranking"
-        if similarity < semantic.threshold:
-            return "below threshold"
-        return "ambiguous"
+        if semantic is None or not semantic.available:
+            return (
+                OUTCOME_UNAVAILABLE
+                if self._config.semantic_enabled
+                else OUTCOME_DISABLED
+            )
+        return OUTCOME_UNAVAILABLE
 
     @staticmethod
     def _explicit_mode(

@@ -269,6 +269,18 @@ class CodexMemoryConfig:
         Attempts on a version conflict before the request continues statelessly.
     connection : RedisConnectionSettings
         Where to connect.
+    carry_decisions : bool
+        Whether an accepted semantic decision is remembered for the rest of the
+        command generation, so repeated requests of one long agent turn do not
+        re-decide it from scratch.  Off unless explicitly turned on.
+    decision_switch_margin : float
+        Lead a new mode must have over the remembered decision to replace it.
+        Larger than ``semantic.min_margin`` by design: staying is cheap, moving
+        is not.
+    decision_max_requests : int
+        How many requests of one generation may lean on the remembered decision.
+    decision_max_age_seconds : int
+        How long the remembered decision may be trusted.
     """
 
     enabled: bool = False
@@ -279,6 +291,10 @@ class CodexMemoryConfig:
     max_calls: int = 32
     key_prefix: str = "llm-router:codex-routing"
     max_retries: int = 1
+    carry_decisions: bool = False
+    decision_switch_margin: float = 0.008
+    decision_max_requests: int = 12
+    decision_max_age_seconds: int = 180
     connection: RedisConnectionSettings = field(
         default_factory=RedisConnectionSettings
     )
@@ -431,6 +447,10 @@ def memory_config_from_raw(raw: Any, prefix: str) -> CodexMemoryConfig:
         "max_calls",
         "key_prefix",
         "max_retries",
+        "carry_decisions",
+        "decision_switch_margin",
+        "decision_max_requests",
+        "decision_max_age_seconds",
     }
     if unknown:
         raise ValueError(f"Unknown settings.memory fields: {sorted(unknown)}")
@@ -460,6 +480,25 @@ def memory_config_from_raw(raw: Any, prefix: str) -> CodexMemoryConfig:
         ).strip(),
         max_retries=_non_negative(
             pick("max_retries", "MEMORY_MAX_RETRIES", 1), "max_retries"
+        ),
+        carry_decisions=_as_bool(
+            pick("carry_decisions", "MEMORY_CARRY_DECISIONS", False)
+        ),
+        decision_switch_margin=_fraction(
+            pick(
+                "decision_switch_margin",
+                "MEMORY_DECISION_SWITCH_MARGIN",
+                0.008,
+            ),
+            "decision_switch_margin",
+        ),
+        decision_max_requests=_positive(
+            pick("decision_max_requests", "MEMORY_DECISION_MAX_REQUESTS", 12),
+            "decision_max_requests",
+        ),
+        decision_max_age_seconds=_positive(
+            pick("decision_max_age_seconds", "MEMORY_DECISION_MAX_AGE_SECONDS", 180),
+            "decision_max_age_seconds",
         ),
         connection=connection_from_env(prefix),
     )
@@ -500,6 +539,21 @@ def _non_negative(value: Any, label: str) -> int:
     number = _integer(value, label)
     if number < 0:
         raise ValueError(f"settings.memory.{label} must be >= 0")
+    return number
+
+
+def _fraction(value: Any, label: str) -> float:
+    """Validate a finite ratio in ``[0, 1)``."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"settings.memory.{label} must be a number between 0 and 1"
+        ) from exc
+    if not math.isfinite(number) or not 0 <= number < 1:
+        raise ValueError(
+            f"settings.memory.{label} must be a number between 0 and 1"
+        )
     return number
 
 

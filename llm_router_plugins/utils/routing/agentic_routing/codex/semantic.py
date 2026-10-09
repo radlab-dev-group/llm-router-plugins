@@ -23,6 +23,7 @@ import logging
 import math
 from numbers import Real
 
+from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
@@ -36,7 +37,81 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.phase import (
     describe_activity,
 )
 
-__all__ = ["CodexSemanticLayer"]
+__all__ = [
+    "CodexSemanticLayer",
+    "SemanticDecision",
+    "OUTCOME_ACCEPTED",
+    "OUTCOME_AMBIGUOUS",
+    "OUTCOME_BELOW_THRESHOLD",
+    "OUTCOME_DISABLED",
+    "OUTCOME_INCOMPLETE",
+    "OUTCOME_NO_RANKING",
+    "OUTCOME_TIE",
+    "OUTCOME_UNAVAILABLE",
+    "REASON_RUNNER_UP_IS_FALLBACK",
+]
+
+#: The ranking named a mode and the margin over the runner-up carries it.
+OUTCOME_ACCEPTED = "accepted"
+
+#: The ranking named a mode, but the margin is a coin toss at this scale.
+OUTCOME_AMBIGUOUS = "ambiguous"
+
+#: The best candidate is closer to the runner-up than a tie.
+OUTCOME_TIE = "tie"
+
+#: The best candidate is not similar enough to the mode to name it.
+OUTCOME_BELOW_THRESHOLD = "below threshold"
+
+#: The ranking does not cover every mode, so no lead can be read from it.
+OUTCOME_INCOMPLETE = "incomplete ranking"
+
+#: The lookup produced no usable ranking at all.
+OUTCOME_NO_RANKING = "no ranking"
+
+#: The layer was built without a router, or its router stopped working.
+OUTCOME_UNAVAILABLE = "unavailable"
+
+#: The layer is switched off by configuration.
+OUTCOME_DISABLED = "disabled"
+
+#: A mode was accepted only because abstaining would have chosen it anyway.
+REASON_RUNNER_UP_IS_FALLBACK = "runner-up is fallback"
+
+
+@dataclass(frozen=True)
+class SemanticDecision:
+    """
+    What one ranking says, without pretending to be a probability.
+
+    Parameters
+    ----------
+    mode : CodexMode or None
+        The mode the ranking names, when it names one.
+    similarity : float
+        Cosine of the target, or of nothing at all when the ranking is unusable.
+    target : str
+        Name of the best candidate, even when it is not accepted.
+    runner_up : str
+        Name of the second candidate, which says what abstaining would mean.
+    runner_up_similarity : float or None
+        Cosine of the second candidate.
+    margin : float or None
+        Lead of the target over the runner-up, ``None`` for a lone candidate.
+    outcome : str
+        One of the ``OUTCOME_*`` codes: what the ranking supports.
+    reason : str
+        Why an acceptance is qualified, e.g. :data:`REASON_RUNNER_UP_IS_FALLBACK`.
+    """
+
+    mode: Optional[CodexMode] = None
+    similarity: float = 0.0
+    target: str = ""
+    runner_up: str = ""
+    runner_up_similarity: Optional[float] = None
+    margin: Optional[float] = None
+    outcome: str = OUTCOME_UNAVAILABLE
+    reason: str = ""
 
 
 class CodexSemanticLayer:
@@ -62,6 +137,11 @@ class CodexSemanticLayer:
         Logger instance.  If ``None``, logging is skipped.
     min_margin : float
         Required cosine lead over the runner-up; ties always abstain.
+    min_margin_relative : float
+        Fraction of the runner-up's own similarity that the lead must also
+        reach.  Cosines of one request live in a narrow band, so an absolute
+        lead means one thing at 0.55 and another at 0.9; this term travels with
+        the embedding model while :attr:`min_margin` only floors it.
     intent_max_chars, phase_max_chars : int
         Independent context-section budgets from the supplied configuration.
 
@@ -78,6 +158,7 @@ class CodexSemanticLayer:
         logger: Optional[logging.Logger] = None,
         *,
         min_margin: float,
+        min_margin_relative: float = 0.0,
         intent_max_chars: int,
         phase_max_chars: int,
         phase_rules: Optional[Any] = None,
@@ -109,6 +190,7 @@ class CodexSemanticLayer:
         self._mode_by_name = mode_by_name
         self._logger = logger
         self._min_margin = min_margin
+        self._min_margin_relative = float(min_margin_relative)
         self._intent_max_chars = intent_max_chars
         self._phase_max_chars = phase_max_chars
         self._phase_rules = phase_rules
@@ -213,6 +295,10 @@ class CodexSemanticLayer:
         """
         Decide whether a router result names a mode confidently enough.
 
+        Compatibility view of :meth:`assess` for callers that only need the
+        accepted mode and its similarity; it never applies the fallback rule,
+        because it cannot know which mode abstaining would have chosen.
+
         Parameters
         ----------
         result : Optional[Mapping[str, Any]]
@@ -229,21 +315,66 @@ class CodexSemanticLayer:
         ------
         None
         """
+        decision = self.assess(result)
+        return decision.mode, decision.similarity
+
+    def assess(
+        self,
+        result: Optional[Mapping[str, Any]],
+        fallback_mode: str = "",
+    ) -> SemanticDecision:
+        """
+        Read one ranking: what it names, by how much, and whether that is much.
+
+        Two things have to be separated, because they were conflated whenever a
+        refusal was reported as one undifferentiated ``ambiguous``: how similar
+        the best candidate is, and how far it leads the second.  On this
+        embedding scale the candidates of one request sit within a few
+        thousandths of each other, so an absolute lead is read against the size
+        of the scores it is measured on — ``min_margin_relative`` of the
+        runner-up, floored by ``min_margin``.
+
+        A refusal is not free: abstaining does not return "no mode", it returns
+        whatever the caller falls back to.  When that is the runner-up itself,
+        refusing and accepting land on the same mode, and only the ranking's own
+        signal is thrown away.  Such a ranking is accepted and the reason says
+        why; a genuine tie is still refused.
+
+        Parameters
+        ----------
+        result : Optional[Mapping[str, Any]]
+            A router result, or ``None`` when no lookup happened.
+        fallback_mode : str
+            The mode the caller would use when this ranking refuses.
+
+        Returns
+        -------
+        SemanticDecision
+            The named mode, the shape of the ranking and an ``OUTCOME_*`` code.
+
+        Raises
+        ------
+        None
+        """
         if not isinstance(result, Mapping) or not result:
-            return None, 0.0
+            return SemanticDecision(outcome=OUTCOME_NO_RANKING)
 
         similarity = self._cosine(result.get("similarity"))
         if similarity is None:
-            return None, 0.0
+            return SemanticDecision(outcome=OUTCOME_NO_RANKING)
         target = str(result.get("target_name", "") or "")
         mode = self._mode_by_name.get(target)
         entries = result.get("all_scores")
-        scores = {}
+        scores: Dict[str, float] = {}
         if not isinstance(entries, (list, tuple)):
-            return None, similarity
+            return SemanticDecision(
+                similarity=similarity, target=target, outcome=OUTCOME_INCOMPLETE
+            )
         for entry in entries:
             if not isinstance(entry, Mapping):
-                return None, similarity
+                return SemanticDecision(
+                    similarity=similarity, target=target, outcome=OUTCOME_INCOMPLETE
+                )
             name = entry.get("target")
             score = self._cosine(entry.get("similarity"))
             if (
@@ -252,49 +383,77 @@ class CodexSemanticLayer:
                 or name in scores
                 or score is None
             ):
-                return None, similarity
+                return SemanticDecision(
+                    similarity=similarity, target=target, outcome=OUTCOME_INCOMPLETE
+                )
             scores[name] = score
         if set(scores) != self._semantic_modes or target not in scores:
             self._info("CodexRouting: incomplete semantic ranking, ignoring it")
-            return None, similarity
+            return SemanticDecision(
+                similarity=similarity, target=target, outcome=OUTCOME_INCOMPLETE
+            )
         if not math.isclose(similarity, scores[target], rel_tol=1e-6, abs_tol=1e-7):
-            return None, similarity
-        runner_up = max(
-            (score for name, score in scores.items() if name != target), default=None
+            return SemanticDecision(
+                similarity=similarity, target=target, outcome=OUTCOME_INCOMPLETE
+            )
+
+        runner = max(
+            ((score, name) for name, score in scores.items() if name != target),
+            default=None,
         )
-        margin = scores[target] - runner_up if runner_up is not None else None
+        runner_up = runner[1] if runner else ""
+        runner_similarity = runner[0] if runner else None
+        margin = similarity - runner_similarity if runner else None
         self._info(
-            "CodexRouting: semantic target=%s similarity=%.4f runner_up=%s margin=%s",
+            "CodexRouting: semantic target=%s similarity=%.4f runner_up=%s "
+            "runner_similarity=%s margin=%s",
             target,
             similarity,
-            runner_up,
-            margin,
+            runner_up or "-",
+            "-" if runner_similarity is None else f"{runner_similarity:.4f}",
+            "-" if margin is None else f"{margin:.4f}",
         )
+        shape = {
+            "similarity": similarity,
+            "target": target,
+            "runner_up": runner_up,
+            "runner_up_similarity": runner_similarity,
+            "margin": margin,
+        }
         if similarity < self._threshold:
             self._info(
-                "CodexRouting: semantic match '%s' similarity=%.4f is below threshold %.4f",
+                "CodexRouting: semantic match '%s' similarity=%.4f is below "
+                "threshold %.4f",
                 target,
                 similarity,
                 self._threshold,
             )
-        if (
-            mode is not None
-            and similarity >= self._threshold
-            and (
-                margin is None
-                or (
-                    margin > 0
-                    and (
-                        margin >= self._min_margin
-                        or math.isclose(
-                            margin, self._min_margin, rel_tol=0, abs_tol=1e-12
-                        )
-                    )
-                )
+            return SemanticDecision(
+                **shape, outcome=OUTCOME_BELOW_THRESHOLD
             )
+        if mode is None:
+            return SemanticDecision(**shape, outcome=OUTCOME_INCOMPLETE)
+        if margin is None:
+            return SemanticDecision(**shape, mode=mode, outcome=OUTCOME_ACCEPTED)
+        if margin <= 0:
+            return SemanticDecision(**shape, outcome=OUTCOME_TIE)
+        required = max(
+            self._min_margin, self._min_margin_relative * (runner_similarity or 0.0)
+        )
+        if margin >= required or math.isclose(
+            margin, required, rel_tol=0, abs_tol=1e-12
         ):
-            return mode, similarity
-        return None, similarity
+            return SemanticDecision(
+                **shape, mode=mode, outcome=OUTCOME_ACCEPTED
+            )
+        if fallback_mode and runner_up == fallback_mode:
+            return SemanticDecision(
+                **shape,
+                mode=mode,
+                outcome=OUTCOME_ACCEPTED,
+                reason=REASON_RUNNER_UP_IS_FALLBACK,
+            )
+        return SemanticDecision(**shape, outcome=OUTCOME_AMBIGUOUS)
 
     @staticmethod
     def _cosine(value: Any) -> Optional[float]:
@@ -404,6 +563,9 @@ class CodexSemanticLayer:
         *last_agent_messages* assistant ``output_text`` parts (oldest first),
         plus the latest linked tool activity. Only the active user turn is
         eligible; a separate phase budget protects it from a long user prompt.
+        The action description is capped at the configured
+        ``activity_description_limit`` distinct actions, so a long turn does
+        not spend the whole phase budget on one repeated action.
 
         Parameters
         ----------
@@ -434,7 +596,15 @@ class CodexSemanticLayer:
         # The action, described structurally.  A raw tool output is the content
         # of whatever the agent read and would let that topic stand in for the
         # work itself, so only the shape of the action is embedded here.
-        action = describe_activity(request.activity, phase_rules)
+        action = describe_activity(
+            request.activity,
+            phase_rules,
+            limit=(
+                phase_rules.activity_description_limit
+                if phase_rules is not None
+                else None
+            ),
+        )
         if action:
             phase_parts.append(action)
 
