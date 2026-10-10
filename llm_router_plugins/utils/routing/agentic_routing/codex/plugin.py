@@ -161,6 +161,7 @@ class CodexRoutingPlugin(PluginInterface):
                     mode_by_name=self._config.mode_by_name,
                     logger=self._logger,
                     min_margin=self._config.semantic_min_margin,
+                    min_margin_relative=self._config.semantic_min_margin_relative,
                     intent_max_chars=self._config.semantic_intent_max_chars,
                     phase_max_chars=self._config.semantic_phase_max_chars,
                     phase_rules=self._config.phase,

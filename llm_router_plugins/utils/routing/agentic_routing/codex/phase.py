@@ -20,13 +20,24 @@ What counts as evidence
 
 What never counts
 -----------------
-Contradictory segments, unsupported shell syntax, substitutions and redirects
-abstain instead of guessing.  A quoted or hypothetical action, a code sample and
-a line that merely mentions a tool are not evidence.  Neither is an
-infrastructure error, nor the word "failed" inside the content of a file the
-agent happened to read: a failure only counts as the execution status of a
-linked test call, read from the result envelope rather than searched for in the
-captured body.
+An executable the rule table does not name is no evidence in either direction:
+it is skipped, and a command keeps no evidence only when none of its segments
+is named.  Two different phases claimed by one segment contradict each other
+and abstain.  Fragments that carry no phase of their own — a redirect, a
+substitution, a label printed by ``echo``, a shell control word — are read as
+noise and do not silence the recognizable command beside them.  A quoted or
+hypothetical action, a code sample and a line that merely mentions a tool are
+not evidence.  Neither is an infrastructure error, nor the word "failed" inside
+the content of a file the agent happened to read: a failure only counts as the
+execution status of a linked test call, read from the result envelope rather
+than searched for in the captured body.
+
+Two strengths
+-------------
+A ``strong`` rule names the work (running tests, inspecting history, editing
+files); a ``weak`` rule only accompanies it (a linter, a type checker).  The
+latest strong signal of a turn decides; a weak one is heard only while the turn
+has produced no strong signal at all.
 """
 
 import json
@@ -35,16 +46,18 @@ import shlex
 
 from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Pattern, Tuple
 
 from .payload import CodexActivity
-from .phase_config import CodexPhaseConfig
+from .phase_config import STRENGTH_STRONG, STRENGTH_WEAK, CodexPhaseConfig
 
 __all__ = [
     "EVIDENCE_ANNOUNCEMENT",
     "EVIDENCE_COMMAND",
     "EVIDENCE_PATCH",
     "EVIDENCE_TEST_FAILURE",
+    "STRENGTH_STRONG",
+    "STRENGTH_WEAK",
     "PhaseEvidence",
     "collect_phase_evidence",
     "detect_phase_evidence",
@@ -70,8 +83,52 @@ REASON_NEUTRAL = "neutral"
 #: Reason of several segments that agree on one phase without naming one rule.
 REASON_CONSISTENT = "consistent"
 
+#: Reason of a phase recognized from a script the agent piped into an editor.
+REASON_SCRIPTED_EDIT = "scripted edit"
+
 #: Separates the sequential segments of a compound command.
-_SEQUENCE_OPERATORS = (";", "&&")
+_SEQUENCE_OPERATORS = (";", "&&", "||")
+
+#: Replaces a fragment whose value is only known when the shell expands it.
+_SUBSTITUTION_PLACEHOLDER = "-"
+
+#: File-descriptor duplication, e.g. ``2>&1``.
+_FD_DUPLICATION = re.compile(r"\d*>&+\d+")
+
+#: A command substitution, ``$(…)``, and its quoted forms.
+_COMMAND_SUBSTITUTION = re.compile(r"[\"']?\$\([^)]*\)[\"']?")
+
+#: A back-quoted substitution and the placeholder a substitution became.
+_BACKTICK_SUBSTITUTION = re.compile(r"[\"']?`[^`]*`[\"']?")
+
+#: A redirect, with or without an explicit descriptor: ``2>/dev/null``, ``> f``.
+_REDIRECT = re.compile(r"\d*(?:>>|>)[^\s;&|]*")
+
+#: A here-document introducer and its terminating word.
+_HERE_DOCUMENT = re.compile(r"<<<?-?\s*(['\"]?)(\w+)\1")
+
+#: Words that structure a shell script without naming an action.
+_SHELL_CONTROL_WORDS = frozenset(
+    {
+        "for",
+        "while",
+        "until",
+        "do",
+        "done",
+        "if",
+        "then",
+        "else",
+        "elif",
+        "fi",
+        "case",
+        "esac",
+        "in",
+        "select",
+        "function",
+        "time",
+        "!",
+    }
+)
 
 #: Marks the end of the execution envelope and the start of the captured body.
 _OUTPUT_MARKER = re.compile(r"^Output:[ \t]*$", re.IGNORECASE)
@@ -111,6 +168,10 @@ class PhaseEvidence:
     succeeded : bool or None
         Execution status once a linked result is known; ``None`` before that,
         and for an action that carries no status at all.
+    strength : str
+        :data:`STRENGTH_STRONG` when the evidence names the work itself,
+        :data:`STRENGTH_WEAK` when it only accompanies it.  A strong signal of
+        the turn outranks a weak one however recent the weak one is.
     """
 
     mode: str
@@ -120,6 +181,7 @@ class PhaseEvidence:
     call_id: str = ""
     completed: bool = False
     succeeded: Optional[bool] = None
+    strength: str = STRENGTH_STRONG
 
     def settle(self, succeeded: Optional[bool]) -> "PhaseEvidence":
         """
@@ -203,6 +265,147 @@ def _match_announcement(
     return phases[0] if len(phases) == 1 else None
 
 
+def _without_here_document(command: str) -> Tuple[str, str]:
+    """
+    Split a command into its shell text and the bodies of its here-documents.
+
+    A here-document is data, not shell syntax: ``python3 - <<'EOF'`` runs an
+    interpreter, and everything until the closing word is that interpreter's
+    program.  Reading it as shell would either fail or report the body's own
+    words as commands, so the body is handed back separately.
+
+    Parameters
+    ----------
+    command : str
+        The raw command string.
+
+    Returns
+    -------
+    Tuple[str, str]
+        The shell text, with each here-document replaced by a placeholder
+        argument, and the collected bodies joined in order.
+    """
+    if "<<" not in command:
+        return command, ""
+    shell: List[str] = []
+    bodies: List[str] = []
+    lines = command.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = _HERE_DOCUMENT.search(line)
+        if match is None:
+            shell.append(line)
+            index += 1
+            continue
+        shell.append(line[: match.start()] + f" {_SUBSTITUTION_PLACEHOLDER} ")
+        closing = match.group(2)
+        index += 1
+        body: List[str] = []
+        while index < len(lines):
+            if lines[index].strip() == closing:
+                index += 1
+                break
+            body.append(lines[index])
+            index += 1
+        bodies.append("\n".join(body))
+    return "\n".join(shell), "\n".join(bodies)
+
+
+def _mask_quotes(text: str) -> str:
+    """
+    Replace every quoted span with a placeholder argument.
+
+    A quoted word is data, not syntax: ``echo ';' pytest`` prints a semicolon
+    and then runs a test, it does not sequence two commands.  A lexer that has
+    already dropped the quoting cannot tell the two apart, so the span is
+    replaced while the operators around it keep the meaning the shell gives
+    them.  A command hidden inside a quoted string is not a command the agent
+    named, and is not read as one.
+
+    Parameters
+    ----------
+    text : str
+        The command, here-document bodies already removed.
+
+    Returns
+    -------
+    str
+        The command with each closed span replaced by one placeholder; a quote
+        that never closes is dropped as a typo.
+    """
+    result: List[str] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char not in "\"'":
+            result.append(char)
+            index += 1
+            continue
+        scan = index + 1
+        while scan < length:
+            current = text[scan]
+            if char == '"' and current == "\\":
+                scan += 2
+                continue
+            if current == char:
+                break
+            scan += 1
+        if scan < length:
+            result.append(f" {_SUBSTITUTION_PLACEHOLDER} ")
+            index = scan + 1
+        else:
+            index += 1
+    return "".join(result)
+
+
+def _without_noise(command: str) -> str:
+    """
+    Reduce a command to what its structure says, dropping value-only fragments.
+
+    A redirect says where output went, a substitution says which file name was
+    expanded, and a duplicated descriptor says nothing at all.  None of them
+    contradicts the command they decorate, so they are replaced rather than
+    refused: reading them as noise is what lets ``cd repo && echo "=== git ==="
+    && git log --oneline 2>/dev/null | cat`` still report a commit inspection.
+
+    Parameters
+    ----------
+    command : str
+        The raw command string, here-documents already removed.
+
+    Returns
+    -------
+    str
+        The command with noise replaced by placeholders and its line breaks
+        turned into explicit sequential separators.
+    """
+    text = _mask_quotes(command)
+    text = _FD_DUPLICATION.sub(" ", text)
+    text = _COMMAND_SUBSTITUTION.sub(f" {_SUBSTITUTION_PLACEHOLDER} ", text)
+    text = _BACKTICK_SUBSTITUTION.sub(f" {_SUBSTITUTION_PLACEHOLDER} ", text)
+    text = _REDIRECT.sub(" ", text)
+    return _separate_lines(text)
+
+
+def _separate_lines(text: str) -> str:
+    """Turn the line breaks outside quotes into explicit sequential operators."""
+    result: List[str] = []
+    quote = ""
+    for char in text:
+        if quote:
+            result.append(char)
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+            result.append(char)
+        else:
+            result.append(" && " if char == "\n" else char)
+    return "".join(result)
+
+
 def _tokenize(text: str) -> Optional[List[str]]:
     """
     Read the ``cmd``/``command`` argument of a call into shell tokens.
@@ -215,9 +418,12 @@ def _tokenize(text: str) -> Optional[List[str]]:
     Returns
     -------
     Optional[List[str]]
-        The tokens, or ``None`` when the arguments are malformed or use shell
-        constructs this reader refuses to interpret — a substitution, a
-        redirect, or quoting mixed with operators.
+        The tokens, or ``None`` when the arguments are malformed: not an
+        object, a command that is not a string, or two keys disagreeing about
+        what was run.  Shell constructs are no longer refused — redirects,
+        substitutions and here-documents are read as noise by
+        :func:`_without_noise`, and quoting the lexer cannot close is dropped
+        rather than hiding the whole command.
     """
     try:
         arguments = json.loads(text)
@@ -228,30 +434,31 @@ def _tokenize(text: str) -> Optional[List[str]]:
             return None
         if len(set(commands)) != 1:
             return None
-        command = commands[0]
-        if any(char in command for char in ("$", "`", "\n", "<", ">")):
-            return None
-        if any(char in command for char in "\"'") and any(
-            char in command for char in ";&|()"
-        ):
-            return None
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
-        lexer.whitespace_split = True
-        return list(lexer)
     except (ValueError, TypeError):
         return None
+
+    shell = _without_noise(_without_here_document(commands[0])[0])
+    lexer = shlex.shlex(shell, posix=True, punctuation_chars=";&|()")
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:
+        return []
 
 
 def _split_command(text: str, rules: CodexPhaseConfig) -> Optional[List[List[str]]]:
     """
-    Reduce a command to the producers whose phases must agree.
+    Reduce a command to the producer segments that can name a phase.
 
-    Sequential operators (``;``, ``&&``) split the command into pipelines that
-    run one after another, so their phases must agree.  A pipeline's first
-    segment is the work; the segments after a pipe are consumers, allowed only
-    when each is a configured neutral filter such as ``head`` or ``tee`` — they
-    observe the output without changing what the agent is doing, so ``git show
-    X | head -80`` is still a commit inspection.
+    Sequential operators (``;``, ``&&``, ``||``) split the command into
+    pipelines that run one after another, so the last one naming a phase is the
+    work the agent ended on.  A pipeline's first segment is the work; the
+    segments after a pipe consume its output.  A consumer the rule table does
+    not name, or one configured as read-only, says nothing and is ignored; a
+    consumer naming a phase of its own contradicts the producer it consumes,
+    and such a pipeline names no phase at all.  Shell control words structure
+    the script without acting in it, and a segment left empty by their removal
+    is skipped.
 
     Parameters
     ----------
@@ -263,8 +470,8 @@ def _split_command(text: str, rules: CodexPhaseConfig) -> Optional[List[List[str
     Returns
     -------
     Optional[List[List[str]]]
-        One token list per producer segment, or ``None`` when the command
-        cannot be interpreted.
+        One token list per producer segment, in the order they run, or ``None``
+        when the arguments themselves cannot be read.
     """
     tokens = _tokenize(text)
     if not tokens:
@@ -274,29 +481,47 @@ def _split_command(text: str, rules: CodexPhaseConfig) -> Optional[List[List[str
     stage: List[str] = []
     for token in tokens:
         if token in _SEQUENCE_OPERATORS or token == "|":
-            if not stage:
-                return None
-            pipelines[-1].append(stage)
-            stage = []
+            if stage:
+                pipelines[-1].append(stage)
+                stage = []
             if token in _SEQUENCE_OPERATORS:
                 pipelines.append([])
             continue
         if token and all(char in ";&|()" for char in token):
-            return None
+            if stage:
+                pipelines[-1].append(stage)
+                stage = []
+            pipelines.append([])
+            continue
         stage.append(token)
-    if not stage:
-        return None
-    pipelines[-1].append(stage)
+    if stage:
+        pipelines[-1].append(stage)
 
     segments: List[List[str]] = []
     for pipeline in pipelines:
-        if not pipeline:
+        stages = [
+            [word for word in stage if word not in _SHELL_CONTROL_WORDS]
+            for stage in pipeline
+        ]
+        stages = [stage for stage in stages if stage]
+        if not stages:
             continue
-        for consumer in pipeline[1:]:
-            if not _is_filter(consumer, rules):
-                return None
-        segments.append(pipeline[0])
+        producer = stages[0]
+        produced = _segment_signal(producer, rules)
+        contradicted = produced is not None and any(
+            _names_other_phase(stage, rules, produced[0]) for stage in stages[1:]
+        )
+        if not contradicted:
+            segments.append(producer)
     return segments or None
+
+
+def _names_other_phase(
+    words: List[str], rules: CodexPhaseConfig, mode: str
+) -> bool:
+    """Whether one pipeline segment names a phase other than *mode*."""
+    signal = _segment_signal(words, rules)
+    return signal is not None and signal[0] != mode
 
 
 def _is_filter(stage: List[str], rules: CodexPhaseConfig) -> bool:
@@ -317,8 +542,120 @@ def _is_filter(stage: List[str], rules: CodexPhaseConfig) -> bool:
     """
     if not stage:
         return False
-    executable = PurePosixPath(stage[0]).name
-    return any(pattern.fullmatch(executable) for pattern in rules.neutral_filters)
+    return _matches_executable(stage[0], rules.neutral_filters)
+
+
+def _is_neutral_executable(word: str, rules: CodexPhaseConfig) -> bool:
+    """Whether an executable is configured to carry no phase of its own."""
+    return _matches_executable(word, rules.neutral_executables)
+
+
+def _matches_executable(word: str, patterns: Tuple[Pattern[str], ...]) -> bool:
+    """Match a bare or path-qualified executable against rule patterns."""
+    if not word:
+        return False
+    executable = PurePosixPath(word).name
+    return any(pattern.fullmatch(executable) for pattern in patterns)
+
+
+def _segment_signal(
+    words: List[str], rules: CodexPhaseConfig
+) -> Optional[Tuple[str, str, str]]:
+    """
+    Return the ``(mode, reason, strength)`` of one producer segment.
+
+    An executable the table does not name, a neutral one, a help screen and an
+    environment assignment all answer ``None``: they carry no phase, which is
+    not the same as denying the phases of the segments around them.  When
+    several rules match, the one naming the longest argument prefix wins; a
+    genuine disagreement between equally specific rules abstains.
+
+    Parameters
+    ----------
+    words : List[str]
+        The segment's tokens, executable first.
+    rules : CodexPhaseConfig
+        Validated command rules.
+
+    Returns
+    -------
+    Optional[Tuple[str, str, str]]
+        The phase this segment names, or ``None`` when it names none.
+    """
+    while words and re.fullmatch(r"[A-Za-z_]\w*=.*", words[0]):
+        words = words[1:]
+    if not words:
+        return None
+    executable = PurePosixPath(words[0]).name
+    args = words[1:]
+    if any(arg in ("--help", "-h", "--version") for arg in args):
+        return None
+    if executable == "git":
+        while args:
+            if args[0] == "--no-pager":
+                args = args[1:]
+            elif args[0] == "-C" and len(args) >= 2:
+                args = args[2:]
+            else:
+                break
+    matches = [
+        rule
+        for rule in rules.commands
+        if rule.executable.fullmatch(executable)
+        and tuple(args[: len(rule.args_prefix)]) == rule.args_prefix
+        and rule.mode is not None
+    ]
+    if not matches:
+        return None
+    modes = {rule.mode for rule in matches}
+    if len(modes) != 1:
+        return None
+    rule = next(match for match in matches if match.mode in modes)
+    return (
+        rule.mode,
+        f"{executable} {' '.join(rule.args_prefix)}".strip(),
+        rule.strength,
+    )
+
+
+def _command_signal(
+    text: str, rules: CodexPhaseConfig
+) -> Optional[Tuple[str, str, str]]:
+    """
+    Return the phase an executed command names, and how strongly it names it.
+
+    Parameters
+    ----------
+    text : str
+        The raw JSON arguments of the call.
+    rules : CodexPhaseConfig
+        Validated command rules.
+
+    Returns
+    -------
+    Optional[Tuple[str, str, str]]
+        ``(mode, reason, strength)``, or ``None`` when no segment names a phase.
+    """
+    segments = _split_command(text, rules)
+    if segments is None:
+        return None
+    signals = [
+        signal
+        for signal in (_segment_signal(words, rules) for words in segments)
+        if signal is not None
+    ]
+    if not signals:
+        return None
+    strong = [signal for signal in signals if signal[2] == STRENGTH_STRONG]
+    chosen = strong[-1] if strong else signals[-1]
+    if len({signal[0] for signal in signals}) == 1 and len(signals) > 1:
+        reasons = {signal[1] for signal in signals}
+        return (
+            chosen[0],
+            chosen[1] if len(reasons) == 1 else REASON_CONSISTENT,
+            chosen[2],
+        )
+    return chosen
 
 
 def _command_phase(text: str, rules: CodexPhaseConfig) -> Tuple[Optional[str], str]:
@@ -336,52 +673,63 @@ def _command_phase(text: str, rules: CodexPhaseConfig) -> Tuple[Optional[str], s
     -------
     Tuple[Optional[str], str]
         ``(mode, reason)`` when the command is recognized, ``(None, reason)``
-        when it is explicitly neutral and ``(None, "")`` when the reader
-        abstains.
+        when it is explicitly neutral and ``(None, "")`` when it names no
+        phase at all.
     """
+    signal = _command_signal(text, rules)
+    if signal is not None:
+        return signal[0], signal[1]
     segments = _split_command(text, rules)
-    if segments is None:
-        return None, ""
-    modes = set()
-    reasons = set()
-    for words in segments:
-        while words and re.fullmatch(r"[A-Za-z_]\w*=.*", words[0]):
-            words = words[1:]
-        if not words:
-            return None, ""
-        executable = PurePosixPath(words[0]).name
-        args = words[1:]
-        if any(arg in ("--help", "-h", "--version") for arg in args):
-            return None, ""
-        if executable == "git":
-            while args:
-                if args[0] == "--no-pager":
-                    args = args[1:]
-                elif args[0] == "-C" and len(args) >= 2:
-                    args = args[2:]
-                else:
-                    break
-        matches = {
-            rule
-            for rule in rules.commands
-            if rule.executable.fullmatch(executable)
-            and tuple(args[: len(rule.args_prefix)]) == rule.args_prefix
-        }
-        if len(matches) != 1:
-            return None, ""
-        rule = next(iter(matches))
-        reasons.add(f"{executable} {' '.join(rule.args_prefix)}".strip())
-        modes.add(rule.mode)
-    # A neutral segment (``cd``, ``git status``) says nothing and contradicts
-    # nothing; two different phases in one command are a conflict, not a tie.
-    signals = modes - {None}
-    if not signals:
+    if segments and all(
+        _is_neutral_executable(words[0], rules) or _is_filter(words, rules)
+        for words in segments
+        if words
+    ):
         return None, REASON_NEUTRAL
-    if len(signals) != 1:
+    return None, ""
+
+
+def _here_document_phase(
+    text: str, rules: CodexPhaseConfig
+) -> Tuple[Optional[str], str]:
+    """
+    Return the phase of a script the agent piped into an interpreter.
+
+    An agent that edits through ``python3 - <<'EOF'`` never declares a patch,
+    so without this the turn holds no sign of the files it changed.  Only an
+    explicit write says so: a read, a print or a report is not an edit.
+
+    Parameters
+    ----------
+    text : str
+        The raw JSON arguments of the call.
+    rules : CodexPhaseConfig
+        Validated write patterns.
+
+    Returns
+    -------
+    Tuple[Optional[str], str]
+        ``(implement_mode, reason)`` when a write pattern matches the body,
+        otherwise ``(None, "")``.
+    """
+    if not rules.implement_write_patterns:
         return None, ""
-    return signals.pop(), reasons.pop() if len(reasons) == 1 else REASON_CONSISTENT
-
-
+    try:
+        arguments = json.loads(text)
+    except (ValueError, TypeError):
+        return None, ""
+    if not isinstance(arguments, dict):
+        return None, ""
+    for key in ("cmd", "command"):
+        command = arguments.get(key)
+        if not isinstance(command, str):
+            continue
+        _shell, body = _without_here_document(command)
+        if body and any(
+            pattern.search(body) for pattern in rules.implement_write_patterns
+        ):
+            return rules.implement_mode, REASON_SCRIPTED_EDIT
+    return None, ""
 def _test_path(path: str, rules: CodexPhaseConfig) -> bool:
     """Whether *path* names a test file under the configured test layout."""
     parts = PurePosixPath(path).parts
@@ -514,9 +862,10 @@ def collect_phase_evidence(
     Return every phase evidence of the active turn, oldest first.
 
     Only explicit current announcements, recognized executed commands and Codex
-    patch envelopes count; a test failure additionally requires a call linked
-    in this turn.  Neutral or ambiguous activity simply produces no evidence,
-    leaving the earlier signal in place.
+    patch envelopes count; an interpreter a here-document fed with writes counts
+    as an edit, and a test failure additionally requires a call linked in this
+    turn.  Neutral or unrecognized activity simply produces no evidence, leaving
+    the earlier signal in place.
 
     Parameters
     ----------
@@ -549,10 +898,21 @@ def collect_phase_evidence(
                 )
         elif item.kind == "function_call":
             if item.name in rules.command_tools:
-                mode, reason = _command_phase(item.text, rules)
+                signal = _command_signal(item.text, rules)
+                if signal is None:
+                    scripted = _here_document_phase(item.text, rules)
+                    signal = (
+                        (scripted[0], scripted[1], STRENGTH_STRONG)
+                        if scripted[0] is not None
+                        else None
+                    )
+                if signal is None:
+                    continue
+                mode, reason, strength = signal
                 kind = EVIDENCE_COMMAND
             elif item.name in rules.patch_tools:
                 mode, reason = _patch_phase(item.text, rules)
+                strength = STRENGTH_STRONG
                 kind = EVIDENCE_PATCH
             else:
                 continue
@@ -567,6 +927,7 @@ def collect_phase_evidence(
                     reason=reason,
                     event_id=item.event_id,
                     call_id=item.call_id,
+                    strength=strength,
                 )
             )
         elif item.kind == "function_call_output" and item.call_id and item.name:
@@ -606,6 +967,15 @@ def detect_phase_evidence(
     """
     Return the latest phase evidence, or ``None`` when there is none.
 
+    A strong signal outranks a weak one however recent the weak one is: a
+    linter run after ``git log`` does not make the turn a review of code style.
+    Among strong signals, the phase is the one dominating the last
+    ``evidence_window`` actions of the turn, the most recent action breaking a
+    tie.  One command among several of another kind is a step inside that work,
+    not a change of it: an agent committing between two edits is still editing,
+    and the model behind a long turn should not answer to every interleaved
+    command.  With a window of one the latest action decides alone.
+
     Parameters
     ----------
     activity : Tuple[CodexActivity, ...]
@@ -616,10 +986,46 @@ def detect_phase_evidence(
     Returns
     -------
     Optional[PhaseEvidence]
-        The most recent evidence, carrying its kind, reason and settlement.
+        The evidence naming the phase that dominates the recent strong signals
+        of the turn, the recent weak ones when there are no strong ones.
     """
     evidence = collect_phase_evidence(activity, rules)
-    return evidence[-1] if evidence else None
+    if not evidence:
+        return None
+    strong = [item for item in evidence if item.strength == STRENGTH_STRONG]
+    pool = strong or evidence
+    return _dominant_recent(pool, max(1, rules.evidence_window))
+
+
+def _dominant_recent(
+    evidence: List[PhaseEvidence], window: int
+) -> PhaseEvidence:
+    """
+    Return the evidence of the phase dominating the recent end of a turn.
+
+    Parameters
+    ----------
+    evidence : List[PhaseEvidence]
+        Equally strong evidence of one turn, oldest first.
+    window : int
+        How many of the most recent signals are weighed.
+
+    Returns
+    -------
+    PhaseEvidence
+        The latest evidence of the winning phase, so the reported kind and
+        reason name a real action the agent took.
+    """
+    recent = evidence[-window:]
+    totals: Dict[str, int] = {}
+    for item in recent:
+        totals[item.mode] = totals.get(item.mode, 0) + 1
+    best = max(totals.values())
+    leaders = {mode for mode, total in totals.items() if total == best}
+    for item in reversed(recent):
+        if item.mode in leaders:
+            return item
+    return recent[-1]
 
 
 def detect_phase(
@@ -648,10 +1054,76 @@ def detect_phase(
     return evidence.mode if evidence is not None else None
 
 
+#: Kinds of action a command of an unnamed executable still describes.
+_ACTION_NAMES: Tuple[Tuple[Pattern[str], str], ...] = (
+    (re.compile(r"^(?:rg|ag|ack|grep|egrep|fgrep)$"), "searched code"),
+    (re.compile(r"^(?:find|fd|ls|tree|du)$"), "listed files"),
+    (re.compile(r"^(?:cat|head|tail|less|more|sed|awk|jq|column|wc)$"), "read files"),
+    (
+        re.compile(r"^(?:ruff|flake8|mypy|pyright|pylint|black|isort|bandit)$"),
+        "linted",
+    ),
+    (re.compile(r"^(?:curl|wget|httpie)$"), "called a service"),
+    (re.compile(r"^(?:pip|pip3|uv|poetry|npm|yarn|pnpm)$"), "installed packages"),
+)
+
+#: Longest argument a described action may name.
+_ACTION_SUBJECT_CHARS = 40
+
+
+def _action_subject(words: List[str]) -> str:
+    """Return one short, single-line argument that says what the action hit."""
+    for word in words[1:]:
+        if word.startswith("-") or word == _SUBSTITUTION_PLACEHOLDER:
+            continue
+        subject = word.strip("\"'")
+        if subject and len(subject) <= _ACTION_SUBJECT_CHARS and "\n" not in subject:
+            return subject
+    return ""
+
+
+def _describe_command(text: str, rules: Optional[CodexPhaseConfig]) -> str:
+    """
+    Describe an executed command the phase rules did not name.
+
+    A phase rule is the precise description, but without one the command is
+    still the agent's action and should not be reported as an anonymous tool
+    call: ``ran git mv``, ``searched code`` and ``read files`` say what kind of
+    work is happening, which is exactly what a mode is chosen from.  Only the
+    shape of the command is read, never the output it produced.
+
+    Parameters
+    ----------
+    text : str
+        The raw JSON arguments of the call.
+    rules : CodexPhaseConfig or None
+        Phase rules, used to split the command the same way the phase reader does.
+
+    Returns
+    -------
+    str
+        A short clause naming the action, empty when nothing can be said.
+    """
+    if rules is None:
+        return ""
+    segments = _split_command(text, rules)
+    if not segments:
+        return ""
+    words = segments[-1]
+    executable = PurePosixPath(words[0]).name if words else ""
+    if not executable or executable == _SUBSTITUTION_PLACEHOLDER:
+        return ""
+    for pattern, verb in _ACTION_NAMES:
+        if pattern.fullmatch(executable):
+            subject = _action_subject(words) if verb == "linted" else ""
+            return f"{verb} {subject}".strip()
+    return f"ran {executable}".strip()
+
+
 def describe_activity(
     activity: Tuple[CodexActivity, ...],
     rules: Optional[CodexPhaseConfig] = None,
-    limit: int = 3,
+    limit: Optional[int] = None,
 ) -> str:
     """
     Describe what the agent is *doing*, without repeating what it read.
@@ -660,10 +1132,16 @@ def describe_activity(
     log of some build — topically about whatever the agent happened to look at,
     and about the work only through the action that produced it.  Embedding it
     lets one large read dominate the description of the current activity.  This
-    renders the structure instead: which tool ran, which recognized action it
+    renders the structure instead: which action ran, which recognized phase it
     is when a rule names it, whether it succeeded, how many files a patch
-    touched.  The result is bounded, and it stays identical while the action
-    stays the same even when the text the tools returned changes.
+    touched.  An action the rules do not name is still described by its shape,
+    so a long turn of reads, searches and lints says so instead of repeating one
+    anonymous tool call.
+
+    Repeated actions collapse into one clause carrying how often they ran, and
+    the newest distinct actions are kept: the description stays bounded, stays
+    identical while the work stays the same even when tool output changes, and
+    spends its budget on different actions rather than on copies of one.
 
     Parameters
     ----------
@@ -672,13 +1150,15 @@ def describe_activity(
     rules : CodexPhaseConfig, optional
         Phase rules used to name recognized actions.  Without them the
         description still reports tools and statuses.
-    limit : int
-        How many of the most recent clauses to keep.
+    limit : int, optional
+        How many of the most recent distinct actions to keep.  Defaults to
+        ``rules.activity_description_limit``, or three without rules.
 
     Returns
     -------
     str
-        One clause per event, oldest first; empty when nothing is describable.
+        One clause per distinct action, oldest first; empty when nothing is
+        describable.
     """
     named = {}
     if rules is not None and rules.enabled:
@@ -692,7 +1172,9 @@ def describe_activity(
         if item.kind != "function_call":
             continue
         evidence = named.get(item.call_id)
-        if item.name and rules is not None and item.name in rules.patch_tools:
+        command_tool = bool(rules is not None and item.name in rules.command_tools)
+        patch_tool = bool(rules is not None and item.name in rules.patch_tools)
+        if item.name and patch_tool:
             clause = (
                 f"editing files ({evidence.reason})"
                 if evidence is not None
@@ -700,6 +1182,8 @@ def describe_activity(
             )
         elif evidence is not None and evidence.kind == EVIDENCE_COMMAND:
             clause = f"ran {evidence.reason}"
+        elif command_tool:
+            clause = _describe_command(item.text, rules) or f"called {item.name}"
         else:
             clause = f"called {item.name or 'a tool'}"
         if (
@@ -708,7 +1192,21 @@ def describe_activity(
             and evidence.succeeded is not None
         ):
             clause += ": succeeded" if evidence.succeeded else ": failed"
-        clauses.append(clause)
+        if clause:
+            clauses.append(clause)
+    if limit is None:
+        limit = rules.activity_description_limit if rules is not None else 3
+    counts: Dict[str, int] = {}
+    ordered: List[str] = []
+    for clause in clauses:
+        counts[clause] = counts.get(clause, 0) + 1
+        if clause in ordered:
+            ordered.remove(clause)
+        ordered.append(clause)
     if limit > 0:
-        clauses = clauses[-limit:]
-    return "\n".join(clause for clause in clauses if clause)
+        ordered = ordered[-limit:]
+    rendered = [
+        clause if counts[clause] < 2 else f"{clause} x{counts[clause]}"
+        for clause in ordered
+    ]
+    return "\n".join(rendered)

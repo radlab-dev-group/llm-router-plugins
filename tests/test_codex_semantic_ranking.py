@@ -122,16 +122,20 @@ def _make_layer(
     router=None,
     threshold=0.51,
     min_margin=0.05,
+    min_margin_relative=0.0,
     intent_max_chars=2000,
     phase_max_chars=2000,
+    phase_rules=None,
 ):
     return CodexSemanticLayer(
         router,
         threshold,
         mode_by_name,
         min_margin=min_margin,
+        min_margin_relative=min_margin_relative,
         intent_max_chars=intent_max_chars,
         phase_max_chars=phase_max_chars,
+        phase_rules=phase_rules,
     )
 
 
@@ -674,7 +678,8 @@ def test_shipped_config_has_balanced_semantic_defaults(raw_config):
     config = CodexRoutingConfig._from_raw(raw_config)
     config.validate_args()
     assert config.semantic_aggregation == "per_target_top_k"
-    assert config.semantic_min_margin == pytest.approx(0.005)
+    assert config.semantic_min_margin == pytest.approx(0.002)
+    assert config.semantic_min_margin_relative == pytest.approx(0.004)
     assert config.semantic_intent_max_chars == 2000
     assert config.semantic_phase_max_chars == 2000
     assert config.top_k == 4
@@ -682,7 +687,14 @@ def test_shipped_config_has_balanced_semantic_defaults(raw_config):
 
 
 @pytest.mark.parametrize(
-    "key", ["aggregation", "min_margin", "intent_max_chars", "phase_max_chars"]
+    "key",
+    [
+        "aggregation",
+        "min_margin",
+        "min_margin_relative",
+        "intent_max_chars",
+        "phase_max_chars",
+    ],
 )
 def test_config_requires_new_semantic_settings(raw_config, key):
     del raw_config["settings"]["semantic"][key]
@@ -728,3 +740,101 @@ def test_config_accepts_both_strategies_and_margin_endpoints(
     assert config.semantic_aggregation == aggregation
     assert config.semantic_min_margin == margin
     assert config.semantic_intent_max_chars == config.semantic_phase_max_chars == 1
+
+
+# --- decision assessment: margin policy and the fallback rule ----------------
+
+
+def _scores(winner, second, winner_score, second_score, **rest):
+    """A complete ranking over every work mode (special modes excluded)."""
+    scores = {name: 0.2 for name in _MODE_NAMES}
+    scores.update(rest)
+    scores[winner] = winner_score
+    scores[second] = second_score
+    return [
+        {"target": name, "similarity": score}
+        for name, score in scores.items()
+    ]
+
+
+def test_assess_accepts_when_the_margin_reaches_the_relative_floor(
+    mode_by_name,
+):
+    layer = _make_layer(mode_by_name, min_margin=0.002, min_margin_relative=0.004, threshold=0.44)
+    result = {
+        "target_name": "implement",
+        "similarity": 0.56,
+        "all_scores": _scores("implement", "test", 0.56, 0.55),
+    }
+    decision = layer.assess(result)
+    assert decision.outcome == "accepted"
+    assert decision.mode.name == "implement"
+    assert decision.margin == pytest.approx(0.01)
+
+
+def test_assess_relative_margin_tracks_the_runner_up_score(mode_by_name):
+    # A 0.03 lead passes at a 0.56 band (required 0.028) but fails at a 0.9
+    # band, where 0.05 of the runner-up (0.045) is required: the rule travels
+    # with the scale of the scores instead of one absolute number.
+    high = _make_layer(mode_by_name, min_margin=0.002, min_margin_relative=0.05, threshold=0.1)
+    low_result = {
+        "target_name": "plan",
+        "similarity": 0.59,
+        "all_scores": _scores("plan", "test", 0.59, 0.56),
+    }
+    high_result = {
+        "target_name": "plan",
+        "similarity": 0.93,
+        "all_scores": _scores("plan", "test", 0.93, 0.90),
+    }
+    assert high.assess(low_result).outcome == "accepted"
+    assert high.assess(high_result).outcome == "ambiguous"
+
+
+def test_assess_accepts_when_the_runner_up_is_the_fallback_mode(mode_by_name):
+    layer = _make_layer(mode_by_name, min_margin=0.005, min_margin_relative=0.05, threshold=0.44)
+    result = {
+        "target_name": "test",
+        "similarity": 0.55,
+        "all_scores": _scores("test", "implement", 0.55, 0.545),
+    }
+    assert layer.assess(result).outcome == "ambiguous"
+    decision = layer.assess(result, fallback_mode="implement")
+    assert decision.outcome == "accepted"
+    assert decision.mode.name == "test"
+    assert decision.reason == "runner-up is fallback"
+
+
+def test_assess_a_genuine_tie_is_still_refused_even_for_the_fallback(mode_by_name):
+    layer = _make_layer(mode_by_name, min_margin=0.005, threshold=0.44)
+    result = {
+        "target_name": "test",
+        "similarity": 0.55,
+        "all_scores": _scores("test", "implement", 0.55, 0.55),
+    }
+    decision = layer.assess(result, fallback_mode="implement")
+    assert decision.outcome == "tie"
+    assert decision.mode is None
+
+
+def test_assess_below_threshold_never_reaches_the_margin_rules(mode_by_name):
+    layer = _make_layer(mode_by_name, min_margin=0.0, threshold=0.6)
+    result = {
+        "target_name": "test",
+        "similarity": 0.5,
+        "all_scores": _scores("test", "implement", 0.5, 0.49),
+    }
+    decision = layer.assess(result)
+    assert decision.outcome == "below threshold"
+    assert decision.mode is None
+
+
+def test_accept_tuple_keeps_the_fallback_free_compatibility_view(mode_by_name):
+    layer = _make_layer(mode_by_name, min_margin=0.01, threshold=0.44)
+    result = {
+        "target_name": "test",
+        "similarity": 0.55,
+        "all_scores": _scores("test", "implement", 0.55, 0.545),
+    }
+    assert layer.accept(result) == (None, pytest.approx(0.55))
+    assert layer.assess(result, fallback_mode="implement").mode.name == "test"
