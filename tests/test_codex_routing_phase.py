@@ -165,18 +165,30 @@ def test_noncurrent_uncertain_or_quoted_announcements(text, rules):
         ("printf 'git diff'", None),
         ("python script.py pytest", None),
         ("npm install", None),
-        ("git diff && pytest", None),
-        ("pytest || true", None),
+        ("git diff && pytest", "test"),
+        ("pytest || true", "test"),
         ("echo $(pytest)", None),
         ("pytest | tee output", "test"),
-        ("pytest > output", None),
-        ("pytest &", None),
-        ("'pytest", None),
+        ("pytest > output", "test"),
+        ("pytest >> output.log", "test"),
+        ("pytest 2>&1", "test"),
+        ("pytest &", "test"),
+        ("'pytest", "test"),
         ("echo ';' pytest", None),
         ("echo '&&' pytest", None),
-        ("false && pytest", None),
+        ("false && pytest", "test"),
         ("pytest --help", None),
         ("git diff --help", None),
+        ("git add -A && git commit -m msg", "git_review"),
+        ("git mv a.py b.py", "git_review"),
+        ("git ls-files", "git_review"),
+        ("cd repo && echo \"=== git ===\" && git log --oneline 2>/dev/null | cat",
+         "git_review"),
+        ("for f in *.py; do echo $f; done", None),
+        ("sed -i 's/a/b/' src/app.py", "implement"),
+        ("flake8 src", "review"),
+        ("ruff check . && git log", "git_review"),
+        ("pytest | sh", "test"),
     ],
 )
 def test_executed_command_signals(text, expected, rules):
@@ -331,9 +343,10 @@ def test_latest_clear_signal_wins_and_neutral_activity_preserves_it(rules):
         command("git diff && pytest"),
         assistant("Summary: pytest failed."),
     )
-    assert detect_phase(activity, rules) == "git_review"
+    assert detect_phase(activity, rules) == "test"
     assert detect_phase(activity[:3], rules) == "implement"
     assert detect_phase(activity[:5], rules) == "debug"
+    assert detect_phase(activity[:6], rules) == "git_review"
     assert detect_phase((), rules) is None
 
 
@@ -513,27 +526,32 @@ def test_safe_compound_commands_keep_the_producer_phase(text, expected, rules):
 
 
 @pytest.mark.parametrize(
-    "text",
+    "text, expected",
     [
-        "pytest | sh",
-        "pytest | python -c 'print(1)'",
-        "git diff | tee log && pytest",
-        "pytest && git diff",
-        "pytest || true",
-        "head -1 tests/test_main.py",
-        "git show HEAD | cat | sh",
+        ("pytest | sh", "test"),
+        ("pytest | python -c 'print(1)'", "test"),
+        ("git diff | tee log && pytest", "test"),
+        ("pytest && git diff", "git_review"),
+        ("pytest || true", "test"),
+        ("head -1 tests/test_main.py", None),
+        ("git show HEAD | cat | sh", "git_review"),
+        ("sh -c 'rm -rf /'", None),
+        ("for f in *.py; do echo $f; done", None),
+        ("git log | pytest", None),
     ],
 )
-def test_unsupported_or_conflicting_composites_abstain(text, rules):
-    assert detect_phase((command(text),), rules) is None
+def test_noise_does_not_silence_a_named_command(text, expected, rules):
+    """A segment that names nothing is skipped; contradiction still abstains."""
+    assert detect_phase((command(text),), rules) == expected
 
 
-def test_filters_are_configurable_and_replaceable():
+def test_a_consumer_that_names_its_own_phase_contradicts_the_producer():
     strict = CodexPhaseConfig.from_raw(phase_raw({"neutral_filters": ["head"]}))
     assert detect_phase((command("pytest | head -5"),), strict) == "test"
-    assert detect_phase((command("pytest | tee log"),), strict) is None
+    assert detect_phase((command("pytest | tee log"),), strict) == "test"
     none = CodexPhaseConfig.from_raw(phase_raw({"neutral_filters": []}))
-    assert detect_phase((command("pytest | head -5"),), none) is None
+    assert detect_phase((command("pytest | head -5"),), none) == "test"
+    assert detect_phase((command("git log | flake8 src"),), strict) is None
 
 
 def test_invalid_neutral_filter_configuration_is_rejected():
@@ -673,3 +691,147 @@ def test_patch_evidence_names_the_envelope(rules):
     evidence = detect_phase_evidence((patch("src/main.py"),), rules)
     assert evidence.kind == "patch"
     assert evidence.reason.startswith("patch ")
+
+
+
+# --- evidence window, strengths and activity naming -------------------------
+
+
+def test_a_single_interleaved_step_does_not_change_the_dominant_phase(rules):
+    # The shipped evidence_window is 8: one commit between many edits is a
+    # step inside the work, not a change of it.
+    activity = tuple(
+        command(cmd, call_id=f"c{i}")
+        for i, cmd in enumerate(
+            (
+                "git mv a.py b.py",
+                "sed -i s/old/new/ b.py",
+                "sed -i s/old/new/ b.py",
+                "git add -A",
+                "sed -i s/old/new/ b.py",
+            )
+        )
+    )
+    assert detect_phase(activity, rules) == "implement"
+
+
+def test_the_evidence_window_is_configurable():
+    wide = CodexPhaseConfig.from_raw(phase_raw({"evidence_window": 8}))
+    narrow = CodexPhaseConfig.from_raw(phase_raw({"evidence_window": 1}))
+    activity = (
+        command("sed -i s/a/b/ f.py", call_id="c1"),
+        command("sed -i s/a/b/ f.py", call_id="c2"),
+        command("git add -A", call_id="c3"),
+    )
+    assert detect_phase(activity, wide) == "implement"
+    # A window of one decides on the latest action alone.
+    assert detect_phase(activity, narrow) == "git_review"
+
+
+def test_an_invalid_evidence_window_is_rejected():
+    for value in (0, -1, True, "8"):
+        with pytest.raises(ValueError, match="evidence_window"):
+            CodexPhaseConfig.from_raw(phase_raw({"evidence_window": value}))
+
+
+def test_a_weak_signal_never_overrides_a_strong_one_of_the_turn(rules):
+    activity = (
+        command("git log --oneline", call_id="c1"),
+        command("ruff check src", call_id="c2"),
+    )
+    assert detect_phase(activity, rules) == "git_review"
+
+
+def test_a_weak_signal_carries_the_turn_when_no_strong_one_exists(rules):
+    activity = (command("ruff check src", call_id="c1"),)
+    evidence = detect_phase_evidence(activity, rules)
+    assert evidence.mode == "review"
+    assert evidence.strength == "weak"
+
+
+def test_an_invalid_rule_strength_is_rejected():
+    raw = phase_raw()
+    raw["commands"] = [
+        {"executable": "ruff", "args_prefix": [], "mode": "review", "strength": "loud"}
+    ]
+    with pytest.raises(ValueError, match="strength"):
+        CodexPhaseConfig.from_raw(raw)
+
+
+def test_a_here_document_with_writes_is_an_edit(rules):
+    body = "python3 - <<'EOF'\npath.write_text('updated')\nEOF"
+    activity = (command(body, call_id="c1"),)
+    evidence = detect_phase_evidence(activity, rules)
+    assert (evidence.mode, evidence.reason) == ("implement", "scripted edit")
+
+
+def test_a_here_document_without_writes_is_no_evidence(rules):
+    body = "python3 - <<'EOF'\nprint('just a read')\nEOF"
+    activity = (command(body, call_id="c1"),)
+    assert detect_phase(activity, rules) is None
+
+
+def test_a_quoted_operator_is_data_not_a_command_separator(rules):
+    # The semicolon is printed, not executed: the only named producer is the
+    # neutral echo, so the line names no phase.
+    assert detect_phase((command("echo ';' pytest -q"),), rules) is None
+    # An unquoted operator still sequences, and the real test run is seen.
+    assert detect_phase((command("echo x; pytest -q"),), rules) == "test"
+
+
+def test_neutral_executables_are_not_a_phase_of_their_own(rules):
+    # The shipped table names echo and friends neutral: they do not silence a
+    # recognized command beside them, and they are no evidence on their own.
+    assert detect_phase((command("ls src && git log --oneline"),), rules) == "git_review"
+    assert detect_phase((command("ls src"),), rules) is None
+
+
+def test_an_unknown_executable_is_skipped_not_a_veto(rules):
+    # A segment the table does not name is skipped; it cannot deny the phase
+    # of the segment beside it.
+    assert (
+        detect_phase((command("some_unknown_tool x && pytest -q"),), rules) == "test"
+    )
+
+
+def test_the_activity_description_names_actions_by_shape(rules):
+    activity = (
+        command("git log --oneline", call_id="c1"),
+        command("rg 'TODO' src", call_id="c2"),
+        command("rg 'TODO' src", call_id="c3"),
+    )
+    description = describe_activity(activity, rules)
+    assert "ran git log" in description
+    assert "searched code x2" in description
+    # Repeated actions collapse into one clause instead of repeating.
+    assert description.count("searched code") == 1
+
+
+def test_the_activity_description_keeps_the_newest_distinct_actions(rules):
+    activity = tuple(
+        command(cmd, call_id=f"c{i}")
+        for i, cmd in enumerate(
+            (
+                "ls src",
+                "ls src",
+                "git log --oneline",
+                "git diff",
+                "sed -i s/a/b/ f.py",
+                "pytest -q",
+                "make build",
+            )
+        )
+    )
+    description = describe_activity(activity, rules)
+    lines = description.splitlines()
+    # The shipped activity_description_limit is six distinct actions: the
+    # budget is spent on the newest six, the oldest distinct action is the
+    # first to be dropped, and a repeat that fits in the window keeps its count.
+    assert lines == [
+        "listed files x2",
+        "ran git log",
+        "ran git diff",
+        "ran sed -i",
+        "ran pytest",
+        "ran make",
+    ]

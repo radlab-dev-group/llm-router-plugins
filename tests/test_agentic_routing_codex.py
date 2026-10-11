@@ -2050,6 +2050,33 @@ class TestPayloadRobustness:
 
         assert _parse(payload).latest_user_text == "Popraw README"
 
+    def test_injected_goal_context_stays_out_of_the_intent(self):
+        goal = (
+            "<codex_internal_context source=\"goal\">\n"
+            "Continue working toward the active thread goal.\n"
+            "<objective>Refactor the engine and commit.</objective>\n"
+            "</codex_internal_context>"
+        )
+        payload = main_payload(goal)
+
+        request = _parse(payload)
+        assert request.latest_user_text == ""
+        assert request.intent_text == ""
+
+    def test_goal_block_attached_to_a_command_keeps_the_command(self):
+        goal = (
+            "<codex_internal_context source=\"goal\">\n"
+            "<objective>Refactor the engine and commit.</objective>\n"
+            "</codex_internal_context>\n"
+            "Popraw README"
+        )
+        payload = main_payload(goal)
+
+        request = _parse(payload)
+        assert request.latest_user_text == "Popraw README"
+        assert "codex_internal_context" not in request.intent_text
+        assert "objective" not in request.intent_text
+
     def test_active_tool_outputs_are_linked_to_their_calls(self):
         payload = main_payload("Dodaj endpoint")
         payload["input"].extend(

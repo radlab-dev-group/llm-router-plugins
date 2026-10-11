@@ -134,6 +134,11 @@ class CodexRoutingConfig(RoutingConfigBase):
         ``per_target_top_k`` for a complete balanced ranking, or legacy ``global_top_k``.
     semantic_min_margin : float
         Minimum cosine lead over the runner-up; ties always abstain.
+    semantic_min_margin_relative : float
+        Fraction of the runner-up's own similarity the lead must also reach.
+        Cosines of one request cluster in a narrow band, so this is the term
+        that keeps the requirement meaningful across embedding models;
+        ``semantic_min_margin`` only floors it.
     semantic_intent_max_chars, semantic_phase_max_chars : int
         Independent character budgets applied before encoding each section.
     """
@@ -165,6 +170,7 @@ class CodexRoutingConfig(RoutingConfigBase):
     phase: CodexPhaseConfig
     semantic_aggregation: str
     semantic_min_margin: float
+    semantic_min_margin_relative: float
     semantic_intent_max_chars: int
     semantic_phase_max_chars: int
     classify_max_chars: int = DEFAULT_CLASSIFY_MAX_CHARS
@@ -254,6 +260,7 @@ class CodexRoutingConfig(RoutingConfigBase):
         for key in (
             "aggregation",
             "min_margin",
+            "min_margin_relative",
             "intent_max_chars",
             "phase_max_chars",
         ):
@@ -274,6 +281,16 @@ class CodexRoutingConfig(RoutingConfigBase):
         ):
             raise ValueError(
                 "settings.semantic.min_margin must be finite and in [0, 2]"
+            )
+        relative = semantic["min_margin_relative"]
+        if (
+            isinstance(relative, bool)
+            or not isinstance(relative, (int, float))
+            or not math.isfinite(relative)
+            or not 0 <= relative < 1
+        ):
+            raise ValueError(
+                "settings.semantic.min_margin_relative must be finite and in [0, 1)"
             )
         for key in ("intent_max_chars", "phase_max_chars"):
             value = semantic[key]
@@ -300,6 +317,7 @@ class CodexRoutingConfig(RoutingConfigBase):
             similarity_threshold=float(semantic.get("threshold", 0.44)),
             semantic_aggregation=semantic["aggregation"],
             semantic_min_margin=float(margin),
+            semantic_min_margin_relative=float(relative),
             semantic_intent_max_chars=semantic["intent_max_chars"],
             semantic_phase_max_chars=semantic["phase_max_chars"],
             top_k=top_k,

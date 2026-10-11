@@ -1,5 +1,6 @@
 """Shared session memory: key isolation, contract, wiring and ENV configuration."""
 
+import copy
 import json
 import logging
 import os
@@ -30,6 +31,9 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.payload import (
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.plugin import (
     CodexRoutingPlugin,
+)
+from llm_router_plugins.utils.routing.agentic_routing.codex.semantic import (
+    CodexSemanticLayer,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
     CodexMemoryConfig,
@@ -1069,7 +1073,214 @@ def test_the_cascade_runs_statelessly_without_a_store(config):
     assert apply(config, None, payload(user="Dokończ.")).source != SOURCE_MEMORY
 
 
+# --- decision carry (hysteresis) ----------------------------------------------
+
+
+_WORK_MODES = ("plan", "implement", "test", "review", "git_review", "debug")
+
+
+class _StubRouter:
+    """A semantic router that answers from one mutable ranking."""
+
+    def __init__(self):
+        self.ranking = None
+
+    def route(self, text):
+        return self.ranking
+
+    def route_context(self, parts):
+        return self.route("\n".join(parts))
+
+
+def _stub_ranking(winner, runner_up, winner_score, runner_score):
+    return {
+        "target_name": winner,
+        "model_name": f"model-{winner}",
+        "similarity": winner_score,
+        "all_scores": [
+            {
+                "target": name,
+                "similarity": (
+                    winner_score
+                    if name == winner
+                    else runner_score
+                    if name == runner_up
+                    else 0.2
+                ),
+            }
+            for name in _WORK_MODES
+        ],
+    }
+
+
+def _carry_plugin(config, store):
+    router = _StubRouter()
+    layer = CodexSemanticLayer(
+        router,
+        config.similarity_threshold,
+        config.mode_by_name,
+        min_margin=config.semantic_min_margin,
+        min_margin_relative=config.semantic_min_margin_relative,
+        intent_max_chars=config.semantic_intent_max_chars,
+        phase_max_chars=config.semantic_phase_max_chars,
+        phase_rules=config.phase,
+    )
+    plugin = CodexRoutingPlugin(logger=None, config=config, semantic=layer)
+    return plugin, router
+
+
+@pytest.fixture
+def carry_config():
+    """The shipped config with the semantic layer and memory on."""
+    path = _ROOT / "llm_router_plugins/resources/routing/agentic_routing_codex.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["settings"]["memory"].update(enabled=True, backend="memory")
+    result = CodexRoutingConfig._from_raw(raw)
+    result.validate_args()
+    assert result.semantic_enabled
+    assert result.memory.enabled
+    return result
+
+
+def _carry_apply(plugin, body):
+    """Run one payload through *plugin* and return its resolved decision."""
+    result = plugin.apply(body)
+    return SimpleNamespace(
+        mode=result["agent_mode"],
+        source=result["routing"]["source"],
+        memory=result["routing"].get("memory", "disabled"),
+    )
+
+
+def test_carry_keeps_a_decided_mode_across_wobbling_rankings(carry_config):
+    store = InMemoryRoutingStateStore(carry_config.memory)
+    plugin, router = _carry_plugin(carry_config, store)
+    router.ranking = _stub_ranking("test", "implement", 0.60, 0.50)
+    assert _carry_apply(plugin, payload(user="Zrób zadanie.")).mode == "test"
+
+    # The ranking wavers below the switching margin: the remembered decision
+    # keeps the mode stable instead of re-deciding from a coin toss.
+    router.ranking = _stub_ranking("test", "implement", 0.55, 0.547)
+    decision = _carry_apply(plugin, payload(user="Zrób zadanie."))
+    assert decision.mode == "test"
+    assert decision.memory == "hit"
+
+    # When the ranking names a different mode that does not lead the
+    # remembered one by the switch margin, the decision is carried.
+    margin = carry_config.memory.decision_switch_margin
+    router.ranking = _stub_ranking("implement", "test", 0.55, 0.55 - margin + 0.001)
+    decision = _carry_apply(plugin, payload(user="Zrób zadanie."))
+    assert decision.mode == "test"
+    assert decision.source == SOURCE_MEMORY
+
+
+def test_carry_switches_only_beyond_the_switch_margin(carry_config):
+    store = InMemoryRoutingStateStore(carry_config.memory)
+    plugin, router = _carry_plugin(carry_config, store)
+    router.ranking = _stub_ranking("test", "implement", 0.60, 0.50)
+    assert _carry_apply(plugin, payload(user="Zrób zadanie.")).mode == "test"
+
+    # A different mode that leads the remembered one by at least
+    # memory.decision_switch_margin replaces it.
+    router.ranking = _stub_ranking(
+        "git_review",
+        "test",
+        0.62,
+        0.62 - carry_config.memory.decision_switch_margin - 0.002,
+    )
+    assert _carry_apply(plugin, payload(user="Zrób zadanie.", turn="turn-1")).mode == "git_review"
+
+
+def test_carry_does_not_survive_a_new_user_command(carry_config):
+    store = InMemoryRoutingStateStore(carry_config.memory)
+    plugin, router = _carry_plugin(carry_config, store)
+    router.ranking = _stub_ranking("test", "implement", 0.60, 0.50)
+    assert _carry_apply(plugin, payload(user="Zrób zadanie.", turn="turn-1")).mode == "test"
+
+    # A new command generation starts from its own merits; the hint is gone.
+    router.ranking = _stub_ranking("test", "implement", 0.55, 0.547)
+    decision = _carry_apply(plugin, payload(user="Przejrzyj commity.", turn="turn-2"))
+    assert decision.mode != "test" or decision.source != SOURCE_MEMORY
+
+
+def test_carry_is_disabled_by_configuration(carry_config):
+    off = replace(
+        carry_config,
+        memory=replace(carry_config.memory, carry_decisions=False),
+    )
+    store = InMemoryRoutingStateStore(off.memory)
+    plugin, router = _carry_plugin(off, store)
+    router.ranking = _stub_ranking("test", "implement", 0.60, 0.50)
+    assert _carry_apply(plugin, payload(user="Zrób zadanie.")).mode == "test"
+
+    router.ranking = _stub_ranking("test", "implement", 0.55, 0.547)
+    decision = _carry_apply(plugin, payload(user="Zrób zadanie.", turn="turn-1"))
+    assert decision.source != SOURCE_MEMORY
+
+
+def test_carry_gives_up_after_the_request_budget(carry_config):
+    capped = replace(
+        carry_config,
+        memory=replace(carry_config.memory, decision_max_requests=2),
+    )
+    store = InMemoryRoutingStateStore(capped.memory)
+    plugin, router = _carry_plugin(capped, store)
+    router.ranking = _stub_ranking("test", "implement", 0.60, 0.50)
+    assert _carry_apply(plugin, payload(user="Zrób zadanie.")).mode == "test"
+    # The hint was written at the first request; this second one carries it
+    # and spends one of the two allowed requests.
+    assert _carry_apply(plugin, payload(user="Zrób zadanie.", turn="turn-1")).mode == "test"
+    # The budget is spent; the next request is decided on its own merits.
+    router.ranking = _stub_ranking("test", "implement", 0.55, 0.547)
+    decision = _carry_apply(plugin, payload(user="Zrób zadanie.", turn="turn-2"))
+    assert decision.source != SOURCE_MEMORY
+
+
+def test_carry_respects_the_age_budget(carry_config, monkeypatch):
+    aged = replace(
+        carry_config,
+        memory=replace(carry_config.memory, decision_max_age_seconds=10),
+    )
+    store = InMemoryRoutingStateStore(aged.memory)
+    plugin, router = _carry_plugin(aged, store)
+    router.ranking = _stub_ranking("test", "implement", 0.60, 0.50)
+    assert _carry_apply(plugin, payload(user="Zrób zadanie.")).mode == "test"
+
+    margin = aged.memory.decision_switch_margin
+    clock = [100000.0]
+    monkeypatch.setattr(
+        "llm_router_plugins.utils.routing.agentic_routing.codex.state.time.time",
+        lambda: clock[0],
+    )
+    # A different mode that does not lead the remembered one by the switch
+    # margin: the hint, still fresh, carries the decision.
+    router.ranking = _stub_ranking("implement", "test", 0.55, 0.55 - margin + 0.001)
+    decision = _carry_apply(plugin, payload(user="Zrób zadanie.", turn="turn-1"))
+    assert decision.source == SOURCE_MEMORY
+    # The same ranking once the hint has aged out: the remembered mode is
+    # gone and the current ranking's refusal falls back.
+    clock[0] += 11.0
+    decision = _carry_apply(plugin, payload(user="Zrób zadanie.", turn="turn-2"))
+    assert decision.source != SOURCE_MEMORY
+
+
+def test_carry_never_beats_fresh_phase_evidence(carry_config):
+    store = InMemoryRoutingStateStore(carry_config.memory)
+    plugin, router = _carry_plugin(carry_config, store)
+    router.ranking = _stub_ranking("test", "implement", 0.60, 0.50)
+    assert _carry_apply(plugin, payload(user="Zrób zadanie.")).mode == "test"
+
+    # Observed activity outranks the remembered decision.
+    router.ranking = _stub_ranking("test", "implement", 0.55, 0.547)
+    decision = _carry_apply(
+        plugin, payload(command("git log --oneline"), user="Zrób zadanie.", turn="turn-1")
+    )
+    assert decision.source == SOURCE_PHASE
+    assert decision.mode == "git_review"
+
+
 # --- plugin -------------------------------------------------------------------
+
 
 
 def build_plugin(config, store):

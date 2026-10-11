@@ -273,6 +273,34 @@ def test_ambiguous_cases_are_reported_separately():
     assert report["mode_transitions"]["pairs"] == 0
 
 
+def test_fallback_and_ambiguous_rates_are_reported():
+    """The two refusal rates are the numbers the fallback fix is measured by."""
+    record = {
+        "expected_mode": "implement",
+        "expected_model": "large",
+        "cascade": {
+            "mode": "implement",
+            "model": "large",
+            "source": "fallback",
+            "elapsed_ms": 0,
+        },
+    }
+    decided = dict(
+        record,
+        id="d",
+        cascade=dict(record["cascade"], source="phase"),
+    )
+    fell_back = dict(record, id="f", cascade=dict(record["cascade"], reason="no layer answered"))
+    uncertain = dict(record, id="u", ambiguous=True)
+    report = summarize([decided, fell_back, uncertain], "cascade")
+    assert report["fallback_rate"] == pytest.approx(0.5)
+    assert report["ambiguous_rate"] == pytest.approx(1 / 3)
+    assert report["fallback_reasons"] == {"no layer answered": 1}
+    clean = summarize([decided], "cascade")
+    assert clean["fallback_rate"] == 0
+    assert clean["ambiguous_rate"] == 0
+
+
 def test_sequence_metrics_track_expected_mode_boundary():
     records = []
     for mode in ("implement", "test", "test", "debug"):
@@ -540,16 +568,27 @@ def test_holdout_baseline_is_the_number_the_next_steps_must_beat(config):
     comparison = compare_baseline(config, report["records"], _frozen_baseline())
     baseline = comparison["variants"]["baseline"]
     assert comparison["common_count"] == 28
-    assert len(comparison["added_case_ids"]) == 8
+    # The 28 common holdout cases were in the baseline; the added ones are
+    # 8 conv-02 prefixes and the 27 minimized conv-03 goal-turn prefixes.
+    assert len(comparison["added_case_ids"]) == 35
     assert baseline["mode_accuracy"] == 20 / 27
     assert baseline["ambiguous_count"] == 1
     # An incremental session loses the thread twice: once early, once at the
     # switch it should have made.
     assert baseline["mode_transitions"]["missed_switches"] == 1
     assert baseline["mode_transitions"]["unnecessary_switches"] == 1
-    assert (
-        comparison["variants"][DETERMINISTIC_VARIANT]["mode_accuracy"]
-        >= baseline["mode_accuracy"]
+    current = comparison["variants"][DETERMINISTIC_VARIANT]
+    assert current["mode_accuracy"] >= baseline["mode_accuracy"]
+    # The conv-03 goal turn is what the fallback fix targets: every prefix of
+    # it is now decided by the phase layer, so no conv-03 request may fall back.
+    conv03 = [
+        record
+        for record in report["records"]
+        if record["id"].startswith("conv03-goal-")
+    ]
+    assert conv03
+    assert all(
+        record[DETERMINISTIC_VARIANT]["source"] != "fallback" for record in conv03
     )
 
 

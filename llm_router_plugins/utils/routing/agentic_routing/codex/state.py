@@ -85,6 +85,9 @@ MEMORY_BACKEND_REDIS = "redis"
 VALID_MEMORY_BACKENDS = (MEMORY_BACKEND_MEMORY, MEMORY_BACKEND_REDIS)
 
 #: Bump when the stored record layout changes; an unknown version is a miss.
+#: Records written by an older version simply carry no remembered decision:
+#: the fields are optional, so a rolling deploy keeps reading them instead of
+#: starting every session from scratch.
 STATE_SCHEMA_VERSION = 1
 
 #: Characters allowed in a key component.  Anything else is fingerprinted, so a
@@ -269,6 +272,18 @@ class CodexMemoryConfig:
         Attempts on a version conflict before the request continues statelessly.
     connection : RedisConnectionSettings
         Where to connect.
+    carry_decisions : bool
+        Whether an accepted semantic decision is remembered for the rest of the
+        command generation, so repeated requests of one long agent turn do not
+        re-decide it from scratch.  Off unless explicitly turned on.
+    decision_switch_margin : float
+        Lead a new mode must have over the remembered decision to replace it.
+        Larger than ``semantic.min_margin`` by design: staying is cheap, moving
+        is not.
+    decision_max_requests : int
+        How many requests of one generation may lean on the remembered decision.
+    decision_max_age_seconds : int
+        How long the remembered decision may be trusted.
     """
 
     enabled: bool = False
@@ -279,6 +294,10 @@ class CodexMemoryConfig:
     max_calls: int = 32
     key_prefix: str = "llm-router:codex-routing"
     max_retries: int = 1
+    carry_decisions: bool = False
+    decision_switch_margin: float = 0.008
+    decision_max_requests: int = 12
+    decision_max_age_seconds: int = 180
     connection: RedisConnectionSettings = field(
         default_factory=RedisConnectionSettings
     )
@@ -431,6 +450,10 @@ def memory_config_from_raw(raw: Any, prefix: str) -> CodexMemoryConfig:
         "max_calls",
         "key_prefix",
         "max_retries",
+        "carry_decisions",
+        "decision_switch_margin",
+        "decision_max_requests",
+        "decision_max_age_seconds",
     }
     if unknown:
         raise ValueError(f"Unknown settings.memory fields: {sorted(unknown)}")
@@ -460,6 +483,25 @@ def memory_config_from_raw(raw: Any, prefix: str) -> CodexMemoryConfig:
         ).strip(),
         max_retries=_non_negative(
             pick("max_retries", "MEMORY_MAX_RETRIES", 1), "max_retries"
+        ),
+        carry_decisions=_as_bool(
+            pick("carry_decisions", "MEMORY_CARRY_DECISIONS", False)
+        ),
+        decision_switch_margin=_fraction(
+            pick(
+                "decision_switch_margin",
+                "MEMORY_DECISION_SWITCH_MARGIN",
+                0.008,
+            ),
+            "decision_switch_margin",
+        ),
+        decision_max_requests=_positive(
+            pick("decision_max_requests", "MEMORY_DECISION_MAX_REQUESTS", 12),
+            "decision_max_requests",
+        ),
+        decision_max_age_seconds=_positive(
+            pick("decision_max_age_seconds", "MEMORY_DECISION_MAX_AGE_SECONDS", 180),
+            "decision_max_age_seconds",
         ),
         connection=connection_from_env(prefix),
     )
@@ -500,6 +542,21 @@ def _non_negative(value: Any, label: str) -> int:
     number = _integer(value, label)
     if number < 0:
         raise ValueError(f"settings.memory.{label} must be >= 0")
+    return number
+
+
+def _fraction(value: Any, label: str) -> float:
+    """Validate a finite ratio in ``[0, 1)``."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"settings.memory.{label} must be a number between 0 and 1"
+        ) from exc
+    if not math.isfinite(number) or not 0 <= number < 1:
+        raise ValueError(
+            f"settings.memory.{label} must be a number between 0 and 1"
+        )
     return number
 
 
@@ -668,6 +725,18 @@ class SessionRoutingState:
     updated_at : float
         Wall-clock second of the last evidence change or generation reset.
         Metadata-only writes preserve this time and the original TTL deadline.
+    decision_mode : str
+        Mode of the last decision the layer accepted for this generation, kept
+        so the many requests of one long agent turn do not re-decide it from
+        scratch every time the ranking wavers.
+    decision_at : float
+        Wall-clock second that decision was written; the age of the hint, not of
+        the record.
+    decision_seq : int
+        Request ordinal the hint was written at, so an older request cannot
+        replace a newer one.
+    decision_requests : int
+        How many requests have leaned on this hint.
     """
 
     mode: str = ""
@@ -687,6 +756,10 @@ class SessionRoutingState:
     context_id: str = ""
     reset: bool = False
     seen_calls: Tuple[str, ...] = ()
+    decision_mode: str = ""
+    decision_at: float = 0.0
+    decision_seq: int = 0
+    decision_requests: int = 0
 
     def set_version(self, version: int, updated_at: float) -> "SessionRoutingState":
         """
@@ -735,6 +808,10 @@ class SessionRoutingState:
                 "context": self.context_id,
                 "reset": self.reset,
                 "seen_calls": list(self.seen_calls),
+                "dec": self.decision_mode,
+                "dec_ts": self.decision_at,
+                "dec_seq": self.decision_seq,
+                "dec_n": self.decision_requests,
             },
             separators=(",", ":"),
             ensure_ascii=True,
@@ -829,7 +906,18 @@ class SessionRoutingState:
             context_id=_text(data.get("context")),
             reset=reset,
             seen_calls=_texts(data.get("seen_calls")),
+            decision_mode=_text(data.get("dec")),
+            decision_at=_number(data.get("dec_ts")),
+            decision_seq=_whole(data.get("dec_seq")),
+            decision_requests=_whole(data.get("dec_n")),
         )
+
+
+def _whole(value: Any) -> int:
+    """Return *value* when it is a non-negative whole number, else ``0``."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
 
 
 def _text(value: Any) -> str:
@@ -1888,6 +1976,105 @@ def resolve_memory(
     )
 
 
+
+def decision_hint(
+    record: Optional[SessionRoutingState],
+    generation: str,
+    config: CodexMemoryConfig,
+    now: Optional[float] = None,
+) -> Optional[str]:
+    """
+    Return the mode this generation last had accepted, while that still holds.
+
+    A long agent turn asks the same question dozens of times: one user command
+    becomes hundreds of requests, and a ranking that wavers between two modes
+    should not send them to different models.  The remembered decision answers
+    only inside the generation that produced it, and only until it has carried
+    ``decision_max_requests`` requests or aged past
+    ``decision_max_age_seconds`` — after that the request is decided on its own
+    merits again.  Fresh phase evidence always outranks it; that is the
+    classifier's job, not this reader's.
+
+    Parameters
+    ----------
+    record : Optional[SessionRoutingState]
+        The record read for this session, if any.
+    generation : str
+        ``turn_id`` of the request asking.
+    config : CodexMemoryConfig
+        Policy carrying ``carry_decisions`` and the two bounds.
+    now : float, optional
+        Second to measure the age against; the wall clock when omitted.
+
+    Returns
+    -------
+    Optional[str]
+        The remembered mode, or ``None`` when nothing is remembered, the
+        generation differs, or the hint has been used or aged out.
+    """
+    if not config.carry_decisions or record is None:
+        return None
+    if not record.decision_mode:
+        return None
+    if record.generation != _identifier(generation):
+        return None
+    if record.decision_requests >= config.decision_max_requests:
+        return None
+    moment = time.time() if now is None else now
+    if record.decision_at <= 0:
+        return None
+    if moment - record.decision_at > config.decision_max_age_seconds:
+        return None
+    return record.decision_mode
+
+
+def _remember_hint(
+    store: RoutingStateStore,
+    key: str,
+    stored: Optional[SessionRoutingState],
+    generation: str,
+    context: str,
+    config: CodexMemoryConfig,
+    mode: str,
+    seq: int,
+    used: bool,
+) -> str:
+    """
+    Write or refresh only the remembered decision of a generation.
+
+    A decision hint never resets a phase and never overwrites a newer hint: it
+    rides the record of its own generation, and when that generation has no
+    record yet it creates a bare one.  None of the fields the stores compare to
+    decide whether an update is a new phase changes here, so a hint write keeps
+    the evidence time and the TTL deadline of the record it lands on.
+    """
+    if stored is not None and stored.generation != generation:
+        return "skipped"
+    base = stored or SessionRoutingState(
+        generation=generation, reset=True, context_id=context
+    )
+    if used:
+        if base.decision_mode != mode:
+            return "skipped"
+        record = replace(base, decision_requests=base.decision_requests + 1)
+    else:
+        if (
+            base.decision_mode == mode
+            and base.decision_seq >= seq
+        ):
+            return "skipped"
+        record = replace(
+            base,
+            decision_mode=mode,
+            decision_at=time.time(),
+            decision_seq=seq,
+            decision_requests=0,
+        )
+    if record == stored:
+        return "unchanged"
+    return store.write(key, record, stored.version if stored else 0).state
+
+
 def remember_decision(
     store: Optional[RoutingStateStore],
     config: CodexMemoryConfig,
@@ -1907,6 +2094,11 @@ def remember_decision(
     bump the version, so a retry cannot make a session look fresher than it is.
     Changes to history or pending calls alone may bump the version, but both
     stores preserve the previous evidence time and TTL deadline atomically.
+
+    An accepted semantic decision is a different kind of memory: it says what
+    the layer concluded, not what the agent did.  It is written beside the
+    evidence, never instead of it, and it never resets a phase — see
+    :func:`decision_hint` for how long it may be trusted.
 
     Parameters
     ----------
@@ -1943,6 +2135,29 @@ def remember_decision(
     generation = _identifier(getattr(request, "turn_id", ""))
     if key is None or not generation:
         return "skipped"
+    hint_mode = str(getattr(decision, "carry_mode", "") or "")
+    used_hint = bool(getattr(decision, "used_carry", False))
+    if hint_mode or used_hint:
+        if not config.carry_decisions:
+            return "skipped"
+        stored, status = store.read(key)
+        if status.state not in ("hit", "miss", "expired"):
+            return "unavailable"
+        if expected_version is not None and expected_version != (
+            stored.version if stored else 0
+        ):
+            return "conflict"
+        return _remember_hint(
+            store,
+            key,
+            stored,
+            generation,
+            _context_id(request),
+            config,
+            mode=hint_mode or (stored.decision_mode if stored else ""),
+            seq=int(getattr(request, "input_items", 0) or 0),
+            used=used_hint,
+        )
     evidence = getattr(decision, "evidence", None)
     reliable = getattr(decision, "source", "") in ("phase", "memory")
     observed_generation = None

@@ -167,7 +167,8 @@ Codex CLI ──POST /v1/responses (model=auto_codex)──▶ llm-router
 ```
 
 The plugin sees the prepared request payload as a plain `dict` and returns it. Routing is stateless by default.
-Explicitly enabled Redis memory can carry reliable phase evidence between requests and workers; it is optional,
+Explicitly enabled Redis memory can carry reliable phase evidence between requests and workers, and — when
+`memory.carry_decisions` is on — the last accepted semantic decision of the command generation; it is optional,
 and the full-history payload remains usable when memory is disabled or unavailable.
 
 ### Step 1 — payload normalization
@@ -253,10 +254,16 @@ Notes:
   `compaction` are class-routed and are left out of the index too.
 - The phase layer recognises explicit current-action announcements and concrete executed commands/patches, rather
   than arbitrary mentions of tests or Git. Thus commit inspection can route to `git_review`, then editing `CHANGELOG`
-  to `implement`; helper commands such as `git status` do not create a Git phase. The newest clear action wins.
-  Unknown or ambiguous activity leaves the remaining cascade to decide. `heuristic_enabled=false` disables only
-  keyword scoring, not phase detection or memory. A phase must name a configured mode.
+  to `implement`; helper commands such as `git status` do not create a Git phase. The phase that dominates the last
+  `settings.phase.evidence_window` strong signals wins (a window of `1` means the latest strong action alone); a weak
+  signal (a linter) only carries the turn while no strong signal exists, so `ruff` after `git log` does not make the
+  turn a style review. Unknown or ambiguous activity leaves the remaining cascade to decide. `heuristic_enabled=false`
+  disables only keyword scoring, not phase detection or memory. A phase must name a configured mode.
   `settings.phase.enabled=false` disables phase evidence and carried phases, leaving keyword scoring active.
+  Shell noise (redirects, `$(…)` substitutions, `2>&1`, quoted operators) is read as noise, and an executable the
+  `neutral_executables` list names (or that the table simply does not name) carries no phase of its own instead of
+  vetoes the segments beside it; a here-document fed to an interpreter counts as an edit when its body matches
+  `implement_write_patterns`.
 - Incremental payloads without a user message retain tool events. A result linked to
   a pending test call may produce fresh `test_failure` evidence; unknown execution
   status does not settle the call, and an older test result cannot replace a newer
@@ -281,6 +288,19 @@ Phase signals live in `settings.phase` in `agentic_routing_codex.json`, not in P
   directory names and prefixes should be lower-case, since paths are compared in lower-case.
 - `test_mode`, `implement_mode`, `failure_mode`: modes for test-only patches, other patches and linked test failures.
   Failure transitions apply only to command calls routed to `test_mode`, never to unrelated tool outputs.
+- `evidence_window` (optional, default `1`): how many of the most recent strong signals the phase is the mode of;
+  the most recent action breaks a tie. Larger windows keep one interleaved commit between edits from flipping the
+  whole turn to `git_review`.
+- `neutral_executables` (optional): executables that carry no phase of their own (`echo`, `ls`, `rg`, …). They do not
+  silence a recognized command beside them, and an executable the table does not name at all is skipped rather than
+  treated as a veto.
+- `implement_write_patterns` (optional): case-insensitive regexes over a here-document body; a match makes a
+  `python3 - <<'EOF' …` interpreter call an `implement` ("scripted edit") instead of no evidence.
+- `activity_description_limit` (optional, default `6`): how many of the newest distinct actions the semantic
+  activity section names; repeated actions collapse into one `… xN` clause, so a long turn of reads does not spend
+  the whole phase budget on one repeated action.
+- A `commands` entry may also declare `"strength": "weak"`: a weak rule (a linter, a type checker) only carries the
+  turn while it holds no strong signal.
 
 All phase fields must be supplied in the loaded configuration. No fields are inherited from another JSON file.
 Empty maps/lists disable those signals. Regexes are compiled when configuration is loaded. Missing fields,
@@ -370,11 +390,21 @@ Enabled with `settings.semantic.enabled`, disabled for a single process with
   at least `min_margin` (shipped value `0.005`). Ties, incomplete rankings, inconsistent winners and malformed scores
   abstain. A single configured semantic mode needs only the threshold. Margin `0.005` is a starting setting,
   not a measured or calibrated optimum.
+- The decision the semantic layer accepts is remembered for the rest of the command generation when
+  `settings.memory.carry_decisions` is on: a ranking that wavers between two modes does not send the many requests of
+  one long agent turn to different models. The remembered decision only yields to a fresh phase, to a new user
+  command, to a mode that leads it by `memory.decision_switch_margin` (shipped `0.008`, deliberately larger than
+  `min_margin` — staying is cheap, moving is not), or to its own bounds, `memory.decision_max_requests` (shipped
+  `12`) and `memory.decision_max_age_seconds` (shipped `180`). It is a different memory from the carried phase: it
+  never resets a phase and survives a disabled phase layer.
 - `CodexSemanticLayer._build_semantic_parts` separately budgets current `request.intent_text` and phase context
   (last active-turn utterance plus bounded tool action descriptions and linked execution status,
   never the raw content of files or tool output). `intent_max_chars` and `phase_max_chars`
   are both `2000` in the shipped JSON and are independent of the parser's `classify_max_chars` history budget.
   Earlier assistant turns never cross a new user-command boundary. Empty context does not call the router.
+  `intent_text` is the genuine user command only: the `<environment_context>` and
+  `<codex_internal_context>` blocks the CLI injects around it (for example the goal blob that drives a
+  continuation turn) are stripped, so a long internal objective can no longer stand in for the user's instruction.
 - The shared router's `route_context(parts)` encodes those sections separately, then averages and normalizes their
   vectors for one FAISS lookup. Each section has its own bounded token-window budget (`MAX_QUERY_WINDOWS = 4`),
   so a long intent cannot displace the phase before embedding. One lookup serves acceptance and fallback similarity.

@@ -349,6 +349,7 @@ def summarize(records, prediction):
     mode_confusion = defaultdict(Counter)
     sources = Counter()
     fallback_reasons = Counter()
+    fallbacks = 0
     for record in scored:
         result = record[prediction]
         expected_mode = record["expected_mode"]
@@ -364,6 +365,7 @@ def summarize(records, prediction):
         mode_confusion[expected_mode][result["mode"]] += 1
         sources[result["source"]] += 1
         if result["source"] == "fallback":
+            fallbacks += 1
             fallback_reasons[result.get("reason") or "unspecified"] += 1
     for counts in modes.values():
         counts["recall"] = (
@@ -415,6 +417,8 @@ def summarize(records, prediction):
             else None
         ),
         "semantic_acceptance_rate": (sources["semantic"] / count if count else None),
+        "fallback_rate": fallbacks / count if count else None,
+        "ambiguous_rate": (total - count) / total if total else None,
     }
 
 
@@ -452,6 +456,7 @@ def evaluate(config, cases, router=None):
             config.similarity_threshold,
             config.mode_by_name,
             min_margin=config.semantic_min_margin,
+            min_margin_relative=config.semantic_min_margin_relative,
             intent_max_chars=config.semantic_intent_max_chars,
             phase_max_chars=config.semantic_phase_max_chars,
             phase_rules=config.phase,

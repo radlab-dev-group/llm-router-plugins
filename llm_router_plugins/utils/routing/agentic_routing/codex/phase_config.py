@@ -7,7 +7,27 @@ from typing import Optional, Pattern, Tuple
 #: Phase fields a configuration may omit.  Each has a safe default that keeps
 #: the behaviour of the version that predates it, so an older config file keeps
 #: working untouched; nothing is merged in from the shipped default file.
-OPTIONAL_FIELDS = frozenset({"neutral_filters", "announcement_followup_max_chars"})
+OPTIONAL_FIELDS = frozenset(
+    {
+        "neutral_filters",
+        "announcement_followup_max_chars",
+        "neutral_executables",
+        "implement_write_patterns",
+        "activity_description_limit",
+        "evidence_window",
+    }
+)
+
+#: A rule that names the work the agent is doing: running tests, inspecting
+#: history, editing files.
+STRENGTH_STRONG = "strong"
+
+#: A rule that only accompanies the work — a linter, a type checker — and
+#: therefore never overrides a strong signal of the same turn.
+STRENGTH_WEAK = "weak"
+
+#: Strengths a command rule may declare.
+STRENGTHS = frozenset({STRENGTH_STRONG, STRENGTH_WEAK})
 
 
 @dataclass(frozen=True)
@@ -15,6 +35,7 @@ class PhaseCommandRule:
     executable: Pattern[str]
     args_prefix: Tuple[str, ...]
     mode: Optional[str]
+    strength: str = "strong"
 
 
 @dataclass(frozen=True)
@@ -34,6 +55,10 @@ class CodexPhaseConfig:
     failure_mode: str
     neutral_filters: Tuple[Pattern[str], ...] = ()
     announcement_followup_max_chars: int = 0
+    neutral_executables: Tuple[Pattern[str], ...] = ()
+    implement_write_patterns: Tuple[Pattern[str], ...] = ()
+    activity_description_limit: int = 6
+    evidence_window: int = 1
 
     @staticmethod
     def _followup_budget(value):
@@ -42,6 +67,25 @@ class CodexPhaseConfig:
             raise ValueError(
                 "settings.phase.announcement_followup_max_chars must be a "
                 "non-negative integer"
+            )
+        return value
+
+    @staticmethod
+    def _description_limit(value):
+        """Number of distinct actions a semantic activity description names."""
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(
+                "settings.phase.activity_description_limit must be a "
+                "non-negative integer"
+            )
+        return value
+
+    @staticmethod
+    def _window(value):
+        """How many recent signals decide; one signal is the latest action."""
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(
+                "settings.phase.evidence_window must be a positive integer"
             )
         return value
 
@@ -103,19 +147,31 @@ class CodexPhaseConfig:
         compiled_commands = []
         for index, rule in enumerate(commands):
             label = f"commands[{index}]"
-            if not isinstance(rule, dict) or set(rule) != {
+            if not isinstance(rule, dict) or not {
                 "executable",
                 "args_prefix",
                 "mode",
+            }.issubset(rule) or set(rule) - {
+                "executable",
+                "args_prefix",
+                "mode",
+                "strength",
             }:
                 raise ValueError(
                     f"settings.phase.{label} requires executable, args_prefix and mode"
+                )
+            strength = rule.get("strength", "strong")
+            if strength not in STRENGTHS:
+                raise ValueError(
+                    f"settings.phase.{label}.strength must be one of "
+                    f"{sorted(STRENGTHS)}"
                 )
             compiled_commands.append(
                 PhaseCommandRule(
                     pattern(rule["executable"], label + ".executable"),
                     strings(rule["args_prefix"], label + ".args_prefix"),
                     mode(rule["mode"], label + ".mode", nullable=True),
+                    strength,
                 )
             )
         result = cls(
@@ -147,6 +203,23 @@ class CodexPhaseConfig:
             announcement_followup_max_chars=cls._followup_budget(
                 data.get("announcement_followup_max_chars", 0)
             ),
+            neutral_executables=tuple(
+                pattern(value, "neutral_executables")
+                for value in strings(
+                    data.get("neutral_executables", []), "neutral_executables"
+                )
+            ),
+            implement_write_patterns=tuple(
+                pattern(value, "implement_write_patterns", re.IGNORECASE)
+                for value in strings(
+                    data.get("implement_write_patterns", []),
+                    "implement_write_patterns",
+                )
+            ),
+            activity_description_limit=cls._description_limit(
+                data.get("activity_description_limit", 6)
+            ),
+            evidence_window=cls._window(data.get("evidence_window", 1)),
         )
         if mode_names is not None:
             references = set()
