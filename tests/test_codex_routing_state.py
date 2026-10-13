@@ -51,6 +51,9 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
     session_key,
     validate_connection,
 )
+from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
+    _result,  # noqa: E402
+)
 
 PREFIX = "LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_"
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -758,6 +761,50 @@ def test_cas_retry_cannot_replace_a_concurrent_generation(config, policy):
         store.read(session_key(policy.key_prefix, "s1", "t1", "/root"))[0].generation
         == "turn-2"
     )
+
+
+def test_version_conflict_names_the_versions_that_disagreed(config, policy):
+    store = InMemoryRoutingStateStore(policy)
+    request, decision = _phase_request(config, command("pytest tests/test_a.py"))
+    key = session_key(policy.key_prefix, "s1", "t1", "/root")
+    store.write(key, SessionRoutingState(mode="implement", generation="turn-1"), 0)
+    outcome = remember_decision(
+        store,
+        policy,
+        request,
+        decision,
+        rules=config.phase,
+        expected_version=0,
+    )
+    assert outcome == "conflict"
+    assert outcome.state == "conflict"
+    assert outcome.reason == "expected version 0, record is 1"
+
+
+def test_causal_history_conflict_reports_which_proof_failed(config, policy):
+    store = InMemoryRoutingStateStore(policy)
+    known = dict(command("pytest tests/test_a.py", "c1"), id="e1")
+    request, decision = _phase_request(config, known)
+    assert (
+        remember_decision(store, policy, request, decision, rules=config.phase)
+        == "written"
+    )
+    foreign, foreign_decision = _phase_request(
+        config, dict(command("git log", "other"), id="foreign")
+    )
+    outcome = remember_decision(
+        store, policy, foreign, foreign_decision, rules=config.phase
+    )
+    assert outcome == "conflict"
+    assert outcome.reason == "incomparable history"
+
+
+def test_remembered_outcomes_compare_equal_to_their_string():
+    outcome = _result("written", "ignored")
+    assert outcome == "written"
+    assert outcome in ("written", "unchanged")
+    assert str(outcome) == "written"
+    assert outcome.reason == "ignored"
 
 
 def test_expected_version_anchors_classification_before_concurrent_write(

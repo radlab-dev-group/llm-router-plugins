@@ -21,6 +21,7 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.phase import (
 from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
     InMemoryRoutingStateStore,
     MemoryStatus,
+    RememberResult,
 )
 from llm_router_plugins.utils.routing.constants import AGENTIC_CODEX_ROUTING_PREFIX
 
@@ -246,6 +247,31 @@ def test_plugin_passes_the_read_version_and_phase_rules_to_persistence(monkeypat
     plugin.apply(memory_payload())
     assert [call["expected_version"] for call in calls] == [0, 1]
     assert all(call["rules"] is plugin._config.phase for call in calls)
+
+
+def test_memory_conflict_log_names_the_actual_cause(monkeypatch, caplog):
+    plugin, _ = memory_plugin()
+    plugin._logger = logging.getLogger(__name__)
+    monkeypatch.setattr(
+        module,
+        "remember_decision",
+        lambda *args, **kwargs: RememberResult(
+            "conflict", "incomparable history"
+        ),
+    )
+    with caplog.at_level(logging.INFO, logger=__name__):
+        plugin.apply(
+            memory_payload(
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "tests",
+                    "arguments": '{"cmd":"pytest"}',
+                }
+            )
+        )
+    assert "Codex routing memory not written: incomparable history" in caplog.text
+    assert "version conflict" not in caplog.text
 
 
 def test_factory_status_is_preserved(monkeypatch):
