@@ -636,7 +636,7 @@ explicit insecure overrides, not production defaults. Connection settings and cr
 of the evidence that produced it, bounded event identifiers and a version counter: **no model names, no conversation
 text, no tool output, no credentials**. Every write is an atomic versioned compare-and-set executed in a Lua script
 alongside the namespace's session index, so concurrent workers cannot interleave a read, a merge and a write; the
-loser gets a conflict and continues statelessly rather than overwriting. TTL (`MEMORY_TTL_SECONDS`, default 15 min)
+loser gets a conflict and continues statelessly rather than overwriting. A skipped write is logged at `INFO` with the actual cause — the two versions that disagreed, a generation change, or the continuity proof that failed (`incomparable history`, `stale history`, ...) — so a persistent conflict can be told from a harmless one-off race. TTL (`MEMORY_TTL_SECONDS`, default 15 min)
 and `MEMORY_MAX_SESSIONS` bound storage; pruning touches only keys inside `MEMORY_KEY_PREFIX`, never anything else in
 the instance. Replaying the same history is a no-op — identical evidence in the same generation does not refresh a
 record's standing.
