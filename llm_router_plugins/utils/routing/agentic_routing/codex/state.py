@@ -71,6 +71,7 @@ __all__ = [
     "InMemoryRoutingStateStore",
     "RedisRoutingStateStore",
     "MemoryStatus",
+    "RememberResult",
     "session_key",
     "build_state_store",
 ]
@@ -2028,6 +2029,54 @@ def decision_hint(
     return record.decision_mode
 
 
+class RememberResult(str):
+    """
+    Outcome of :func:`remember_decision`, with the reason kept.
+
+    It *is* the outcome string callers have always compared against
+    (``written``, ``unchanged``, ``skipped``, ``conflict``, ``unavailable``),
+    so equality and membership keep working.  ``reason`` adds why a conflict
+    happened, so the plugin can log the actual cause — a lost optimistic-lock
+    race, a mode disagreement, or a causal-history problem found by
+    :func:`resolve_memory` — instead of one undifferentiated message.
+
+    Parameters
+    ----------
+    reason : str
+        Short, log-safe cause code.  Empty when the outcome needs no excuse.
+    """
+
+    __slots__ = ("reason",)
+
+    def __new__(cls, state: str, reason: str = "") -> "RememberResult":
+        result = super().__new__(cls, state)
+        result.reason = reason  # type: ignore[attr-defined]
+        return result
+
+    @property
+    def state(self) -> str:
+        """The outcome string, mirroring :class:`MemoryStatus`."""
+        return str(self)
+
+
+def _pair(status: MemoryStatus) -> Tuple[str, str]:
+    """Flatten a store status into the ``(state, reason)`` an outcome needs."""
+    return status.state, status.detail
+
+
+def _version_reason(
+    expected_version: int,
+    stored: Optional[SessionRoutingState],
+) -> str:
+    """Name the two versions that disagreed, so a race is distinguishable."""
+    return f"expected version {expected_version}, record is {stored.version if stored else 0}"
+
+
+def _result(state: str, reason: str = "") -> RememberResult:
+    """Build an outcome, keeping :class:`RememberResult` construction in one place."""
+    return RememberResult(state, reason)
+
+
 def _remember_hint(
     store: RoutingStateStore,
     key: str,
@@ -2038,7 +2087,7 @@ def _remember_hint(
     mode: str,
     seq: int,
     used: bool,
-) -> str:
+) -> RememberResult:
     """
     Write or refresh only the remembered decision of a generation.
 
@@ -2049,20 +2098,20 @@ def _remember_hint(
     the evidence time and the TTL deadline of the record it lands on.
     """
     if stored is not None and stored.generation != generation:
-        return "skipped"
+        return _result("skipped", "other generation")
     base = stored or SessionRoutingState(
         generation=generation, reset=True, context_id=context
     )
     if used:
         if base.decision_mode != mode:
-            return "skipped"
+            return _result("skipped", "other decision")
         record = replace(base, decision_requests=base.decision_requests + 1)
     else:
         if (
             base.decision_mode == mode
             and base.decision_seq >= seq
         ):
-            return "skipped"
+            return _result("skipped", "newer decision")
         record = replace(
             base,
             decision_mode=mode,
@@ -2071,8 +2120,8 @@ def _remember_hint(
             decision_requests=0,
         )
     if record == stored:
-        return "unchanged"
-    return store.write(key, record, stored.version if stored else 0).state
+        return _result("unchanged")
+    return _result(*_pair(store.write(key, record, stored.version if stored else 0)))
 
 
 def remember_decision(
@@ -2082,7 +2131,7 @@ def remember_decision(
     decision: Any,
     rules: Any = None,
     expected_version: Optional[int] = None,
-) -> str:
+) -> RememberResult:
     """
     Write a phase decision to the session memory, if it deserves to be written.
 
@@ -2120,12 +2169,13 @@ def remember_decision(
 
     Returns
     -------
-    str
-        ``"written"``, ``"unchanged"``, ``"skipped"``, ``"conflict"`` or
-        ``"unavailable"`` — for diagnostics, never raised.
+    RememberResult
+        ``state`` is ``"written"``, ``"unchanged"``, ``"skipped"``,
+        ``"conflict"`` or ``"unavailable"``; ``reason`` names the cause of a
+        conflict. For diagnostics, never raised.
     """
     if store is None or getattr(request, "request_class", "main") != "main":
-        return "skipped"
+        return _result("skipped")
     key = session_key(
         config.key_prefix,
         getattr(request, "session_id", ""),
@@ -2134,19 +2184,22 @@ def remember_decision(
     )
     generation = _identifier(getattr(request, "turn_id", ""))
     if key is None or not generation:
-        return "skipped"
+        return _result("skipped")
     hint_mode = str(getattr(decision, "carry_mode", "") or "")
     used_hint = bool(getattr(decision, "used_carry", False))
     if hint_mode or used_hint:
         if not config.carry_decisions:
-            return "skipped"
+            return _result("skipped")
         stored, status = store.read(key)
         if status.state not in ("hit", "miss", "expired"):
-            return "unavailable"
+            return _result("unavailable", status.detail)
         if expected_version is not None and expected_version != (
             stored.version if stored else 0
         ):
-            return "conflict"
+            return _result(
+                "conflict",
+                _version_reason(expected_version, stored),
+            )
         return _remember_hint(
             store,
             key,
@@ -2164,20 +2217,23 @@ def remember_decision(
     for attempt in range(config.max_retries + 1):
         stored, status = store.read(key)
         if status.state not in ("hit", "miss", "expired"):
-            return "unavailable"
+            return _result("unavailable", status.detail)
         current_generation = stored.generation if stored else ""
         if attempt and current_generation != observed_generation:
-            return "conflict"
+            return _result("conflict", "generation changed")
         observed_generation = current_generation
         if expected_version is not None and expected_version != (
             stored.version if stored else 0
         ):
-            return "conflict"
+            return _result(
+                "conflict",
+                _version_reason(expected_version, stored),
+            )
         if not reliable and (stored is None or stored.generation == generation):
-            return "skipped"
+            return _result("skipped")
         resolved = resolve_memory(stored, request, rules, config, evidence=evidence)
         if resolved.status.state == "conflict":
-            return "conflict"
+            return _result("conflict", resolved.status.detail or "causal history")
         record = resolved.state
         if not reliable:
             record = SessionRoutingState(
@@ -2190,18 +2246,18 @@ def remember_decision(
                 context_id=_context_id(request),
             )
         if record is None:
-            return "skipped"
+            return _result("skipped")
         if not record.reset and record.mode != decision.mode:
-            return "conflict"
+            return _result("conflict", "mode disagreement")
         if stored == record:
-            return "unchanged"
+            return _result("unchanged")
         written = store.write(
             key,
             record,
             stored.version if stored else 0,
         )
         if written.state != "conflict":
-            return written.state
+            return _result(written.state, written.detail)
         if attempt >= config.max_retries:
-            return "conflict"
-    return "conflict"
+            return _result("conflict", written.detail or "write")
+    return _result("conflict")
