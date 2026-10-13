@@ -4,6 +4,20 @@ All notable changes to the `llm-router-plugins` package are documented here.
 Versions follow the `MAJOR.MINOR.PATCH` scheme; a new entry is added for every
 release tagged as `v<version>`.
 
+## Summary
+
+| Version | Changelog |
+| ------- | --------- |
+| 0.1.4 | **Fix:** the Codex routing record follows the phase that was actually routed with instead of the last signal it could rebuild, so an interleaved command no longer freezes the record and repeats a conflict on every request of the turn (captured-session replay: 11 conflicts -> 0). **Added:** `RememberResult` carries why a memory write was skipped; the log names the real cause instead of an undifferentiated `version conflict`. |
+| 0.1.3 | **Added:** an accepted semantic decision can be carried across one command generation (`MEMORY_CARRY_DECISIONS`). **Changed:** semantic rankings are read against their own scale; the phase layer separates work states from shell noise; CLI-injected context is kept out of the intent text. |
+| 0.1.2 | **Added:** optional Redis-backed shared session memory with `MEMORY_MAX_RETRIES`; offline routing evaluation with calibration replay; a configurable `phase` layer reading assistant actions and tool activity; heuristic `negation_pattern` / `min_margin` / `weights`; `per_target_top_k` aggregation. **Changed:** mode definitions refined; semantic context built from the latest assistant utterance only. |
+| 0.1.1 | **Added:** `ClaudeCodeRoutingPlugin` (tier-to-model mapping); `lint_signals` start-up validation; `classify_max_chars` budget. **Changed:** `agentic_routing` consolidated into `CodexRoutingPlugin`; word-boundary heuristic matching; similarity threshold lowered to `0.51`; sliding-window encoding for over-length queries. |
+| 0.1.0 | **Deps:** moved to `radlab-pii-classification`; additional files shipped in the distribution. |
+| 0.0.6 | **Added:** `SemanticBiEncoder` routing with a persisted FAISS store (`vector_store_path`) and persistence tests. **Changed:** `simple_semantic_routing` removed in favour of the BiEncoder; embedding model referenced by package identifier. |
+| 0.0.5 | **Added:** `TimeRule`, an IBAN masking test suite, spaced car-plate formats. **Changed:** multi-format IBAN anchors, `_iban_mod97` moved to `validators`, PEP 8 import cleanup and no `__init__.py` re-exports. |
+| 0.0.2 | **Added:** PII masking plugin, dynamic pseudonym generation with de-anonymization in `FastMasker`, LangChain RAG plugin with CLI, `SojkaGuardPlugin`, lint/format/type/security configuration. **Changed:** `mask()` returns `(masked_text, mappings)`; `numpy` loaded only when LangChain RAG is enabled. |
+| 0.0.1 | **Added:** `fast_masker` plugin (IP, KRS, JWT, NRB, NIP, URL, SSN and other rules), packaging (`setup.py`) with the initial `.version`, License section in the README. |
+
 ## [0.1.4] - 2026-10-13
 
 ### Added
@@ -32,11 +46,7 @@ release tagged as `v<version>`.
 ## [0.1.3] - 2026-10-11
 
 ### Added
-- A new command generation resets the remembered phase; a request without a
-  generation inherits nothing rather than guessing.
-- `MEMORY_MAX_RETRIES` — attempts after a version conflict before the request
-  continues statelessly (default `1`).
-- An accepted semantic decision can be carried across one command generation
+- An accepted semantic decision can be carried across one command generation,
   so repeated requests of a long agent turn do not re-decide it from scratch
   (opt-in via `MEMORY_CARRY_DECISIONS`).
 
@@ -58,7 +68,8 @@ release tagged as `v<version>`.
 ### Added
 - Shared session memory for the Codex routing cascade, Redis-backed and
   optional, so a neutral request in the middle of an action keeps the last
-  reliable phase.
+  reliable phase; `MEMORY_MAX_RETRIES` bounds the attempts after a version
+  conflict before the request continues statelessly.
 - Offline Codex routing evaluation with semantic quality calibration and a
   replay harness.
 - A configurable `phase` layer that routes from assistant actions and tool
