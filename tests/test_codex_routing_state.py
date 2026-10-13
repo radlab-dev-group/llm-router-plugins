@@ -51,6 +51,9 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
     session_key,
     validate_connection,
 )
+from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
+    _result,  # noqa: E402
+)
 
 PREFIX = "LLM_ROUTER_ROUTING_SEMANTIC_AGENTIC_CODEX_"
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -758,6 +761,115 @@ def test_cas_retry_cannot_replace_a_concurrent_generation(config, policy):
         store.read(session_key(policy.key_prefix, "s1", "t1", "/root"))[0].generation
         == "turn-2"
     )
+
+
+def test_version_conflict_names_the_versions_that_disagreed(config, policy):
+    store = InMemoryRoutingStateStore(policy)
+    request, decision = _phase_request(config, command("pytest tests/test_a.py"))
+    key = session_key(policy.key_prefix, "s1", "t1", "/root")
+    store.write(key, SessionRoutingState(mode="implement", generation="turn-1"), 0)
+    outcome = remember_decision(
+        store,
+        policy,
+        request,
+        decision,
+        rules=config.phase,
+        expected_version=0,
+    )
+    assert outcome == "conflict"
+    assert outcome.state == "conflict"
+    assert outcome.reason == "expected version 0, record is 1"
+
+
+def test_causal_history_conflict_reports_which_proof_failed(config, policy):
+    store = InMemoryRoutingStateStore(policy)
+    known = dict(command("pytest tests/test_a.py", "c1"), id="e1")
+    request, decision = _phase_request(config, known)
+    assert (
+        remember_decision(store, policy, request, decision, rules=config.phase)
+        == "written"
+    )
+    foreign, foreign_decision = _phase_request(
+        config, dict(command("git log", "other"), id="foreign")
+    )
+    outcome = remember_decision(
+        store, policy, foreign, foreign_decision, rules=config.phase
+    )
+    assert outcome == "conflict"
+    assert outcome.reason == "incomparable history"
+
+
+def _edit_command(call_id, marker):
+    """A script piped into an interpreter: an edit the agent never declares."""
+    return dict(
+        command(
+            "python3 - <<'PY'\n"
+            "import pathlib\n"
+            f"pathlib.Path('app_{marker}.py').write_text('x = 1\\n')\n"
+            "PY",
+            call_id,
+        ),
+        id=f"edit-{marker}",
+    )
+
+
+def test_record_follows_the_decided_phase_not_the_last_signal(config, policy):
+    """
+    Two edits and one test run make the turn an implementation turn, even
+    though testing was the last thing that happened.  The record used to be
+    rebuilt signal by signal, so it named ``test`` while the request was routed
+    as ``implement``; the write was then refused and the session never recorded
+    what it was doing.
+    """
+    store = InMemoryRoutingStateStore(policy)
+    key = session_key(policy.key_prefix, "s1", "t1", "/root")
+    request, decision = _phase_request(
+        config,
+        _edit_command("c1", "a"),
+        _edit_command("c2", "b"),
+        dict(command("pytest tests/test_a.py", "c3"), id="t1"),
+    )
+    assert decision.mode == "implement"
+    # The record rebuilt from the last signal disagrees with that decision.
+    assert resolve_memory(None, request, config.phase, policy).state.mode == "test"
+
+    outcome = remember_decision(
+        store, policy, request, decision, rules=config.phase
+    )
+    assert outcome == "written"
+    stored = store.read(key)[0]
+    assert stored.mode == "implement"
+    assert stored.reason == "scripted edit"
+
+
+def test_followed_phase_settles_and_stops_conflicting(config, policy):
+    """A decision the record disagrees with must not repeat as a conflict."""
+    store = InMemoryRoutingStateStore(policy)
+    outcomes = []
+    for _ in range(3):
+        request, decision = _phase_request(
+            config,
+            _edit_command("c1", "a"),
+            _edit_command("c2", "b"),
+            dict(command("pytest tests/test_a.py", "c3"), id="t1"),
+        )
+        outcomes.append(
+            str(
+                remember_decision(
+                    store, policy, request, decision, rules=config.phase
+                )
+            )
+        )
+    assert outcomes[0] == "written"
+    assert set(outcomes[1:]) == {"unchanged"}
+
+
+def test_remembered_outcomes_compare_equal_to_their_string():
+    outcome = _result("written", "ignored")
+    assert outcome == "written"
+    assert outcome in ("written", "unchanged")
+    assert str(outcome) == "written"
+    assert outcome.reason == "ignored"
 
 
 def test_expected_version_anchors_classification_before_concurrent_write(

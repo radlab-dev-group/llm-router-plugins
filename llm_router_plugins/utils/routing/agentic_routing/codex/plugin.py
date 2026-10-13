@@ -368,7 +368,10 @@ class CodexRoutingPlugin(PluginInterface):
             self._warn("Codex routing memory write failed: %s", type(exc).__name__)
             return "unavailable"
         if outcome == "conflict":
-            self._info("Codex routing memory not written: version conflict")
+            self._info(
+                "Codex routing memory not written: %s",
+                getattr(outcome, "reason", "") or "unspecified",
+            )
         return outcome
 
     def _build_router(self) -> Any:
