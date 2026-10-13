@@ -641,7 +641,12 @@ and `MEMORY_MAX_SESSIONS` bound storage; pruning touches only keys inside `MEMOR
 the instance. Replaying the same history is a no-op — identical evidence in the same generation does not refresh a
 record's standing.
 
-**What it never does.** It never outranks a fresh signal: it is consulted only after the current turn's own evidence
+**What it never does.** It never outranks a fresh signal: it is consulted only after the current turn's own evidence.
+It also never re-decides the phase on its own: the record stores the phase the cascade actually routed with,
+not the last signal it can find in the history.  The cascade weighs the signals dominating the recent window,
+so an interleaved command (an edit between two test runs) does not flip the remembered phase; refusing such a
+write would freeze the record on a phase the session left and make every later request of the turn report a
+``mode disagreement`` conflict.
 stayed silent, and a phase decided from evidence always wins. It never stores a fallback, a weak semantic match, a
 title request or a compaction, because those are not facts about what the agent is doing. Without a session and thread
 identifier there is nothing to isolate, so routing stays stateless instead of guessing.

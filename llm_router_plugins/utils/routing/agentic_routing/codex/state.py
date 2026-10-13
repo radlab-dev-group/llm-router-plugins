@@ -2077,6 +2077,64 @@ def _result(state: str, reason: str = "") -> RememberResult:
     return RememberResult(state, reason)
 
 
+def _follow_decision(
+    record: SessionRoutingState,
+    evidence: Any,
+    decision: Any,
+) -> SessionRoutingState:
+    """
+    Make the record carry the phase that was actually routed with.
+
+    The cascade names the phase dominating a window of recent signals, while
+    the record is rebuilt signal by signal from the continuation of the stored
+    history.  The two legitimately disagree: an edit interleaved between test
+    runs still leaves the turn an implementation turn.  Refusing the write
+    there does not protect anything — it freezes the record on a phase the
+    session stopped using and makes every later request of the same command
+    report a conflict, which is exactly the noise this check was meant to
+    catch.  Continuity of history is what :func:`resolve_memory` proves; the
+    phase itself is what the decision says, so the record follows the decision
+    and keeps the evidence that produced it.
+
+    Parameters
+    ----------
+    record : SessionRoutingState
+        The record built from the proven continuation.
+    evidence : Any
+        The evidence of the decision, if the decision had any.
+
+    Returns
+    -------
+    SessionRoutingState
+        The record, re-attributed to the decision's evidence when the two
+        disagree and there is evidence to attribute it to.
+    """
+    mode = str(getattr(decision, "mode", "") or "")
+    if record.reset or not mode or record.mode == mode or evidence is None:
+        return record
+    kind = str(getattr(evidence, "kind", "") or "")
+    reason = str(getattr(evidence, "reason", "") or "")
+    event_id = str(getattr(evidence, "event_id", "") or "")
+    call_id = str(getattr(evidence, "call_id", "") or "")
+    return replace(
+        record,
+        mode=mode,
+        kind=kind,
+        reason=reason,
+        event_id=_identifier(event_id),
+        fingerprint=fingerprint(
+            mode,
+            kind,
+            reason,
+            event_id,
+            call_id,
+            str(getattr(evidence, "completed", "")),
+            str(getattr(evidence, "succeeded", "")),
+            record.action_token,
+        ),
+    )
+
+
 def _remember_hint(
     store: RoutingStateStore,
     key: str,
@@ -2247,6 +2305,7 @@ def remember_decision(
             )
         if record is None:
             return _result("skipped")
+        record = _follow_decision(record, evidence, decision)
         if not record.reset and record.mode != decision.mode:
             return _result("conflict", "mode disagreement")
         if stored == record:
