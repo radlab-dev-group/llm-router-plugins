@@ -2,6 +2,9 @@
 Central registry for util plugins.
 """
 
+from llm_router_plugins.utils.knowledge.agentic_knowledge import (
+    AgenticKnowledgePlugin,
+)
 from llm_router_plugins.utils.rag.langchain_plugin import LangchainRAGPlugin
 from llm_router_plugins.utils.routing.agentic_routing.claude_code.plugin import (
     ClaudeCodeRoutingPlugin,
@@ -18,6 +21,7 @@ from llm_router_plugins.utils.routing.simple_semantic.simple_semantic_routing im
 
 MAIN_UTILS_REGISTRY = {
     LangchainRAGPlugin.name: LangchainRAGPlugin,
+    AgenticKnowledgePlugin.name: AgenticKnowledgePlugin,
     ClaudeCodeRoutingPlugin.name: ClaudeCodeRoutingPlugin,
     CodexRoutingPlugin.name: CodexRoutingPlugin,
     SimpleSemanticRoutingPlugin.name: SimpleSemanticRoutingPlugin,

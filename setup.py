@@ -46,11 +46,21 @@ setup(
             "langchain",
             "Pillow",
         ],
+        # Agentic knowledge layer: the SSE client and the stream/cache backend.
+        # ``sse-lib`` is the Semantic Search Engine client; during development
+        # install it from the sibling checkout instead
+        # (``pip install ../semantic-search-engine/sse_lib``).
+        "knowledge": [
+            "sse-lib",
+            "redis>=5",
+        ],
     },
     entry_points={
         "console_scripts": [
             "llm-router-rag-langchain="
             "llm_router_plugins.cli.plugins.utils.rag.langchain:main",
+            "llm-router-agentic-kb-worker="
+            "llm_router_plugins.cli.plugins.utils.knowledge.worker:main",
         ],
     },
     classifiers=[
