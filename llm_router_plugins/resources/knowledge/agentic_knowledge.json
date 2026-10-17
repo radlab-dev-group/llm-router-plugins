@@ -1,0 +1,86 @@
+{
+  "description": "Agentic knowledge layer — reads verified fixes, dead ends and the pre-compaction archive from the Semantic Search Engine and injects them into coding-agent requests, while mining new knowledge out of the traffic. Connection settings (SSE, Redis) come from the LLM_ROUTER_KNOWLEDGE_AGENTIC_* environment only; this file holds policy.",
+  "adapters": ["codex", "claude_code"],
+  "collection_prefix": "agentic-kb",
+  "scope": {
+    "strategy": "repo_basename",
+    "overrides": {}
+  },
+  "read": {
+    "enabled": true,
+    "timeout_seconds": 1.5,
+    "min_similarity": 0.35,
+    "cache_ttl_seconds": 3600,
+    "max_lookups_per_generation": 20
+  },
+  "modes": {
+    "debug": {
+      "max_chars": 6000,
+      "sources": [
+        {"category": "recipe", "weight": 1.0, "max_items": 3},
+        {"category": "deadend", "weight": 0.9, "max_items": 3},
+        {"category": "session_archive", "weight": 0.6, "max_items": 3}
+      ],
+      "escalation_model_name": "qwen/Qwen3.8-27B"
+    },
+    "test": {
+      "max_chars": 5000,
+      "sources": [
+        {"category": "recipe", "weight": 1.0, "max_items": 3},
+        {"category": "deadend", "weight": 0.9, "max_items": 3},
+        {"category": "session_archive", "weight": 0.5, "max_items": 2}
+      ],
+      "escalation_model_name": "qwen/Qwen3.8-27B"
+    },
+    "implement": {
+      "max_chars": 5000,
+      "sources": [
+        {"category": "recipe", "weight": 0.9, "max_items": 2},
+        {"category": "session_archive", "weight": 0.6, "max_items": 3},
+        {"category": "doc", "weight": 0.5, "max_items": 2}
+      ]
+    },
+    "plan": {
+      "max_chars": 4000,
+      "sources": [
+        {"category": "session_archive", "weight": 0.7, "max_items": 3},
+        {"category": "doc", "weight": 0.6, "max_items": 3}
+      ]
+    },
+    "git_review": {
+      "max_chars": 4000,
+      "sources": [
+        {"category": "recipe", "weight": 0.7, "max_items": 2},
+        {"category": "deadend", "weight": 0.6, "max_items": 2},
+        {"category": "session_archive", "weight": 0.5, "max_items": 2}
+      ]
+    },
+    "review": {
+      "max_chars": 4000,
+      "sources": [
+        {"category": "doc", "weight": 0.8, "max_items": 3},
+        {"category": "session_archive", "weight": 0.5, "max_items": 2}
+      ]
+    }
+  },
+  "claude_code": {
+    "mode_map": {}
+  },
+  "write": {
+    "enabled": true,
+    "stream_key": "agentic_kb:events",
+    "max_stream_len": 100000,
+    "dedup_ttl_seconds": 604800,
+    "max_patch_chars": 4000,
+    "archive": {
+      "enabled": true,
+      "max_chunk_chars": 2000,
+      "ttl_seconds": 1209600
+    }
+  },
+  "escalation": {
+    "enabled": false,
+    "loop_threshold": 3,
+    "strong_recipe_score": 0.75
+  }
+}
