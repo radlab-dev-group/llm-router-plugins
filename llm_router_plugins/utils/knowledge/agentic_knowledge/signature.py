@@ -13,10 +13,10 @@ lose their value, and volatile identifiers lose themselves.  What is left is
 the signature; its digest is what travels in a knowledge document.
 
 The function recognizes the shapes an agent actually reports — a Python
-traceback, a pytest summary, a non-zero exit of a build or test command, a
-TypeScript or ESLint block, a Rust compiler error — and returns ``None`` for
-anything that does not read like a failure at all, so a green run never looks
-like a known problem.
+traceback, a pytest summary, a ``go test`` failure, a non-zero exit of a
+build or test command, a TypeScript or ESLint block, a Rust compiler error —
+and returns ``None`` for anything that does not read like a failure at all,
+so a green run never looks like a known problem.
 
 Example
 -------
@@ -73,6 +73,8 @@ _LINE_NUMBER_RES = (
 _FRAME_RE = re.compile(
     r'^\s*File "(?P<file>[^"]+)", line \d+(?:, in (?P<func>[^\s(]+))?'
 )
+# ``go test``: a ``--- FAIL: TestName`` header and a ``FAIL\tpkg\t0.005s`` tail.
+_GO_FAIL_RE = re.compile(r"^(?:--+\s*FAIL\b|FAIL\t\S+)", re.IGNORECASE)
 _PYTEST_LOCATION_RE = re.compile(
     r"^(?P<mark>FAILED|ERROR) (?P<node>[^\s:]+(?::：)?)(?P<rest>.*)$"
 )
@@ -80,7 +82,32 @@ _SUMMARY_RES = (
     re.compile(r"=+\s*\d+ (?:failed|error)", re.IGNORECASE),
     re.compile(r"^\s*\d+ (?:failed|passed|error)", re.IGNORECASE),
 )
+#: A pytest summary says "N of these failed", which counts how often the run
+#: was invoked, not what broke.  It is replaced whole, so a re-run with
+#: ``--lf`` or a flaking sibling leaves the signature of the failure itself.
+_SUMMARY_PLACEHOLDER = "<test-run-summary>"
 _NUMBER_RE = re.compile(r"(?<![\w.])\d+(?![\w.])")
+
+# A number that is the payload of an assertion is the failure: ``expected 3
+# got 4`` and ``expected 4 got 3`` are two walls, and so are ``== 100`` and
+# ``== 900``.  Those are kept while the surrounding path, line and address
+# noise is stripped.  A bare ``<``/``>`` is deliberately absent: it would
+# match the placeholder brackets the earlier passes insert and guard numbers
+# that are only run noise.
+_ASSERTION_VALUE_RE = re.compile(
+    r"(?P<pre>"
+    r"=={1,3}|!={1,2}|<=|>=|<>|=~"
+    r"|\b(?:expected|expect|expects|wanted|want|wants|got|received|actual"
+    r"|equals|equal to|to be|should be|should equal|returns|returned"
+    r"|with value|value of|evaluated to|resolved to|but (?:got|received))\b"
+    r"|exited with code|exit code"
+    r")"
+    r"(?P<gap>[\s:=,]*[+-]?)"
+    r"(?P<num>\d+)(?![\w.])"
+)
+#: Stands in for one assertion payload while the number sweep runs.  No digit,
+#: no hex, no path, so nothing else in :func:`_normalize` touches it.
+_KEEP_TOKEN = "\x00\x01kept\x01\x00"
 
 #: Lines that make a report a failure.  Checked against the whole report, so
 #: a green run that merely mentions an ``error handler`` is not one.
@@ -101,6 +128,9 @@ _FAILURE_RES = (
     re.compile(r"command not found", re.IGNORECASE),
     re.compile(r"\berror TS\d+\b"),
     re.compile(r"^\s*\S+:\d+:\d+:\s+error\b", re.MULTILINE),
+    re.compile(r"^\s*--+\s*FAIL\b", re.MULTILINE),
+    re.compile(r"\bFAIL\t\S+", re.MULTILINE),
+    re.compile(r"^\s*\d+:\d+\s+error\b", re.MULTILINE),
 )
 
 #: Report lines that say nothing the signature needs.
@@ -201,7 +231,10 @@ def _core_lines(text: str) -> Tuple[str, ...]:
             continue
         if not _is_failure_line(line):
             continue
-        chosen.append(_strip_location_noise(line))
+        stripped = _strip_location_noise(line)
+        if _is_summary_line(stripped):
+            stripped = _SUMMARY_PLACEHOLDER
+        chosen.append(stripped)
     if not chosen:
         return ()
     return tuple(_deduplicated(chosen))[:12]
@@ -239,6 +272,12 @@ def _is_failure_line(line: str) -> bool:
         return False
     if any(pattern.match(line) for pattern in _SUMMARY_RES):
         return True
+    if _GO_FAIL_RE.match(text):
+        return True
+    if re.match(r"^\d+:\d+\s+error\b", text):
+        return True
+    if re.search(r"\bexit(?:ed)? (?:with )?code:?\s+[1-9]\d*", text):
+        return True
     if text.startswith(
         (
             "E ",
@@ -264,6 +303,11 @@ def _is_failure_line(line: str) -> bool:
     return bool(
         re.match(r"^(?:[A-Za-z_][\w.]*\.)?\w*(?:Error|Exception|Failure)\b", text)
     )
+
+
+def _is_summary_line(line: str) -> bool:
+    """Whether a line is a pytest summary of how the whole run went."""
+    return any(pattern.match(line) for pattern in _SUMMARY_RES)
 
 
 def _strip_location_noise(line: str) -> str:
@@ -295,8 +339,14 @@ def _basename(path: str) -> str:
 
 
 def _normalize(text: str) -> str:
-    """Strip everything that differs between two runs of one failure."""
-    value = text
+    """Strip everything that differs between two runs of one failure.
+
+    The payload of an assertion (``expected 3 got 4``, ``== 100``) is what the
+    next run is compared on, so it is set aside before the number sweep and
+    put back after; every other integer — line numbers, counts, byte sizes —
+    still collapses to ``<n>``.
+    """
+    value, kept = _mask_assertion_values(text)
     value = _UUID_RE.sub("<id>", value)
     value = _ADDRESS_RE.sub("<addr>", value)
     value = _TIMESTAMP_RE.sub("<time>", value)
@@ -306,9 +356,39 @@ def _normalize(text: str) -> str:
         value = pattern.sub(lambda match: f"{match.group('head')}:<line>", value)
     value = _HASH_RE.sub("<hash>", value)
     value = _NUMBER_RE.sub("<n>", value)
+    value = _restore_assertion_values(value, kept)
     value = re.sub(r"[ \t]+", " ", value)
     value = re.sub(r"\n+", "\n", value)
     return value.strip()
+
+
+def _mask_assertion_values(text: str) -> Tuple[str, Tuple[str, ...]]:
+    """Replace assertion payloads with a sentinel, returning the originals.
+
+    The values are collected on the way through, so the i-th sentinel in the
+    masked text is put back to the i-th value; a text with no assertion
+    payload is returned untouched.
+    """
+    kept: list = []
+
+    def _replace(match: "re.Match") -> str:
+        kept.append(match.group("num"))
+        return f"{match.group('pre')}{match.group('gap')}{_KEEP_TOKEN}"
+
+    masked = _ASSERTION_VALUE_RE.sub(_replace, text)
+    return masked, tuple(kept)
+
+
+def _restore_assertion_values(value: str, kept: Tuple[str, ...]) -> str:
+    """Put the set-aside assertion values back where their sentinels sit."""
+    if not kept:
+        return value
+    remaining = list(kept)
+
+    def _replace(_match: "re.Match") -> str:
+        return remaining.pop(0) if remaining else _match.group(0)
+
+    return re.sub(re.escape(_KEEP_TOKEN), _replace, value)
 
 
 def _deduplicated(lines: Tuple[str, ...]) -> Tuple[str, ...]:

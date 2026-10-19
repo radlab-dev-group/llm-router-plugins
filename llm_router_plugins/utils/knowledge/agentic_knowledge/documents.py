@@ -13,6 +13,15 @@ carries what the reader needs twice:
   touched paths, thread and window identifiers — which yields the fields a name
   cannot hold without becoming unreadable.
 
+What the engine reports back as a name is not byte-identical to what
+:func:`document_name` returned: an indexed text is stored as
+``Document.name = os.path.basename(<filepath>) + ENGINE_NAME_SUFFIX``
+(``sse_api.engine.controllers.database.relational_db``), while its
+``relative_path`` is the path the plugin sent, without that suffix.  The codec
+is written for both name forms — see :func:`parse_document_name` — and
+:func:`document_name` keeps a name to a character set that survives the
+``basename``.
+
 The header is one line so a chunk that starts at the document start still
 carries it; a chunk cut out of the middle falls back to the fields in the name.
 
@@ -60,6 +69,16 @@ _NAME_SEPARATOR = ":"
 #: Format of the date bucket inside a document name.
 _NAME_DATE = "%Y%m%d"
 
+#: What the engine appends to the name of an indexed text.  A name read back
+#: from ``list_document_details`` or from a search hit carries it; the name the
+#: plugin built does not.
+ENGINE_NAME_SUFFIX = ".input_text"
+
+#: Characters a name field may not hold.  ``/`` would let ``basename`` cut the
+#: kind off the name, ``:`` would add a field the codec does not expect, and a
+#: space or a control character has nothing to do in an identifier.
+_UNSAFE_FIELD = re.compile(r"[^A-Za-z0-9._-]+")
+
 _HEADER_RE = re.compile(
     rf"^<{HEADER_TAG}[ \t]+(?P<fields>.*?)[ \t]*/>[ \t]*\r?\n?",
     re.DOTALL,
@@ -83,6 +102,12 @@ class DocumentMeta:
         the configured TTL.
     signature : str
         Normalized failure signature the document is about, when it has one.
+        Readable, and never compared: the comparison happens on
+        :attr:`signature_hash`, because normalizing an already normalized
+        signature does not reproduce it.
+    signature_hash : str
+        Digest of the signature the document is about; what a reader matches
+        its own failure against.
     paths : Tuple[str, ...]
         Repository-relative paths the document speaks about.
     thread_id : str
@@ -106,6 +131,7 @@ class DocumentMeta:
     kind: str = ""
     date: Optional[datetime.date] = None
     signature: str = ""
+    signature_hash: str = ""
     paths: Tuple[str, ...] = ()
     thread_id: str = ""
     window_id: str = ""
@@ -129,6 +155,7 @@ def build_document_text(
     *,
     date: Optional[datetime.date] = None,
     signature: str = "",
+    signature_hash: str = "",
     paths: Sequence[str] = (),
     thread_id: str = "",
     window_id: str = "",
@@ -151,6 +178,9 @@ def build_document_text(
         Publication day; defaults to today.
     signature : str, optional
         Normalized failure signature the document is about.
+    signature_hash : str, optional
+        Digest of :attr:`signature`.  This is what a reader matches on, so it
+        survives anything that rewrites the signature's text.
     paths : Sequence[str], optional
         Repository-relative paths the document speaks about.
     thread_id, window_id : str, optional
@@ -176,6 +206,8 @@ def build_document_text(
     ]
     if signature:
         fields.append(_attribute("signature", signature))
+    if signature_hash:
+        fields.append(_attribute("sig_hash", signature_hash))
     if paths:
         fields.append(_attribute("paths", ",".join(paths)))
     if thread_id:
@@ -224,6 +256,30 @@ def parse_document_text(text: str) -> Tuple[DocumentMeta, str]:
     return DocumentMeta(**_meta_arguments(fields)), body[match.end() :]
 
 
+def document_body(text: str) -> str:
+    """
+    Return *text* with the header line it carries taken off.
+
+    The counterpart of :func:`build_document_text`: a writer that has to mask
+    the knowledge — the indexing worker, for one — strips the header here,
+    masks what remains, and rebuilds the header from its own structured fields,
+    so a masker never rewrites a value a reader later parses.
+
+    Parameters
+    ----------
+    text : str
+        A document text, with or without a header.
+
+    Returns
+    -------
+    str
+        The knowledge body; *text* itself when it carries no header.
+    """
+    body = text or ""
+    match = _HEADER_RE.match(body)
+    return body[match.end() :] if match else body
+
+
 def _meta_arguments(fields: dict) -> dict:
     """Turn parsed header attributes into :class:`DocumentMeta` arguments."""
     arguments: dict = {}
@@ -234,6 +290,7 @@ def _meta_arguments(fields: dict) -> dict:
         arguments["date"] = day
     for target, source in (
         ("signature", "signature"),
+        ("signature_hash", "sig_hash"),
         ("thread_id", "thread"),
         ("window_id", "window"),
         ("agent", "agent"),
@@ -278,27 +335,65 @@ def document_name(kind: str, date: datetime.date, fingerprint: str) -> str:
     The name is the only part of a document the search always reports, so it
     carries the kind and the retention day bucket next to the fingerprint.
 
+    Two engine behaviours decide what may go into it.  The engine stores the
+    name as ``os.path.basename(<filepath>) + ENGINE_NAME_SUFFIX``, so the name
+    a reader sees carries a suffix this function does not add.  And
+    ``basename`` throws away everything up to the last ``/``: a fingerprint
+    holding a slash would arrive as its last segment alone, kind and date
+    bucket gone with the front of it.  A ``:`` in the fingerprint would turn
+    the three fields the codec splits on into four.  Both are replaced here, so
+    a name always reaches the reader as exactly three fields in the agreed
+    order — and two episodes whose raw identifiers differ cannot collide by
+    one of them dissolving.
+
     Parameters
     ----------
     kind : str
-        Document kind.
+        Document kind; one of :data:`DOCUMENT_KINDS`.
     date : datetime.date
         Publication day.
     fingerprint : str
-        Stable digest of the episode the document describes.
+        Stable digest of the episode the document describes; made safe here.
 
     Returns
     -------
     str
-        ``<kind>:<YYYYMMDD>:<fingerprint>``.
+        ``<kind>:<YYYYMMDD>:<fingerprint>``, without the suffix the engine will
+        append to it.
     """
     day = date.strftime(_NAME_DATE)
-    return _NAME_SEPARATOR.join((kind or KIND_DOC, day, fingerprint or "-"))
+    return _NAME_SEPARATOR.join(
+        (
+            _safe_field(kind, KIND_DOC),
+            day,
+            _safe_field(fingerprint, "-"),
+        )
+    )
+
+
+def _safe_field(value: str, fallback: str) -> str:
+    """Reduce one name field to characters that survive ``basename`` and ``:``."""
+    text = _UNSAFE_FIELD.sub("-", str(value or "")).strip("-.")
+    return text or fallback
 
 
 def parse_document_name(name: str) -> DocumentMeta:
     """
     Read back what :func:`document_name` wrote.
+
+    Both spellings of a name parse to the same metadata: the bare name the
+    plugin built (``recipe:20261016:abc123``) and the one the engine serves for
+    an indexed text (``recipe:20261016:abc123.input_text``, the same three
+    fields with :data:`ENGINE_NAME_SUFFIX` hanging off the last).  The suffix
+    needs no special case — it falls inside the fingerprint field, which
+    retention never reads — but it is why the split is bounded to two cuts:
+    the fingerprint is the field allowed to be opaque, and the kind and the day
+    are always the first two.  A fingerprint that still holds a separator, from
+    a document written before :func:`document_name` sanitized it, then lands
+    whole in the third field instead of breaking the shape and hiding the
+    document from retention for good.  Retention lists documents through
+    ``list_document_details``, which only ever serves the suffixed form, so
+    this is what makes it recognise its own documents.
 
     Unknown or legacy names resolve to an empty metadata with whatever kind
     prefix could be recognized, never to an error.
@@ -306,14 +401,14 @@ def parse_document_name(name: str) -> DocumentMeta:
     Parameters
     ----------
     name : str
-        Document name as served by the search.
+        Document name as served by the search or by ``list_document_details``.
 
     Returns
     -------
     DocumentMeta
         At most :attr:`DocumentMeta.kind` and :attr:`DocumentMeta.date`.
     """
-    parts = (name or "").split(_NAME_SEPARATOR)
+    parts = (name or "").split(_NAME_SEPARATOR, 2)
     if len(parts) != 3:
         return DocumentMeta()
     kind, day, _ = parts
@@ -333,7 +428,11 @@ def is_knowledge_document(name: str) -> bool:
     Whether *name* was produced by this plugin.
 
     Only used by the retention pass, which must never delete documents an
-    operator indexed themselves into the same collection.
+    operator indexed themselves into the same collection.  The names it passes
+    here come from ``list_document_details`` and therefore carry
+    :data:`ENGINE_NAME_SUFFIX`; :func:`parse_document_name` accepts both that
+    and the bare form, so a document is aged whether it was listed by the
+    engine or named by the plugin.
 
     Parameters
     ----------
