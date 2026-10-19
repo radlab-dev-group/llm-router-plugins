@@ -1,7 +1,7 @@
 {
   "description": "Agentic knowledge layer — reads verified fixes, dead ends and the pre-compaction archive from the Semantic Search Engine and injects them into coding-agent requests, while mining new knowledge out of the traffic. Connection settings (SSE, Redis) come from the LLM_ROUTER_KNOWLEDGE_AGENTIC_* environment only; this file holds policy.",
   "adapters": ["codex", "claude_code"],
-  "collection_prefix": "agentic-kb",
+  "collection_prefix": "agentic_kb",
   "scope": {
     "strategy": "repo_basename",
     "overrides": {}

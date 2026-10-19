@@ -50,7 +50,7 @@ def results_for(*hits):
             h.collection and "recipe" or "recipe", h.text, date=datetime.date.today()
         )
         return StoreHit(
-            collection="agentic-kb-webapp",
+            collection="agentic_kb_webapp",
             document_name=f"recipe:{day}:deadbeef",
             text=text,
             score=h.score,
@@ -85,7 +85,7 @@ def test_deadends_are_separated_and_collected():
 
     def deadend_hit(text="tried and it still failed"):
         return StoreHit(
-            collection="agentic-kb-webapp",
+            collection="agentic_kb_webapp",
             document_name=f"deadend:{day}:aa",
             text=build_document_text("deadend", text, date=datetime.date.today()),
             score=0.8,
@@ -127,7 +127,7 @@ def test_a_headerless_document_from_a_multi_kind_search_is_a_document():
     from agentic_knowledge_support import StoreHit
 
     page = StoreHit(
-        collection="agentic-kb-webapp",
+        collection="agentic_kb_webapp",
         document_name="conventions.md",
         text="Use four spaces and keyword arguments.",
         score=0.95,

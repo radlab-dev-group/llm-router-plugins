@@ -57,7 +57,7 @@ def test_archive_requests_are_restricted_to_the_thread():
     requests = builder().build(turn, knowledge_config().modes["debug"])
     archive = [r for r in requests if "session_archive" in r.categories]
     assert archive and all(r.thread_id == "thread-1" for r in archive)
-    assert any(r.collection.endswith("-sessions") for r in archive)
+    assert any(r.collection.endswith("_sessions") for r in archive)
 
 
 def test_non_archive_requests_are_not_thread_restricted():

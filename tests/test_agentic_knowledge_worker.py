@@ -85,7 +85,7 @@ def test_indexes_a_recipe_event_into_the_scope_collection():
     assert redis.acked == ["1-0"]
     assert len(sse.indexed) == 1
     collection, documents = sse.indexed[0]
-    assert collection == "agentic-kb-webapp"
+    assert collection == "agentic_kb_webapp"
     assert documents[0]["category"] == "recipe"
 
 
@@ -93,7 +93,7 @@ def test_session_archive_goes_to_the_sessions_collection():
     _processed, _redis, sse = run_event(
         knowledge_event(kind="session_archive", scope="webapp")
     )
-    assert sse.indexed[0][0] == "agentic-kb-webapp-sessions"
+    assert sse.indexed[0][0] == "agentic_kb_webapp_sessions"
 
 
 def test_document_name_carries_kind_date_and_fingerprint():
@@ -162,7 +162,7 @@ def test_metadata_filter_keys_are_byte_identical_to_the_reader_s():
     # The filter the reader would build for exactly this document.
     options = _options(
         SearchRequest(
-            collection="agentic-kb-webapp-sessions",
+            collection="agentic_kb_webapp_sessions",
             query="anything",
             categories=(KIND_SESSION_ARCHIVE,),
             thread_id=event.thread_id,
@@ -324,7 +324,7 @@ def test_the_default_chunking_is_left_to_the_engine():
     work = KnowledgeIndexWorker(
         config=config, redis_client=FakeRedis(), sse_client=sse
     )
-    work._ensure_collection("agentic-kb-webapp")
+    work._ensure_collection("agentic_kb_webapp")
     assert sse.created, "the collection was never created"
 
 
@@ -348,7 +348,7 @@ def test_an_explicit_chunking_is_declared_as_a_pair():
     work = KnowledgeIndexWorker(
         config=config, redis_client=FakeRedis(), sse_client=Recording()
     )
-    work._ensure_collection("agentic-kb-webapp")
+    work._ensure_collection("agentic_kb_webapp")
     assert seen["chunking"] == {
         "max_tokens_in_chunk": 900,
         "number_of_overlap_tokens": 64,
@@ -363,7 +363,7 @@ def test_collection_is_created_with_embedder_and_reranker():
 
 
 def test_existing_collection_is_not_recreated():
-    sse = FakeSSE(exists=("agentic-kb-webapp",))
+    sse = FakeSSE(exists=("agentic_kb_webapp",))
     _processed, _redis, _sse = run_event(knowledge_event(), sse=sse)
     assert _sse.created == []
 
@@ -468,7 +468,7 @@ def test_retention_deletes_expired_archived_documents():
     work._scopes.add("webapp")
     old = (datetime.date.today() - datetime.timedelta(days=30)).strftime("%Y%m%d")
     recent = datetime.date.today().strftime("%Y%m%d")
-    sse.names["agentic-kb-webapp-sessions"] = [
+    sse.names["agentic_kb_webapp_sessions"] = [
         f"session_archive:{old}:old",
         f"session_archive:{recent}:recent",
         "a-human-document.md",
@@ -476,7 +476,7 @@ def test_retention_deletes_expired_archived_documents():
     result = work.run_retention()
     assert result["deleted"] == 1
     assert sse.deleted == [
-        ("agentic-kb-webapp-sessions", [f"session_archive:{old}:old"])
+        ("agentic_kb_webapp_sessions", [f"session_archive:{old}:old"])
     ]
 
 
@@ -487,7 +487,7 @@ def test_retention_never_touches_documents_outside_the_plugin_shape():
     sse = FakeSSE()
     work = worker(sse=sse, config=config)
     work._scopes.add("webapp")
-    sse.names["agentic-kb-webapp-sessions"] = ["notes.md", "20160101:legacy:doc"]
+    sse.names["agentic_kb_webapp_sessions"] = ["notes.md", "20160101:legacy:doc"]
     assert work.run_retention()["deleted"] == 0
     assert sse.deleted == []
 
@@ -515,17 +515,27 @@ def test_retention_sweeps_an_archive_this_worker_never_indexed():
     config = knowledge_config()
     config = dataclasses.replace(config)
     config.archive_ttl_seconds = 7 * 86400
+    # The legacy spelling keeps the test honest: the listing match must catch
+    # a name no current release would create.
     old = (datetime.date.today() - datetime.timedelta(days=30)).strftime("%Y%m%d")
     sse = FakeSSE(
-        names={"agentic-kb-legacy-sessions": [f"session_archive:{old}:old"]},
-        catalogue=("agentic-kb-legacy-sessions", "some-human-collection"),
+        names={
+            "agentic_kb_legacy_sessions": [f"session_archive:{old}:old"],
+            "agentic_kb-legacy-sessions": [f"session_archive:{old}:legacy"],
+        },
+        catalogue=(
+            "agentic_kb_legacy_sessions",
+            "agentic_kb-legacy-sessions",
+            "some-human-collection",
+        ),
     )
     work = worker(sse=sse, config=config)
     assert work._scopes == set()  # nothing indexed since this process started
     result = work.run_retention()
-    assert result["deleted"] == 1
-    assert sse.deleted == [
-        ("agentic-kb-legacy-sessions", [f"session_archive:{old}:old"])
+    assert result["deleted"] == 2
+    assert sorted(sse.deleted) == [
+        ("agentic_kb-legacy-sessions", [f"session_archive:{old}:legacy"]),
+        ("agentic_kb_legacy_sessions", [f"session_archive:{old}:old"]),
     ]
 
 
@@ -533,7 +543,7 @@ def test_retention_ignores_foreign_collections_in_the_listing():
     config = knowledge_config()
     config = dataclasses.replace(config)
     config.archive_ttl_seconds = 7 * 86400
-    sse = FakeSSE(catalogue=("documents-team-x", "agentic-kb-webapp"))
+    sse = FakeSSE(catalogue=("documents-team-x", "agentic_kb_webapp"))
     work = worker(sse=sse, config=config)
     # Neither is a `-sessions` archive of ours; nothing is listed for deletion.
     assert work.run_retention()["deleted"] == 0

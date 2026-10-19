@@ -45,10 +45,10 @@ def test_policy_for_returns_the_mode_or_none():
 
 def test_collection_names_separate_the_session_archive():
     config = knowledge_config()
-    assert config.collection("webapp", "recipe") == "agentic-kb-webapp"
+    assert config.collection("webapp", "recipe") == "agentic_kb_webapp"
     assert (
         config.collection("webapp", "session_archive")
-        == "agentic-kb-webapp-sessions"
+        == "agentic_kb_webapp_sessions"
     )
 
 
@@ -141,6 +141,25 @@ def test_an_env_collection_prefix_is_cut_like_the_json_one(monkeypatch):
     config = AgenticKnowledgeConfig.from_file()
     config.override_from_env()
     assert config.collection_prefix == "foo"
+
+
+def test_a_collection_prefix_with_hyphen_becomes_engine_safe(monkeypatch):
+    """A hyphen in the prefix is a 500 at collection creation on the engine."""
+    monkeypatch.setenv(
+        f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}COLLECTION_PREFIX", "agentic-kb"
+    )
+    config = AgenticKnowledgeConfig.from_file()
+    config.override_from_env()
+    assert config.collection_prefix == "agentic_kb"
+
+
+def test_the_default_collection_prefix_is_engine_safe():
+    config = AgenticKnowledgeConfig.from_file()
+    for character in config.collection_prefix:
+        assert character.isalnum() or character in "._", (
+            f"the engine would refuse the default prefix {character!r}"
+        )
+    assert not config.collection_prefix[0].isdigit()
 
 
 def test_a_malformed_redis_connection_is_reported(monkeypatch):

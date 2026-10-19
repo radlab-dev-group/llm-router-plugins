@@ -129,7 +129,7 @@ def test_search_is_scoped_to_the_repository_collection():
     plugin = make_plugin(config, store=store)
     plugin.apply(main_payload(mode="implement"))
     collections = {request.collection for request in store.requests}
-    assert "agentic-kb-webapp" in collections
+    assert "agentic_kb_webapp" in collections
 
 
 def test_archive_source_is_restricted_to_the_thread():
@@ -139,7 +139,7 @@ def test_archive_source_is_restricted_to_the_thread():
     plugin.apply(main_payload(mode="debug"))
     archive = [r for r in store.requests if "session_archive" in r.categories]
     assert archive and all(r.thread_id == "thread-1" for r in archive)
-    assert any(r.collection.endswith("-sessions") for r in archive)
+    assert any(r.collection.endswith("_sessions") for r in archive)
 
 
 def test_injection_is_idempotent_within_one_generation():

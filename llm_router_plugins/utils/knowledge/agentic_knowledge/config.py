@@ -45,6 +45,7 @@ JSON structure::
 import json
 import os
 import pathlib
+import re
 
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, Dict, Mapping, Optional, Tuple
@@ -76,6 +77,30 @@ AGENTIC_KNOWLEDGE_ENV_PREFIX = "LLM_ROUTER_KNOWLEDGE_AGENTIC_"
 _DEFAULT_SSE_PREFIX = ""
 _DEFAULT_STREAM_KEY = "agentic_kb:events"
 _DEFAULT_KEY_PREFIX = "agentic-kb"
+
+
+def _engine_collection_fragment(value: str, label: str) -> str:
+    """
+    Reduce *value* to what the engine accepts in a collection name.
+
+    The engine refuses to create a collection whose name is not
+    identifier-like: a hyphen, or a name starting with a digit, is a 500 at
+    creation time.  This is the one spelling the plugin creates, queries
+    and prunes with, so it must survive all three.
+    """
+    text = str(value).strip().strip("-_")
+    if not text:
+        raise ValueError(f"{label} must not be empty")
+    text = re.sub(r"[^a-zA-Z0-9._-]+", "-", text)
+    text = re.sub(r"\.(?!\w)", "_", text)
+    text = text.replace("-", "_").strip("._")
+    text = re.sub(r"^[0-9]+", "", text)
+    return text or "_"
+
+
+_DEFAULT_COLLECTION_PREFIX = _engine_collection_fragment(
+    "agentic-kb", "collection_prefix"
+)
 
 #: Ceiling of one read call, so a typo cannot stall a request.
 _MAX_SSE_TIMEOUT_SECONDS = 10.0
@@ -204,7 +229,7 @@ class AgenticKnowledgeConfig:
 
     enabled: bool = True
     adapters: Tuple[str, ...] = ("codex",)
-    collection_prefix: str = "agentic-kb"
+    collection_prefix: str = _DEFAULT_COLLECTION_PREFIX
     key_prefix: str = _DEFAULT_KEY_PREFIX
 
     scope_strategy: str = "repo_basename"
@@ -326,7 +351,8 @@ class AgenticKnowledgeConfig:
                 _string_list(data.get("adapters", ["codex"]), "adapters")
             ),
             collection_prefix=_safe(
-                str(data.get("collection_prefix", "agentic-kb")), "collection_prefix"
+                str(data.get("collection_prefix", _DEFAULT_COLLECTION_PREFIX)),
+                "collection_prefix",
             ),
             scope_strategy=strategy,
             scope_overrides=_overrides(scope.get("overrides", {})),
@@ -417,10 +443,11 @@ class AgenticKnowledgeConfig:
             ("WRITE_ENABLED", "write_enabled", _boolean),
             ("ESCALATION_ENABLED", "escalation_enabled", _boolean),
             ("ARCHIVE_ENABLED", "archive_enabled", _boolean),
-            # The same `_safe` the JSON goes through: an env prefix is cut to a
+            # The engine's own character set: an env prefix is reduced to a
             # collection-name fragment, not merely checked for emptiness, or
-            # `--foo` from the environment would reach the collection names.
-            ("COLLECTION_PREFIX", "collection_prefix", _safe),
+            # a hyphen from the environment would reach a creation the engine
+            # refuses with a 500.
+            ("COLLECTION_PREFIX", "collection_prefix", _engine_collection_fragment),
             ("KEY_PREFIX", "key_prefix", _safe),
             ("SSE_API_HOST", "sse_host", _text),
             ("SSE_API_PREFIX", "sse_prefix", _text),
@@ -600,8 +627,8 @@ class AgenticKnowledgeConfig:
         str
             A collection name.
         """
-        base = f"{self.collection_prefix}-{scope}"
-        return f"{base}-sessions" if kind == "session_archive" else base
+        base = f"{self.collection_prefix}_{scope}"
+        return f"{base}_sessions" if kind == "session_archive" else base
 
     @property
     def served_adapters(self) -> Tuple[str, ...]:

@@ -212,7 +212,7 @@ def store_hit(category="recipe", name=None, text="a verified fix", score=0.9):
     """One fake search hit with a plugin-shaped document name."""
     day = datetime.date.today().strftime("%Y%m%d")
     return StoreHit(
-        collection="agentic-kb-webapp",
+        collection="agentic_kb_webapp",
         document_name=name or f"{category}:{day}:deadbeef",
         text=text,
         score=score,

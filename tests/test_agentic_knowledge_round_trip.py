@@ -152,14 +152,14 @@ def test_a_recipe_for_this_failure_outranks_a_convention(label):
     """
     signature, indexed = _indexed(FAILURES[label])
     recipe = StoreHit(
-        collection="agentic-kb-webapp",
+        collection="agentic_kb_webapp",
         document_name=f"recipe:{DAY.strftime('%Y%m%d')}:abc123",
         text=indexed,
         score=0.61,
         score_normalized=0.61,
     )
     convention = StoreHit(
-        collection="agentic-kb-webapp",
+        collection="agentic_kb_webapp",
         document_name="conventions.md",
         text="Use four spaces and keyword arguments.",
         score=0.9,
@@ -180,7 +180,7 @@ def test_an_unrelated_failure_gets_no_signature_bonus():
     """The bonus is for this failure; another one must not borrow it."""
     signature, indexed = _indexed(FAILURES["traceback"])
     recipe = StoreHit(
-        collection="agentic-kb-webapp",
+        collection="agentic_kb_webapp",
         document_name=f"recipe:{DAY.strftime('%Y%m%d')}:abc123",
         text=indexed,
         score=0.61,

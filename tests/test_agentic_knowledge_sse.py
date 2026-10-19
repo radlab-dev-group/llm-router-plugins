@@ -68,7 +68,7 @@ def test_the_thread_filter_and_the_categories_intersect():
     """
     options = _options(
         SearchRequest(
-            collection="agentic-kb-webapp-sessions",
+            collection="agentic_kb_webapp_sessions",
             query="boom",
             categories=("session_archive",),
             thread_id="thread-1",
@@ -153,7 +153,7 @@ def test_a_flattened_entry_reaches_the_caller_as_a_hit():
         }
     }
     store = KnowledgeStore(client=_Client(body))
-    result = store.search(SearchRequest(collection="agentic-kb-webapp", query="q"))
+    result = store.search(SearchRequest(collection="agentic_kb_webapp", query="q"))
     assert result.status == STATUS_OK
     assert result.score_scale == "reranker"
     assert result.hits[0].relative_path == "recipe:20261016:abc"

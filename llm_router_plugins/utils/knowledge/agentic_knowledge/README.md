@@ -153,12 +153,15 @@ the scope is unknown, and both reads and writes are skipped (`scope: ""` in the 
 
 | Kind              | Collection                       | Produced by                    |
 |-------------------|----------------------------------|--------------------------------|
-| `recipe`          | `<prefix>-<scope>`               | `test_failure → patch → test pass` |
-| `deadend`         | `<prefix>-<scope>`               | a repeated failure, a dead end |
-| `doc`             | `<prefix>-<scope>`               | nothing yet (reserved for conventions indexed by you) |
-| `session_archive` | `<prefix>-<scope>-sessions`      | a request classified `compaction` |
+| `recipe`          | `<prefix>_<scope>`               | `test_failure → patch → test pass` |
+| `deadend`         | `<prefix>_<scope>`               | a repeated failure, a dead end |
+| `doc`             | `<prefix>_<scope>`               | nothing yet (reserved for conventions indexed by you) |
+| `session_archive` | `<prefix>_<scope>_sessions`      | a request classified `compaction` |
 
-Default `<prefix>` is `agentic-kb`. A document is named `<kind>:<YYYYMMDD>:<fingerprint>` — the day bucket is what
+Default `<prefix>` is `agentic_kb`. A collection is `<prefix>_<scope>` (and
+`<prefix>_<scope>_sessions` for the archive); the engine's character set —
+letters, digits, `_`, `.` — is enforced at configuration time. A document is
+named `<kind>:<YYYYMMDD>:<fingerprint>` — the day bucket is what
 retention ages on. Every entry is one document with its metadata in `metadata_json`, filtered by `eq`/`in`.
 
 ### Read path: retrieval per work mode
@@ -283,7 +286,7 @@ means the feature is unavailable.
 ```jsonc
 {
   "adapters": ["codex", "claude_code"],
-  "collection_prefix": "agentic-kb",
+  "collection_prefix": "agentic_kb",
   "scope": {"strategy": "repo_basename", "overrides": {}, "default": ""},
   "read": {"enabled": true, "timeout_seconds": 1.5, "min_similarity": 0.35,
             "cache_ttl_seconds": 3600, "max_lookups_per_generation": 20},
@@ -311,7 +314,7 @@ All use the prefix `LLM_ROUTER_KNOWLEDGE_AGENTIC_`. Booleans accept `1/0`, `true
 | `…_WRITE_ENABLED`                     | `true`           | publishing on/off (reads may stay on)                    |
 | `…_ARCHIVE_ENABLED`                   | `true`           | compaction archiving on/off                              |
 | `…_ESCALATION_ENABLED`                | **`false`**      | model escalation on/off                                  |
-| `…_COLLECTION_PREFIX`                 | `agentic-kb`     | prefix of every SSE collection                           |
+| `…_COLLECTION_PREFIX`                 | `agentic_kb`     | prefix of every SSE collection (letters/digits/`_`/`.` only) |
 | `…_KEY_PREFIX`                        | `agentic-kb`     | Redis key namespace                                      |
 | `…_SSE_API_HOST`                      | **empty**        | **empty ⇒ no reads**                                     |
 | `…_SSE_API_PREFIX`                    | **empty**        | empty ⇒ `sse_lib.endpoints.DEFAULT_API_PREFIX` (`api`); set it only when the engine is mounted elsewhere |
