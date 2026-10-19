@@ -460,11 +460,13 @@ class KnowledgeIndexWorker:
         them.
 
         The engine does not check the embedder or the reranker name against
-        what it actually serves here: it writes the relational row, creates the
-        vector collection, and answers success.  An unknown reranker surfaces
-        only at the first search, and an unknown embedder only at the first
-        index.  That is why :func:`_verify_model_names` runs once at startup
-        instead of leaving the typo to be discovered by an empty answer.
+        what it actually serves: it stores whatever it is given and an unknown
+        name surfaces only at the first index or the first search, which is
+        why :func:`_verify_model_names` runs once at startup.  The creation
+        itself, though, is strict about the collection name —
+        :meth:`…collection` already reduced it to the engine's character set
+        — so the only thing to tolerate here is a concurrent worker that
+        created the same name a moment earlier.
         """
         client = self._sse_client()
         if client.collection_exists(name):
@@ -602,7 +604,7 @@ class KnowledgeIndexWorker:
         ``_scopes`` would otherwise leave an old window in place until some new
         event happened to touch its scope.  Asking the engine for the
         collections whose name this plugin gives its archives
-        (``<prefix>-<scope>-sessions``) closes that gap; the in-process scopes
+        (``<prefix>_<scope>_sessions``) closes that gap; the in-process scopes
         are unioned back in so a collection created moments ago, before it shows
         in a listing, is still swept.  When the engine will not answer a listing
         the pass degrades to the in-process scopes rather than doing nothing.
@@ -611,13 +613,19 @@ class KnowledgeIndexWorker:
         lister = getattr(self._sse, "list_collections", None)
         if callable(lister):
             try:
-                owned = f"{self._config.collection_prefix}-"
+                # The engine-safe name is ``prefix_<scope>_sessions``; a
+                # release before the engine's character set was enforced
+                # created ``prefix-<scope>-sessions`` instead, and those
+                # archives still age out through the same clock.
+                prefix = self._config.collection_prefix
                 for entry in lister() or ():
                     name = getattr(entry, "name", "") or str(entry)
                     if (
-                        name.startswith(owned)
+                        name.startswith(f"{prefix}_")
+                        and name.endswith("_sessions")
+                    ) or (
+                        name.startswith(f"{prefix}-")
                         and name.endswith("-sessions")
-                        and name != owned
                     ):
                         found.add(name)
             except Exception as exc:  # a listing failure narrows, never crashes
