@@ -34,9 +34,6 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
     AgentAdapter,
     AgentTurn,
 )
-from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
-    HEADER_TAG,
-)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import (
     RepositoryScope,
     ScopeResolver,
@@ -57,6 +54,7 @@ __all__ = [
     "CodexAgentAdapter",
     "KNOWLEDGE_MARKER",
     "load_phase_rules",
+    "patch_bodies",
 ]
 
 #: Routing plugin identifier that marks a request as Codex's.
@@ -86,24 +84,42 @@ _PATCH_FILE_RE = re.compile(
 )
 _PATCH_MOVE_RE = re.compile(r"^\*\*\* Move to: (.+)$", re.MULTILINE)
 
+#: Argument keys a patch envelope can ride in, in the order Codex sends them.
+_PATCH_ARGUMENT_KEYS = ("patch", "input", "cmd", "command")
+
+#: The first line of a well-formed patch envelope.
+_PATCH_BEGIN = "*** Begin Patch"
+
+#: A here-document introducer and its terminating word.
+_HERE_DOCUMENT_RE = re.compile(r"<<<?-?\s*(['\"]?)(\w+)\1")
+
 #: Ceiling of the serialized window of a compaction request.
 _MAX_WINDOW_CHARS = 400_000
 
+#: Ceiling of a client-supplied identifier before it is hashed down.  Same bound
+#: the Claude Code adapter puts on its session identifiers.
+_MAX_ID_CHARS = 128
 
-def load_phase_rules(path: Optional[Path] = None) -> Optional[CodexPhaseConfig]:
+
+def load_phase_rules(
+    path: Optional[Path] = None, logger: Any = None
+) -> Optional[CodexPhaseConfig]:
     """
     Return the phase rules the Codex router uses, or ``None``.
 
     The rules are read from the routing plugin's own configuration so that one
     definition of "this call is a patch" serves both plugins.  Nothing here is
     fatal: without rules the knowledge layer still injects, it simply records
-    no episodes.
+    no episodes — which is worth a log line, since "no episodes" is otherwise
+    indistinguishable from a knowledge base with nothing in it.
 
     Parameters
     ----------
     path : pathlib.Path, optional
         Alternative configuration file; defaults to
         :data:`PHASE_CONFIG_ENV`, then to the bundled Codex routing config.
+    logger : logging.Logger, optional
+        Where to report rules that could not be read.
 
     Returns
     -------
@@ -121,8 +137,17 @@ def load_phase_rules(path: Optional[Path] = None) -> Optional[CodexPhaseConfig]:
         if not isinstance(phase, dict):
             return None
         rules = CodexPhaseConfig.from_raw(phase)
-    except Exception:  # a foreign config must not break this plugin
+    except Exception as exc:  # a foreign config must not break this plugin
+        if logger is not None:
+            logger.warning(
+                "agentic knowledge: episode mining off, phase rules unreadable"
+                " (%s: %s)",
+                type(exc).__name__,
+                candidate,
+            )
         return None
+    if not rules.enabled and logger is not None:
+        logger.info("agentic knowledge: episode mining off, phase rules disabled")
     return rules if rules.enabled else None
 
 
@@ -291,8 +316,9 @@ class CodexAgentAdapter(AgentAdapter):
             if _already_injected(body):
                 return payload
             body.append(_developer_item(block))
-        else:
-            payload["input"] = [_developer_item(block)]
+        # Any other shape is not an input this adapter understands.  Replacing
+        # it would drop whatever the agent actually sent to carry one context
+        # block, so the request goes out as it came in and the block is skipped.
         return payload
 
     def set_model(self, payload: Dict[str, Any], model_name: str) -> None:
@@ -329,30 +355,47 @@ def _developer_item(text: str) -> Dict[str, Any]:
 
 
 def _already_injected(items: List[Any]) -> bool:
-    """Whether one of the ``input`` items is this plugin's own block."""
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content")
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if (
-                isinstance(part, dict)
-                and isinstance(part.get("text"), str)
-                and (
-                    _INJECTION_OPEN in part["text"]
-                    or f"<{HEADER_TAG} " in part["text"]
-                )
-            ):
-                return True
-    return False
+    """
+    Whether this adapter's own block already ends the input.
+
+    Only the tail is read, and only in our own message shape.  Scanning every
+    item for the markers would treat a conversation that merely quotes them —
+    an agent working on this very plugin, say — as a request already enriched,
+    and knowledge would quietly stop being injected in the one repository where
+    it is being written.
+    """
+    if not items:
+        return False
+    last = items[-1]
+    if not isinstance(last, dict) or last.get("role") != "developer":
+        return False
+    content = last.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(part, dict)
+        and isinstance(part.get("text"), str)
+        and _INJECTION_OPEN in part["text"]
+        for part in content
+    )
 
 
 def _identifier(request: CodexRequest) -> str:
-    """Identity of the command generation, ``turn_id`` where the CLI gives one."""
+    """
+    Identity of the command generation, ``turn_id`` where the CLI gives one.
+
+    The value comes straight from the client's metadata and becomes part of a
+    Redis key, so an over-long one is hashed rather than truncated: a client
+    controlling this field must not be able to inflate keys, and a truncation
+    would let two different long ids collide onto one generation's cached
+    context.  Hashing keeps them distinct and bounded, matching the fallback
+    branch and the Claude Code adapter's own cap.
+    """
     if request.turn_id:
-        return request.turn_id
+        turn_id = request.turn_id
+        if len(turn_id) <= _MAX_ID_CHARS:
+            return turn_id
+        return "t" + hashlib.sha256(turn_id.encode("utf-8")).hexdigest()[:32]
     if request.thread_id and request.input_items:
         # No turn identifier: fall back to something that still distinguishes
         # the requests of one thread from each other, and from other threads.
@@ -365,22 +408,162 @@ def _identifier(request: CodexRequest) -> str:
     return ""
 
 
+def patch_bodies(text: str) -> List[str]:
+    """
+    Return the texts of one tool call that can hold a patch envelope.
+
+    A Codex patch does not arrive as plain text: the arguments are JSON-encoded,
+    so the envelope's line breaks are ``\\n`` escapes inside one string — and,
+    more often still, the patch is a here-document inside an ``exec_command``,
+    where several patches of one turn can ride together.  Matching the raw
+    arguments with a line-anchored pattern therefore finds nothing, which is
+    why the envelopes are read back out here: the ``patch``/``input``
+    arguments, the shell commands, and the body of each here-document a command
+    feeds to ``apply_patch``.  A here-document counts only then — a file the
+    agent writes can quote a patch, and quoting one patched nothing.
+
+    A text that is not JSON at all is an already-unencoded envelope — the
+    shape of older captures — and is returned as it stands.
+
+    Parameters
+    ----------
+    text : str
+        The raw arguments of one ``function_call``.
+
+    Returns
+    -------
+    List[str]
+        The decoded envelope candidates, in the order the call carries them,
+        empty only for arguments that carry no text at all.
+    """
+    bodies: List[str] = []
+    for candidate in _argument_texts(text):
+        if not candidate.strip():
+            continue
+        # A patch envelope is never shell: splitting it would read a ``<<``
+        # inside the diff as a here-document and eat the rest of the patch.
+        if "<<" not in candidate or candidate.lstrip().startswith(_PATCH_BEGIN):
+            if candidate not in bodies:
+                bodies.append(candidate)
+            continue
+        shell, documents = _split_here_documents(candidate)
+        if shell and shell not in bodies:
+            bodies.append(shell)
+        for body in documents:
+            # A here-document is data for the program it feeds, and most of
+            # what the agent pipes is not a patch at all: it counts only when
+            # the command applies one, or announces one in its first line.
+            if "apply_patch" not in shell and not body.lstrip().startswith(
+                _PATCH_BEGIN
+            ):
+                continue
+            if body not in bodies:
+                bodies.append(body)
+    return bodies
+
+
+def _argument_texts(text: str) -> List[str]:
+    """
+    Return the argument values of one call that can carry a patch envelope.
+
+    Parameters
+    ----------
+    text : str
+        The raw arguments of the call, JSON-encoded in real Codex traffic.
+
+    Returns
+    -------
+    List[str]
+        The decoded values, or the raw text when it is not JSON at all — the
+        raw envelope then being the only candidate there is.
+    """
+    try:
+        arguments = json.loads(text)
+    except (ValueError, TypeError):
+        return [text]
+    if isinstance(arguments, str):
+        return [arguments]
+    if not isinstance(arguments, dict):
+        return [text]
+    texts: List[str] = []
+    for key in _PATCH_ARGUMENT_KEYS:
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip() and value not in texts:
+            texts.append(value)
+    # No patch-carrying key: fall back to the raw text.  A JSON string cannot
+    # contain a bare line break, so the line-anchored patch markers cannot
+    # match it — but a shape with an unexpected key keeps working as before.
+    return texts or [text]
+
+
+def _split_here_documents(command: str) -> Tuple[str, List[str]]:
+    """
+    Split *command* into its shell text and the bodies it pipes.
+
+    A here-document is data, not shell syntax, and the split is what makes a
+    patch readable: the lines of a body are real lines of the command string,
+    so scanning the whole command would read a patch *example* written into a
+    file as a patch applied to it.  Each body is handed back separately, and
+    the shell text keeps a placeholder where it stood.
+
+    Parameters
+    ----------
+    command : str
+        A shell command, unencoded.
+
+    Returns
+    -------
+    Tuple[str, List[str]]
+        The shell text and the bodies, in the order they run.
+    """
+    if "<<" not in command:
+        return command, []
+    shell: List[str] = []
+    bodies: List[str] = []
+    lines = command.splitlines()
+    index = 0
+    while index < len(lines):
+        match = _HERE_DOCUMENT_RE.search(lines[index])
+        if match is None:
+            shell.append(lines[index])
+            index += 1
+            continue
+        shell.append(lines[index][: match.start()] + " - ")
+        closing = match.group(2)
+        body: List[str] = []
+        index += 1
+        while index < len(lines):
+            if lines[index].strip() == closing:
+                index += 1
+                break
+            body.append(lines[index])
+            index += 1
+        bodies.append("\n".join(body))
+    return "\n".join(shell), bodies
+
+
 def _touched_paths(
     activity: Tuple[CodexActivity, ...], scope: RepositoryScope
 ) -> Tuple[str, ...]:
-    """Read the repository-relative paths this turn patched."""
+    """
+    Read the repository-relative paths this turn patched.
+
+    The envelopes come out of :func:`patch_bodies`, so a replayed turn names
+    each file once, in the order it was first touched.
+    """
     found: List[str] = []
     for item in activity:
         if item.kind != "function_call" or not item.text:
             continue
-        for match in _PATCH_FILE_RE.finditer(item.text):
-            path = scope.relative(match.group(1).strip())
-            if path and path not in found:
-                found.append(path)
-        for match in _PATCH_MOVE_RE.finditer(item.text):
-            path = scope.relative(match.group(1).strip())
-            if path and path not in found:
-                found.append(path)
+        for body in patch_bodies(item.text):
+            for match in _PATCH_FILE_RE.finditer(body):
+                path = scope.relative(match.group(1).strip())
+                if path and path not in found:
+                    found.append(path)
+            for match in _PATCH_MOVE_RE.finditer(body):
+                path = scope.relative(match.group(1).strip())
+                if path and path not in found:
+                    found.append(path)
     return tuple(found[:40])
 
 

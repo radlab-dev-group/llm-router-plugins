@@ -14,7 +14,7 @@ reads is the same one Codex writes, which is the point of a shared layer.
 import hashlib
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
     AgentAdapter,
@@ -35,6 +35,9 @@ _INJECTION_CLOSE = "</agentic_knowledge>"
 
 #: Work mode assumed when routing did not name one.
 _DEFAULT_MODE = "implement"
+
+#: Ceiling of an identifier read out of the body; it is a cache key, not data.
+_MAX_ID_CHARS = 128
 
 
 @dataclass(frozen=True)
@@ -109,21 +112,27 @@ class ClaudeCodeAgentAdapter(AgentAdapter):
         routing = routing if isinstance(routing, dict) else {}
         declared = str(routing.get("mode") or "")
         mode = self.mode_map.get(declared, declared) or _DEFAULT_MODE
+        # Identity comes from the body, not from ``routing``: the Claude Code
+        # routing plugin records how it matched a model and nothing else, so
+        # reading session or turn identifiers out of its annotation yields an
+        # empty string for every request.
+        session_id = _session_id(payload)
+        latest_user_text = _latest_user_text(payload)
         return AgentTurn(
             agent=self.name,
             scope=scope.key,
             repo_root=scope.repo_root,
-            session_id=str(routing.get("session_id") or ""),
-            thread_id=str(routing.get("thread_id") or ""),
-            turn_id=str(routing.get("turn_id") or ""),
-            root_turn_id=str(routing.get("root_turn_id") or ""),
-            generation=str(routing.get("turn_id") or "") or _digest(payload),
+            session_id=session_id,
+            thread_id="",
+            turn_id="",
+            root_turn_id="",
+            generation=_generation(session_id, latest_user_text),
             request_class="main",
             mode=mode,
             routing_source=str(routing.get("source") or ""),
             model=str(payload.get("model") or ""),
-            latest_user_text=_latest_user_text(payload),
-            window_id=str(routing.get("window_id") or ""),
+            latest_user_text=latest_user_text,
+            window_id="",
             activity=(),
             evidence=(),
             window_text="",
@@ -177,12 +186,21 @@ class ClaudeCodeAgentAdapter(AgentAdapter):
 
 
 def _already_injected(system: List[Any]) -> bool:
-    """Whether the ``system`` blocks already carry this plugin's block."""
-    for block in system:
-        if isinstance(block, dict) and isinstance(block.get("text"), str):
-            if _INJECTION_OPEN in block["text"]:
-                return True
-    return False
+    """
+    Whether this adapter's block already ends the ``system`` list.
+
+    Only the tail is read: a prompt that merely quotes the markers is not a
+    request this plugin has already enriched, and mistaking it for one would
+    switch knowledge off without a trace.
+    """
+    if not system:
+        return False
+    last = system[-1]
+    return (
+        isinstance(last, dict)
+        and isinstance(last.get("text"), str)
+        and _INJECTION_OPEN in last["text"]
+    )
 
 
 def _latest_user_text(payload: Dict[str, Any]) -> str:
@@ -206,12 +224,55 @@ def _latest_user_text(payload: Dict[str, Any]) -> str:
     return ""
 
 
-def _digest(payload: Dict[str, Any]) -> str:
-    """A stable identity for a request that names no turn."""
-    import json
+def _session_id(payload: Dict[str, Any]) -> str:
+    """
+    Return the session identity the client declares, or ``""``.
 
-    try:
-        raw = json.dumps(payload.get("messages"), sort_keys=True, ensure_ascii=False)
-    except (TypeError, ValueError):
-        raw = repr(payload.get("messages"))
-    return "c" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    Claude Code sends ``metadata.user_id``, sometimes as a JSON string and
+    sometimes as an object; it is opaque, so it is read for identity only and
+    never indexed.
+    """
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return ""
+    declared = metadata.get("user_id")
+    if isinstance(declared, dict):
+        return _first_text(declared, ("session_id", "thread_id", "id"))
+    if not isinstance(declared, str):
+        return ""
+    text = declared.strip()
+    if text.startswith("{"):
+        import json
+
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError):
+            return text[:_MAX_ID_CHARS]
+        if isinstance(parsed, dict):
+            return _first_text(parsed, ("session_id", "thread_id", "id"))
+    return text[:_MAX_ID_CHARS]
+
+
+def _first_text(values: Dict[str, Any], keys: Tuple[str, ...]) -> str:
+    """Return the first non-empty string among *keys*."""
+    for key in keys:
+        value = values.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:_MAX_ID_CHARS]
+    return ""
+
+
+def _generation(session_id: str, latest_user_text: str) -> str:
+    """
+    Identity of one command generation of a Claude Code conversation.
+
+    Anthropic Messages carries no turn identifier, so the stable handle is the
+    newest user message: it repeats unchanged across the requests an agent makes
+    while working on it and changes when the user speaks again.  Hashing the
+    whole history instead gives every request a fresh identity, which makes the
+    generation cache miss every time and its lookup ceiling never bind.
+    """
+    if not latest_user_text:
+        return ""
+    seed = f"{session_id}\x00{latest_user_text}"
+    return "c" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]

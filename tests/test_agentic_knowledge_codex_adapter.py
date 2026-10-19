@@ -105,6 +105,132 @@ def test_parse_reads_touched_paths_relative_to_the_repo():
     assert "src/export.py" in turn.touched_paths
 
 
+# ----------------------------------------------------------- touched paths --
+def _call(name, arguments, call_id="c1", event_id="e1"):
+    """One ``function_call`` item carrying *arguments* verbatim."""
+    return {
+        "type": "function_call",
+        "name": name,
+        "call_id": call_id,
+        "id": event_id,
+        "arguments": arguments,
+    }
+
+
+def test_touched_paths_reads_json_encoded_apply_patch_arguments():
+    """The wire shape of a real patch: one JSON string with escaped breaks."""
+    arguments = json.dumps(
+        {
+            "input": "*** Begin Patch\n"
+            "*** Update File: src/service/address.py\n"
+            "@@\n"
+            "-def validate(value):\n"
+            "-    return True\n"
+            "+def validate(value):\n"
+            "+    return bool(value)\n"
+            "*** End Patch\n"
+        }
+    )
+    turn = adapter().parse(
+        codex_payload(
+            base_items() + [_call("apply_patch", arguments, "address-fix", "pe")]
+        )
+    )
+    assert turn.touched_paths == ("src/service/address.py",)
+
+
+def test_touched_paths_reads_a_patch_heredoc_inside_exec_command():
+    """Codex patches through ``exec_command``, one here-document per patch."""
+    patch_one = (
+        "*** Begin Patch\n"
+        "*** Update File: src/service/address.py\n"
+        "@@\n"
+        "-def validate(value):\n"
+        "+    return bool(value)\n"
+        "*** End Patch\n"
+    )
+    patch_two = (
+        "*** Begin Patch\n"
+        "*** Update File: CHANGELOG.md\n"
+        "@@\n"
+        "+# Unreleased\n"
+        "+- Address validation\n"
+        "*** End Patch\n"
+    )
+    arguments = json.dumps(
+        {
+            "cmd": "cd /repo/webapp && apply_patch <<'PATCH'\n"
+            f"{patch_one}PATCH\n"
+            "apply_patch <<'PATCH'\n"
+            f"{patch_two}PATCH",
+            "workdir": "/repo/webapp",
+        }
+    )
+    turn = adapter().parse(
+        codex_payload(base_items() + [_call("exec_command", arguments)])
+    )
+    # Both patches of the one call, in the order the agent applied them.
+    assert turn.touched_paths == ("src/service/address.py", "CHANGELOG.md")
+
+
+def test_touched_paths_reads_a_rename_from_a_json_command():
+    """A rename names two files: the one patched and the one it becomes."""
+    arguments = json.dumps(
+        {
+            "command": "apply_patch <<'PATCH'\n"
+            "*** Begin Patch\n"
+            "*** Update File: /repo/webapp/src/old_name.py\n"
+            "*** Move to: src/new_name.py\n"
+            "@@\n"
+            "-old\n"
+            "+new\n"
+            "*** End Patch\n"
+            "PATCH"
+        }
+    )
+    turn = adapter().parse(
+        codex_payload(base_items() + [_call("exec_command", arguments)])
+    )
+    assert turn.touched_paths == ("src/old_name.py", "src/new_name.py")
+
+
+def test_touched_paths_are_deduplicated_over_the_replayed_turn():
+    """Codex replays the whole turn: one file stays named once, still in order."""
+    envelope = (
+        "*** Begin Patch\n*** Update File: src/a.py\n@@\n-x\n+y\n*** End Patch"
+    )
+    encoded = json.dumps({"input": envelope})
+    turn = adapter().parse(
+        codex_payload(
+            base_items()
+            + [
+                _call("apply_patch", encoded, "p1", "e1"),
+                _call("apply_patch", envelope, "p2", "e2"),
+                _call("apply_patch", json.dumps({"input": envelope}), "p3", "e3"),
+            ]
+        )
+    )
+    assert turn.touched_paths == ("src/a.py",)
+
+
+def test_touched_paths_ignores_a_patch_example_in_another_here_document():
+    """A document that shows what a patch looks like patched nothing."""
+    arguments = json.dumps(
+        {
+            "cmd": "cat > docs/patching.md <<'EOF'\n"
+            "A Codex patch reads:\n\n"
+            "*** Begin Patch\n"
+            "*** Update File: src/example.py\n"
+            "*** End Patch\n"
+            "EOF"
+        }
+    )
+    turn = adapter().parse(
+        codex_payload(base_items() + [_call("exec_command", arguments)])
+    )
+    assert turn.touched_paths == ()
+
+
 def test_parse_marks_a_compaction_request_and_fills_the_window():
     turn = adapter().parse(compaction_payload())
     assert turn.request_class == "compaction"

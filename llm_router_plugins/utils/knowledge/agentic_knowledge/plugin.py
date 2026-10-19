@@ -92,6 +92,15 @@ class AgenticKnowledgePlugin(PluginInterface):
     adapters : Tuple[AgentAdapter, ...], optional
         Adapters, in resolution order; the configured ones are built when
         omitted.
+
+    Raises
+    ------
+    ValueError
+        If the policy is inconsistent: a weight outside ``(0, 1]``, a zero
+        budget, a threshold no hit could ever reach. A bad policy is a
+        configuration error, not a runtime condition, so it surfaces here at
+        startup instead of being caught on every request and leaving the layer
+        silently doing nothing.
     """
 
     name = "agentic_knowledge"
@@ -105,9 +114,9 @@ class AgenticKnowledgePlugin(PluginInterface):
         publisher: Optional[KnowledgeEventPublisher] = None,
         adapters: Optional[Tuple[AgentAdapter, ...]] = None,
     ) -> None:
-        """Bind the collaborators, building the configured ones when needed."""
+        """Resolve the policy and wire the collaborators; open no connection."""
         super().__init__(logger=logger)
-        self._config = config
+        self._config = config if config is not None else _load_config(self._logger)
         self._store = store
         self._cache = cache
         self._publisher = publisher
@@ -116,17 +125,19 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._query_builder: Optional[QueryBuilder] = None
         self._escalation: Optional[EscalationPolicy] = None
         self._limiter: Optional[LookupLimiter] = None
-        self._configured = False
+        self._wire(self._config)
 
     # -------------------------------------------------------------- wiring -
-    def _ensure_configured(self) -> Optional[AgenticKnowledgeConfig]:
-        """Load the policy and the collaborators on first use."""
-        if self._configured:
-            return self._config
-        if self._config is None:
-            self._config = AgenticKnowledgeConfig.from_file()
-            self._config.override_from_env(self._logger)
-        config = self._config
+    def _wire(self, config: AgenticKnowledgeConfig) -> None:
+        """
+        Build what the policy asks for, opening no connection.
+
+        The engine and Redis clients are held lazily by their own holders, so
+        wiring costs nothing at startup and a plugin built before its process
+        forks still connects with sockets of its own.  What is *not* deferred is
+        the policy: reading it and validating it is the point at which a
+        misconfigured deployment fails.
+        """
         if self._store is None:
             self._store = KnowledgeStore(
                 host=config.sse_host,
@@ -155,6 +166,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             archive_enabled=config.archive_enabled,
             archive_max_chunk_chars=config.archive_max_chunk_chars,
             archive_ttl_seconds=config.archive_ttl_seconds,
+            test_mode=_test_mode(self._adapters),
         )
         self._query_builder = QueryBuilder(
             collection_namer=config.collection,
@@ -164,8 +176,6 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._limiter = LookupLimiter(
             max_per_generation=config.max_lookups_per_generation
         )
-        self._configured = True
-        return config
 
     # ---------------------------------------------------------------- apply -
     def apply(self, payload: Any, **kwargs: Any) -> Any:
@@ -187,11 +197,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         """
         if not isinstance(payload, dict):
             return payload
-        try:
-            config = self._ensure_configured()
-        except Exception as exc:
-            self._warn("agentic knowledge config failed: %s", type(exc).__name__)
-            return payload
+        config = self._config
         if config is None or not config.enabled:
             return payload
 
@@ -231,9 +237,15 @@ class AgenticKnowledgePlugin(PluginInterface):
         publish: PublishStatus,
     ) -> Any:
         """Search, inject, decide escalation, and annotate — in one pass."""
-        policy = config.policy_for(turn.mode) if config.read_available else None
+        read_on = config.read_available
+        policy = config.policy_for(turn.mode) if read_on else None
         cached = self._cached(turn)
-        fresh = cached is not None and self._is_fresh(cached, turn)
+        # The generation cache outlives the switch: an operator who turns the
+        # read path off must stop getting knowledge injected, not keep serving
+        # whatever a previous request cached for this generation.  The cache is
+        # still read below, because escalation persistence lives in it and has
+        # its own switch.
+        fresh = read_on and cached is not None and self._is_fresh(cached, turn)
         if fresh:
             context = KnowledgeContext(
                 hits=cached.context.hits,
@@ -262,10 +274,19 @@ class AgenticKnowledgePlugin(PluginInterface):
             else EscalationDecision()
         )
 
+        # An explicit routing choice is never overridden, so the whole
+        # escalation step — including the persisted-escalation carry-over below
+        # — stands down for it.  Reading the persisted escalation before this
+        # check used to record `escalate` in the annotation for a request whose
+        # model was deliberately left alone.
+        explicit = (turn.routing_source or "").lower() == "explicit"
         target = decision.model_name if decision.action == ACTION_ESCALATE else ""
-        if not target:
+        if not target and config.escalation_available and not explicit:
             # A loop escalated earlier in this generation stays escalated even
-            # when this request's own evidence no longer repeats the loop.
+            # when this request's own evidence no longer repeats the loop.  Only
+            # while escalation is on: the cache outlives a restart, so an
+            # operator who switched the mechanism off would otherwise keep
+            # handing out the escalation model until the entry ages out.
             target = self._persisted_escalation(cached, turn)
             if target:
                 decision = EscalationDecision(
@@ -275,13 +296,23 @@ class AgenticKnowledgePlugin(PluginInterface):
                     decision.loop_count,
                     decision.signature_hash,
                 )
-        if target and (turn.routing_source or "").lower() != "explicit":
+        if target and not explicit:
+            # The previous model is what the annotation reports as `from`; it
+            # may be unknown (a payload that carries no model and no routed
+            # one), which is not a reason to skip the switch — only a reason not
+            # to claim which model was replaced.
             previous = str(payload.get("model") or turn.model)
-            if previous and previous != target:
+            if previous != target:
                 adapter.set_model(payload, target)
-                self._note_model_before_knowledge(payload, previous)
+                if previous:
+                    self._note_model_before_knowledge(payload, previous)
 
-        self._remember_context(turn, context, target)
+        if read_on:
+            # Frozen, not overwritten, while the read path is off: the entry
+            # this generation built under a live read path stays intact, so
+            # switching reads back on resumes instead of finding an empty block
+            # it would treat as fresh.
+            self._remember_context(turn, context, target)
         self._annotate(payload, adapter, turn, context, decision, publish)
         return payload
 
@@ -435,10 +466,14 @@ class AgenticKnowledgePlugin(PluginInterface):
         publish: Optional[PublishStatus],
     ) -> None:
         """Write the knowledge layer's decision into ``payload["routing"]``."""
-        routing = payload.setdefault("routing", {})
-        if not isinstance(routing, dict):
+        routing = payload.get("routing")
+        if routing is None:
             routing = {}
             payload["routing"] = routing
+        elif not isinstance(routing, dict):
+            # Something else owns this key.  Replacing it to leave a note would
+            # destroy that owner's data, and the note is diagnostics, not data.
+            return
         knowledge: Dict[str, Any] = {
             "plugin": self.name,
             "adapter": adapter.name,
@@ -460,6 +495,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             knowledge["write"] = {
                 "published": publish.published,
                 "deduplicated": publish.deduplicated,
+                "errors": publish.errors,
                 "status": publish.status,
             }
         routing["knowledge"] = knowledge
@@ -480,6 +516,28 @@ def _status_of(statuses: set) -> str:
 
 
 # ------------------------------------------------------------------ wiring -
+def _load_config(logger: Optional[logging.Logger]) -> AgenticKnowledgeConfig:
+    """
+    Read the policy the deployment ships with, and fail on it if it is wrong.
+
+    Bundled JSON, then the environment over it, then the checks that only the
+    resolved whole can pass.  Every error leaves this function rather than being
+    caught: a proxy that came up with an unreadable policy answers requests with
+    no knowledge at all, and looks exactly like a knowledge base that is empty.
+
+    Raises
+    ------
+    ValueError
+        On a malformed or inconsistent policy.
+    FileNotFoundError
+        When ``…_CONFIG`` names a file that is not there.
+    """
+    config = AgenticKnowledgeConfig.from_file()
+    config.override_from_env(logger)
+    config.validate()
+    return config
+
+
 def _build_adapters(
     config: AgenticKnowledgeConfig, logger: Optional[logging.Logger]
 ) -> Tuple[AgentAdapter, ...]:
@@ -509,24 +567,34 @@ def _build_adapters(
     return tuple(adapters)
 
 
+def _test_mode(adapters: Optional[Tuple[AgentAdapter, ...]]) -> str:
+    """
+    The mode name the loaded phase rules call a test run.
+
+    The miner decides whether a green command closes an episode by its mode; the
+    rules that classified the evidence in the first place own that name.  Reading
+    it from the adapter keeps an operator's own ruleset — where the test mode is
+    called something else — from yielding zero recipes in silence.
+    """
+    for adapter in adapters or ():
+        rules = getattr(adapter, "phase_rules", None)
+        mode = str(getattr(rules, "test_mode", "") or "")
+        if mode:
+            return mode
+    return "test"
+
+
 def _build_cache(
     config: AgenticKnowledgeConfig, logger: Optional[logging.Logger]
 ) -> GenerationContextCache:
     """Return the generation cache: Redis when configured, in-process otherwise."""
     if not config.redis.configured:
         return InMemoryContextCache(ttl_seconds=config.cache_ttl_seconds)
-    try:
-        import redis  # noqa: PLC0415 - optional dependency
-
-        client = redis.Redis(**config.redis.client_kwargs())
-    except Exception:
-        if logger is not None:
-            logger.warning(
-                "agentic knowledge cache: redis unavailable, using in-process cache"
-            )
-        return InMemoryContextCache(ttl_seconds=config.cache_ttl_seconds)
+    # The connection is opened by the cache on first use, in the process that
+    # uses it: a proxy that preloads the plugin and forks its workers must not
+    # hand each of them the parent's Redis connection pool.
     return GenerationContextCache(
-        client=client,
+        connection=config.redis,
         key_prefix=config.key_prefix,
         ttl_seconds=config.cache_ttl_seconds,
         logger=logger,

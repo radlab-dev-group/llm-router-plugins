@@ -346,3 +346,58 @@ def test_annotation_has_no_document_content_or_secrets():
     assert "SECRET-BODY" not in annotation
     assert "http://engine.test" not in annotation
     assert "sess-1" not in annotation
+
+
+def test_read_kill_switch_stops_injection_even_from_a_warm_cache():
+    # The generation cache outlives the switch: turning the read path off must
+    # stop injection, not keep replaying whatever an earlier request cached.
+    config = knowledge_config()
+    store = FakeStore(hits=(store_hit("recipe", score=0.9),))
+    plugin = make_plugin(config, store=store)
+    warmed = plugin.apply(main_payload(mode="debug"))
+    assert MARKER in json.dumps(warmed["input"])
+
+    config.read_enabled = False
+    off = plugin.apply(main_payload(mode="debug"))
+    assert MARKER not in json.dumps(off["input"])
+
+
+def test_read_reenabled_resumes_injection_after_the_switch():
+    # Disabling must freeze the cache, not overwrite it with an empty block the
+    # next enabled request would mistake for fresh.
+    config = knowledge_config()
+    store = FakeStore(hits=(store_hit("recipe", score=0.9),))
+    plugin = make_plugin(config, store=store)
+    plugin.apply(main_payload(mode="debug"))
+    config.read_enabled = False
+    plugin.apply(main_payload(mode="debug"))
+    config.read_enabled = True
+    back = plugin.apply(main_payload(mode="debug"))
+    assert MARKER in json.dumps(back["input"])
+
+
+def test_explicit_routing_in_an_escalated_generation_is_not_reported_escalated():
+    # A prior request escalated and cached it; this request's routing source is
+    # explicit, so its model stands down — and the annotation must not claim an
+    # escalation that did not happen.
+    config = knowledge_config(escalation_enabled=True)
+    store = FakeStore()
+    plugin = make_plugin(config, store=store)
+    plugin.apply(main_payload(mode="debug", failures=3))
+    out = plugin.apply(main_payload(mode="debug", failures=3, source="explicit"))
+    assert out["model"] == "auto_codex"
+    assert (
+        out["routing"]["knowledge"].get("escalation", {}).get("action") != "escalate"
+    )
+
+
+def test_escalation_applies_when_the_payload_carries_no_model():
+    # The switch used to be gated on knowing the previous model; a payload with
+    # no model then kept its model while being recorded and cached as escalated.
+    config = knowledge_config(escalation_enabled=True)
+    store = FakeStore()
+    plugin = make_plugin(config, store=store)
+    payload = main_payload(mode="debug", failures=3)
+    payload.pop("model")
+    out = plugin.apply(payload)
+    assert out["model"] == config.modes["debug"].escalation_model_name

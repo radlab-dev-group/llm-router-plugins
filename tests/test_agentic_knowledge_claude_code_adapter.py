@@ -120,3 +120,46 @@ def test_plugin_serves_claude_code_without_mining_or_escalation():
     assert publisher.published == []
     # No escalation for Claude Code.
     assert "escalation" not in out["routing"]["knowledge"]
+
+
+def test_generation_is_stable_across_one_user_turn():
+    """
+    The cache needs an identity that survives the requests of one command.
+
+    Claude Code sends no turn id and the routing annotation carries none, so the
+    identity is keyed on the newest user message: unchanged while the agent
+    works, new when the user speaks.  Hashing the whole history instead hands
+    every request a fresh identity, and the cache then misses every time.
+    """
+    adapter = ClaudeCodeAgentAdapter()
+    first = adapter.parse(claude_payload())
+    assert first.generation
+
+    grew = claude_payload()
+    grew["messages"].append(
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Reading files."}],
+        }
+    )
+    assert adapter.parse(grew).generation == first.generation
+
+    spoke = claude_payload()
+    spoke["messages"].append({"role": "user", "content": "Now run the tests"})
+    assert adapter.parse(spoke).generation != first.generation
+
+
+def test_identity_is_not_read_from_the_routing_annotation():
+    """The Claude Code router records how it matched a model, not who asked."""
+    adapter = ClaudeCodeAgentAdapter()
+    turn = adapter.parse(claude_payload(mode="plan"))
+    assert turn.turn_id == ""
+    assert turn.thread_id == ""
+    assert turn.generation, "the turn is unidentified"
+
+
+def test_session_id_comes_from_the_client_metadata():
+    adapter = ClaudeCodeAgentAdapter()
+    payload = claude_payload()
+    payload["metadata"] = {"user_id": '{"session_id": "sess-42"}'}
+    assert adapter.parse(payload).session_id == "sess-42"
