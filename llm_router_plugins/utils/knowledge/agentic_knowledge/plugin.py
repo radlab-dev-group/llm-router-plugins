@@ -143,6 +143,8 @@ class AgenticKnowledgePlugin(PluginInterface):
                 host=config.sse_host,
                 api_prefix=config.sse_prefix,
                 token=config.sse_token,
+                username=config.sse_username,
+                password=config.sse_password,
                 timeout_seconds=config.sse_timeout_seconds,
                 verify=config.sse_verify,
                 min_similarity=config.min_similarity,

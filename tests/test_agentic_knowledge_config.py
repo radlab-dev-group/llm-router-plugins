@@ -162,6 +162,30 @@ def test_the_default_collection_prefix_is_engine_safe():
     assert not config.collection_prefix[0].isdigit()
 
 
+def test_engine_credentials_come_from_the_environment(monkeypatch):
+    """A login is an alternative to a token, not a third secret scheme."""
+    monkeypatch.setenv(
+        f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_API_USERNAME", "default_user"
+    )
+    monkeypatch.setenv(
+        f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_API_PASSWORD", "top-secret"
+    )
+    config = AgenticKnowledgeConfig.from_file()
+    config.override_from_env()
+    assert config.sse_username == "default_user"
+    assert config.sse_password == "top-secret"
+    assert config.sse_token == ""
+
+
+def test_engine_credentials_default_to_empty(monkeypatch):
+    monkeypatch.delenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_API_USERNAME", raising=False)
+    monkeypatch.delenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_API_PASSWORD", raising=False)
+    config = AgenticKnowledgeConfig.from_file()
+    config.override_from_env()
+    assert config.sse_username == ""
+    assert config.sse_password == ""
+
+
 def test_a_malformed_redis_connection_is_reported(monkeypatch):
     """Redis off is survivable, but the operator has to be able to see why."""
     monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}REDIS_PORT", "not-a-port")

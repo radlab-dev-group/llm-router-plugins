@@ -265,6 +265,11 @@ class AgenticKnowledgeConfig:
     sse_host: str = ""
     sse_prefix: str = _DEFAULT_SSE_PREFIX
     sse_token: str = ""
+    #: Username and password of an engine that authenticates by login rather
+    #: than by a pre-issued token; the client then logs in on its first call.
+    #: An empty password is no credential, and a token, when set, wins.
+    sse_username: str = ""
+    sse_password: str = ""
     sse_timeout_seconds: float = _DEFAULT_READ_TIMEOUT_SECONDS
     sse_verify: bool = True
 
@@ -452,6 +457,8 @@ class AgenticKnowledgeConfig:
             ("SSE_API_HOST", "sse_host", _text),
             ("SSE_API_PREFIX", "sse_prefix", _text),
             ("SSE_API_TOKEN", "sse_token", _text),
+            ("SSE_API_USERNAME", "sse_username", _text),
+            ("SSE_API_PASSWORD", "sse_password", _text),
             ("SSE_VERIFY", "sse_verify", _boolean),
         ):
             raw = _env_override(prefix, name)

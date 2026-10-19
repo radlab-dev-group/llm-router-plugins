@@ -13,6 +13,7 @@ import json
 import sys
 import datetime
 import pathlib
+import types
 
 import pytest
 
@@ -28,6 +29,7 @@ from agentic_knowledge_support import (
 
 from llm_router_plugins.cli.plugins.utils.knowledge.worker import (
     KnowledgeIndexWorker,
+    _engine_client,
     _entries,
     _require_settings,
     _verify_model_names,
@@ -537,6 +539,32 @@ def test_retention_sweeps_an_archive_this_worker_never_indexed():
         ("agentic_kb-legacy-sessions", [f"session_archive:{old}:legacy"]),
         ("agentic_kb_legacy_sessions", [f"session_archive:{old}:old"]),
     ]
+
+
+def test_the_engine_client_is_built_with_the_login(monkeypatch):
+    """
+    The worker writes with the same credential the read side uses.
+
+    An engine behind login answers a token-less client with 401, and the
+    worker would report that as an indexing failure rather than as missing
+    credentials.
+    """
+    built = {}
+
+    class _Built:
+        def __init__(self, host, **kwargs):
+            built["host"] = host
+            built.update(kwargs)
+
+    module = types.ModuleType("sse_lib")
+    module.SSEClient = _Built
+    monkeypatch.setitem(sys.modules, "sse_lib", module)
+    config = _worker_config()
+    config.sse_username = "default_user"
+    config.sse_password = "secret"
+    _engine_client(config)
+    assert built["username"] == "default_user"
+    assert built["password"] == "secret"
 
 
 def test_retention_ignores_foreign_collections_in_the_listing():

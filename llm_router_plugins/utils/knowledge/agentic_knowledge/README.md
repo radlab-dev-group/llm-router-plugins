@@ -62,7 +62,11 @@ Knowledge needs the routing decision, so it must run after the routing plugin. R
 
 ```bash
 export LLM_ROUTER_KNOWLEDGE_AGENTIC_SSE_API_HOST="https://sse.internal"
+# A pre-issued token, or a login for an engine that authenticates by username and password
+# (the client logs in on its first call; a token, when set, wins).
 export LLM_ROUTER_KNOWLEDGE_AGENTIC_SSE_API_TOKEN="…"
+export LLM_ROUTER_KNOWLEDGE_AGENTIC_SSE_API_USERNAME="…"
+export LLM_ROUTER_KNOWLEDGE_AGENTIC_SSE_API_PASSWORD="…"
 export LLM_ROUTER_KNOWLEDGE_AGENTIC_REDIS_HOST="redis.internal"
 ```
 
@@ -318,7 +322,8 @@ All use the prefix `LLM_ROUTER_KNOWLEDGE_AGENTIC_`. Booleans accept `1/0`, `true
 | `…_KEY_PREFIX`                        | `agentic-kb`     | Redis key namespace                                      |
 | `…_SSE_API_HOST`                      | **empty**        | **empty ⇒ no reads**                                     |
 | `…_SSE_API_PREFIX`                    | **empty**        | empty ⇒ `sse_lib.endpoints.DEFAULT_API_PREFIX` (`api`); set it only when the engine is mounted elsewhere |
-| `…_SSE_API_TOKEN`                     | empty            | SSE token (never logged)                                 |
+| `…_SSE_API_TOKEN`                     | empty            | SSE token (never logged); when set, it wins over a login |
+| `…_SSE_API_USERNAME` / `…_SSE_API_PASSWORD` | empty      | engine login for an engine that authenticates by login rather than by a token; the client logs in on its first call; neither is ever logged |
 | `…_SSE_API_TIMEOUT`                   | `1.5`            | per-request ceiling, clamped to `0.1…10` s               |
 | `…_SSE_VERIFY`                        | `true`           | TLS certificate verification                             |
 | `…_READ_TIMEOUT_SECONDS`              | `1.5`            | read-path timeout budget                                 |

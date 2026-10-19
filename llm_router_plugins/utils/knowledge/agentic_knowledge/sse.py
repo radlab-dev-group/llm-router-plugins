@@ -180,6 +180,13 @@ class KnowledgeStore:
         empty knowledge base.
     token : str
         Bearer token.
+    username : str
+        Login name, for an engine that authenticates by login rather than by a
+        pre-issued token.  Used only together with *password*, and only when no
+        *token* was configured: the client then logs in on its first call.
+    password : str
+        The matching secret.  Never logged; a name without a secret is no
+        credential at all, and the client is left to stay anonymous.
     timeout_seconds : float
         Ceiling of one call.
     verify : bool
@@ -205,11 +212,18 @@ class KnowledgeStore:
         min_similarity: float = 0.35,
         logger: Optional[logging.Logger] = None,
         client: Any = None,
+        username: str = "",
+        password: str = "",
     ) -> None:
         """Bind the connection; build no client until the first search."""
         self._host = (host or "").strip()
         self._api_prefix = (api_prefix or "").strip()
         self._token = (token or "").strip()
+        # A login is attempted only with both halves of a credential and no
+        # token to use instead; passing ``None`` keeps the client's own
+        # behaviour of never logging in.
+        self._username = (username or "").strip()
+        self._password = (password or "").strip()
         self._timeout = float(timeout_seconds)
         self._verify = bool(verify)
         self._min_similarity = float(min_similarity)
@@ -306,6 +320,8 @@ class KnowledgeStore:
             token=self._token,
             timeout=self._timeout,
             verify=self._verify,
+            username=self._username or None,
+            password=self._password or None,
         )
         return self._client
 

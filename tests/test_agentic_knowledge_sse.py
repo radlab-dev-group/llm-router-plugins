@@ -13,6 +13,7 @@ serves and ``relative_path`` in the unreformatted row.
 """
 
 import sys
+import types
 import pathlib
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
@@ -56,6 +57,50 @@ class _Client:
     def search(self, collection, query, options):
         self.calls.append((collection, query, options))
         return self.reply
+
+
+# ------------------------------------------------------------------ login --
+def test_a_login_is_handed_to_the_client_that_builds_itself(monkeypatch):
+    """
+    An engine behind login has no token to put in an Authorization header.
+
+    The client logs in on its first call when it was built with a username
+    and a password, so the pair has to reach the constructor rather than
+    stop at the store.
+    """
+    built = {}
+
+    class _Built:
+        def __init__(self, host, **kwargs):
+            built["host"] = host
+            built.update(kwargs)
+
+    module = types.ModuleType("sse_lib")
+    module.SSEClient = _Built
+    monkeypatch.setitem(sys.modules, "sse_lib", module)
+    store = KnowledgeStore(
+        host="http://engine.test", username="default_user", password="secret"
+    )
+    store._ensure_client()
+    assert built["host"] == "http://engine.test"
+    assert built["username"] == "default_user"
+    assert built["password"] == "secret"
+
+
+def test_no_credentials_leaves_the_client_anonymous(monkeypatch):
+    """Without a credential the client must not be told to log in at all."""
+    built = {}
+
+    class _Built:
+        def __init__(self, host, **kwargs):
+            built.update(kwargs)
+
+    module = types.ModuleType("sse_lib")
+    module.SSEClient = _Built
+    monkeypatch.setitem(sys.modules, "sse_lib", module)
+    KnowledgeStore(host="http://engine.test")._ensure_client()
+    assert built["username"] is None
+    assert built["password"] is None
 
 
 # --------------------------------------------------------------- the options -

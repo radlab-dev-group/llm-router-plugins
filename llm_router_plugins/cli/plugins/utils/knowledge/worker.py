@@ -720,6 +720,8 @@ class KnowledgeIndexWorker:
                 self._config.sse_host,
                 api_prefix=self._config.sse_prefix or None,
                 token=self._config.sse_token,
+                username=self._config.sse_username or None,
+                password=self._config.sse_password or None,
                 timeout=max(self._config.sse_timeout_seconds, 10.0),
                 verify=self._config.sse_verify,
             )
@@ -965,6 +967,8 @@ def _engine_client(config: AgenticKnowledgeConfig) -> Any:
         config.sse_host,
         api_prefix=config.sse_prefix or None,
         token=config.sse_token,
+        username=config.sse_username or None,
+        password=config.sse_password or None,
         timeout=max(config.sse_timeout_seconds, 10.0),
         verify=config.sse_verify,
     )
