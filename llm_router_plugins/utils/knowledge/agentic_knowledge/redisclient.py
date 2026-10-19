@@ -88,7 +88,9 @@ class RedisClientHandle:
 
                     self._client = redis.Redis(**self._connection.client_kwargs())
                 except Exception as exc:
-                    self._warn("redis client could not be built: %s", type(exc).__name__)
+                    self._warn(
+                        "redis client could not be built: %s", type(exc).__name__
+                    )
                     return None
             return self._client
 

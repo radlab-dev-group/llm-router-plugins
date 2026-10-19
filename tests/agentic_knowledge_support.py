@@ -240,10 +240,14 @@ class FakePublisher:
 class FakeRedis:
     """A minimal Redis double: string keys and the stream commands."""
 
-    def __init__(self, messages=None, fail_on=None):
+    def __init__(self, messages=None, fail_on=None, pending=None):
         self.kv = {}
         self.stream = []
         self.messages = list(messages or [])
+        self.pending = list(pending or [])
+        self.claimed = []
+        self.expired = []
+        self.reads = []
         self.acked = []
         self.groups = []
         self.fail_on = set(fail_on or ())
@@ -278,11 +282,49 @@ class FakeRedis:
 
     def xreadgroup(self, group, consumer, streams, count=None, block=None):
         self._maybe_fail("xreadgroup")
+        self.reads.append(block)
         if not self.messages:
             return []
         take = int(count or len(self.messages))
         batch, self.messages = self.messages[:take], self.messages[take:]
         return [("stream", batch)]
+
+    def incr(self, key):
+        self._maybe_fail("incr")
+        value = int(self.kv.get(key, 0) or 0) + 1
+        self.kv[key] = value
+        return value
+
+    def expire(self, key, seconds):
+        self._maybe_fail("expire")
+        self.expired.append((key, seconds))
+        return True
+
+    def xautoclaim(
+        self,
+        stream,
+        group,
+        consumer,
+        min_idle,
+        start_id="0-0",
+        count=None,
+        just_id=False,
+    ):
+        self._maybe_fail("xautoclaim")
+        take = int(count or len(self.pending))
+        batch, self.pending = self.pending[:take], self.pending[take:]
+        reply = ["0-0", batch, []]
+        self.claimed.append(batch)
+        return reply
+
+    def xpending(self, stream, group):
+        self._maybe_fail("xpending")
+        return {
+            "pending": len(self.pending),
+            "min": None,
+            "max": None,
+            "consumers": [],
+        }
 
     def xack(self, stream, group, entry_id):
         self._maybe_fail("xack")
@@ -290,19 +332,35 @@ class FakeRedis:
 
 
 DocumentRef = namedtuple("DocumentRef", ["name"])
+Collection = namedtuple("Collection", ["name"])
 
 
 class FakeSSE:
     """A minimal Semantic Search Engine client double."""
 
-    def __init__(self, names=None, exists=(), fail_methods=()):
+    def __init__(
+        self,
+        names=None,
+        exists=(),
+        fail_methods=(),
+        embedders=("bge-m3",),
+        rerankers=("bge-reranker-v2-m3",),
+        catalogue=(),
+    ):
         self.names = names or {}
         self.collections = set(exists)
+        #: Collections the engine reports in a listing (retention discovery);
+        #: empty by default so a double that never lists keeps old behaviour.
+        self.catalogue = tuple(catalogue or ())
         self.indexed = []
         self.deleted = []
         self.deactivated = []
         self.created = []
         self.fail_methods = set(fail_methods)
+        #: What the fake engine says it serves, for the startup check.  A
+        #: ``None`` entry stands for an engine that does not answer the call.
+        self.embedders = embedders
+        self.rerankers = rerankers
 
     def _maybe_fail(self, name):
         if name in self.fail_methods:
@@ -311,10 +369,25 @@ class FakeSSE:
     def collection_exists(self, name):
         return name in self.collections
 
+    def list_collections(self):
+        return [Collection(name) for name in self.catalogue]
+
     def create_collection(self, name, description="", **kwargs):
         assert description and kwargs.get("embedder") and kwargs.get("reranker")
         self.created.append((name, kwargs.get("embedder"), kwargs.get("reranker")))
         self.collections.add(name)
+
+    def list_embedders(self):
+        self._maybe_fail("list_embedders")
+        if self.embedders is None:
+            raise RuntimeError("no such endpoint")
+        return list(self.embedders)
+
+    def list_rerankers(self):
+        self._maybe_fail("list_rerankers")
+        if self.rerankers is None:
+            raise RuntimeError("no such endpoint")
+        return list(self.rerankers)
 
     def index_documents(self, collection, documents):
         self._maybe_fail("index_documents")

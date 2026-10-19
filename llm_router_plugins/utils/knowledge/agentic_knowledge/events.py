@@ -21,14 +21,15 @@ Two properties keep the request path fast and the store honest.
 """
 
 import json
-import os
-import threading
 
 from dataclasses import dataclass
 from typing import Any, Sequence
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
     KnowledgeEvent,
+)
+from llm_router_plugins.utils.knowledge.agentic_knowledge.redisclient import (
+    RedisClientHandle,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
     RedisConnectionSettings,
@@ -38,14 +39,24 @@ __all__ = [
     "KnowledgeEventPublisher",
     "PublishStatus",
     "STATUS_OK",
+    "STATUS_PARTIAL",
     "STATUS_UNAVAILABLE",
 ]
 
 #: Every event was either appended or already known.
 STATUS_OK = "ok"
 
-#: Redis could not be reached; nothing was appended.
+#: Some events reached the stream and at least one could not be written.
+STATUS_PARTIAL = "partial"
+
+#: Redis could not be reached; nothing further was attempted.
 STATUS_UNAVAILABLE = "unavailable"
+
+# What one deduplication claim returned.  A duplicate and a failure look the
+# same to a boolean and mean opposite things to an operator.
+_CLAIMED = "claimed"
+_DUPLICATE = "duplicate"
+_ERROR = "error"
 
 
 @dataclass(frozen=True)
@@ -56,11 +67,16 @@ class PublishStatus:
     Parameters
     ----------
     status : str
-        :data:`STATUS_OK` or :data:`STATUS_UNAVAILABLE`.
+        :data:`STATUS_OK`, :data:`STATUS_PARTIAL` or :data:`STATUS_UNAVAILABLE`.
     published : int
         Events actually appended to the stream.
     deduplicated : int
-        Events skipped because their fingerprint was already published.
+        Events skipped because their fingerprint was already published.  A
+        Redis that refused the claim is never counted here — that is an error.
+    errors : int
+        Events Redis would not take: a refused claim or append.  Counted
+        separately so ``deduplicated`` keeps its meaning of "already known" and
+        an outage cannot read as a healthy, fully-deduplicated run.
     reason : str
         Why the publish did not reach the stream; a class name, never a payload.
     """
@@ -68,6 +84,7 @@ class PublishStatus:
     status: str = STATUS_OK
     published: int = 0
     deduplicated: int = 0
+    errors: int = 0
     reason: str = ""
 
 
@@ -75,10 +92,10 @@ class KnowledgeEventPublisher:
     """
     Appends mined episodes to the worker's stream, deduplicating by fingerprint.
 
-    The client is created on first use rather than at construction, so a proxy
-    worker forked from a preloaded application opens its own connection instead
-    of inheriting its parent's sockets.  A pre-built client (the tests) is used
-    as-is and is never rebuilt across forks.
+    The client is held by a :class:`RedisClientHandle`: built on first use, and
+    rebuilt when a different process asks for it, so a proxy worker forked from
+    a preloaded application opens its own connection instead of inheriting its
+    parent's sockets.
 
     Parameters
     ----------
@@ -115,19 +132,23 @@ class KnowledgeEventPublisher:
         self._key_prefix = key_prefix
         self._dedup_ttl = int(dedup_ttl_seconds)
         self._max_stream_len = int(max_stream_len)
-        self._client = client
+        self._handle = RedisClientHandle(connection, client, logger)
         self._logger = logger
-        self._lock = threading.Lock()
-        self._pid = os.getpid()
 
     @property
     def available(self) -> bool:
         """Whether a publish can be attempted at all."""
-        return bool(self._connection.configured)
+        return self._handle.configured
 
     def publish(self, events: Sequence[KnowledgeEvent]) -> PublishStatus:
         """
         Append *events* to the stream, once each.
+
+        Publishing runs on the way to answering a live agent, so it stops at
+        the first transport error rather than walking the rest of the batch:
+        a Redis that refused one ``SET`` will refuse them all, each attempt
+        costing a socket timeout, and one compaction window can carry three
+        hundred events.
 
         Parameters
         ----------
@@ -137,18 +158,21 @@ class KnowledgeEventPublisher:
         Returns
         -------
         PublishStatus
-        How the publish went; :data:`STATUS_UNAVAILABLE` when Redis was not
-        reachable, never an exception.
+            How the publish went; :data:`STATUS_UNAVAILABLE` when Redis was not
+            reachable, :data:`STATUS_PARTIAL` when it took some events and
+            refused others — never an exception.
         """
         if not events:
             return PublishStatus(STATUS_OK)
         if not self.available:
             return PublishStatus(STATUS_UNAVAILABLE, reason="unconfigured")
-        client = self._connection_client()
+        client = self._handle.get()
         if client is None:
             return PublishStatus(STATUS_UNAVAILABLE, reason="connection")
         published = 0
         deduplicated = 0
+        errors = 0
+        reason = ""
         for event in events:
             if not event.fingerprint:
                 # An episode without an identity could not be deduplicated, so
@@ -156,25 +180,44 @@ class KnowledgeEventPublisher:
                 # stream that misses one.
                 deduplicated += 1
                 continue
-            if not self._claim(client, event):
+            outcome = self._claim(client, event)
+            if outcome == _ERROR:
+                errors += 1
+                reason = "claim"
+                break
+            if outcome == _DUPLICATE:
                 deduplicated += 1
                 continue
             if self._append(client, event):
                 published += 1
-            else:
-                # The claim succeeded but the append failed; forget the claim so
-                # the next replay of this turn can still publish it.
-                self._release(client, event)
-        if published + deduplicated < len(events):
-            # A claim that lost its append is counted in neither bucket; report
-            # the shortfall rather than pretending everything was handled.
+                continue
+            errors += 1
+            reason = "xadd"
+            # The claim succeeded but the append failed; forget the claim so the
+            # next replay of this turn can still publish it.
+            self._release(client, event)
+            break
+        return self._status(published, deduplicated, errors, reason)
+
+    def _status(
+        self, published: int, deduplicated: int, errors: int, reason: str
+    ) -> PublishStatus:
+        """Fold the counters into the status the request annotation reports."""
+        if errors:
             self._warn(
-                "knowledge publish partial: %d published, %d deduplicated, "
-                "%d of %d events",
+                "knowledge publish incomplete: %d published, %d deduplicated, "
+                "%d failed (%s)",
                 published,
                 deduplicated,
-                published + deduplicated,
-                len(events),
+                errors,
+                reason,
+            )
+            if published:
+                return PublishStatus(
+                    STATUS_PARTIAL, published, deduplicated, errors, reason
+                )
+            return PublishStatus(
+                STATUS_UNAVAILABLE, published, deduplicated, errors, reason
             )
         return PublishStatus(STATUS_OK, published, deduplicated)
 
@@ -186,55 +229,24 @@ class KnowledgeEventPublisher:
         -------
         None
         """
-        client = self._client
-        if client is None:
-            return
-        for name in ("close", "shutdown", "quit"):
-            hook = getattr(client, name, None)
-            if callable(hook):
-                try:
-                    hook()
-                except Exception:  # closing must not raise
-                    return
-                return
+        self._handle.close()
 
     # ------------------------------------------------------------- helpers -
-    def _connection_client(self) -> Any:
-        """Return the client, building it once per process."""
-        pid = os.getpid()
-        if self._pid != pid:
-            self._lock = threading.Lock()
-            if self._client is None:
-                self._pid = pid
-        if self._client is not None:
-            return self._client
-        with self._lock:
-            if self._client is None:
-                try:
-                    import redis  # noqa: PLC0415 - optional dependency
-
-                    self._client = redis.Redis(**self._connection.client_kwargs())
-                except Exception as exc:
-                    self._warn(
-                        "knowledge publisher client failed: %s",
-                        type(exc).__name__,
-                    )
-                    return None
-            return self._client
-
     def _seen_key(self, event: KnowledgeEvent) -> str:
         """The deduplication key of one episode."""
         return f"{self._key_prefix}:seen:{event.fingerprint}"
 
-    def _claim(self, client: Any, event: KnowledgeEvent) -> bool:
+    def _claim(self, client: Any, event: KnowledgeEvent) -> str:
         """
         Take the one-time lock on an episode.
 
         Returns
         -------
-        bool
-            ``True`` when this publish owns the episode, ``False`` when it was
-            already published within the deduplication window.
+        str
+            :data:`_CLAIMED` when this publish owns the episode,
+            :data:`_DUPLICATE` when it was already published within the
+            deduplication window, :data:`_ERROR` when Redis did not answer —
+            the three are not the same thing and must not be counted alike.
         """
         try:
             taken = client.set(
@@ -245,8 +257,8 @@ class KnowledgeEventPublisher:
             )
         except Exception as exc:
             self._warn("knowledge dedup failed: %s", type(exc).__name__)
-            return False
-        return bool(taken)
+            return _ERROR
+        return _CLAIMED if taken else _DUPLICATE
 
     def _release(self, client: Any, event: KnowledgeEvent) -> None:
         """Give back a claim whose append did not land."""

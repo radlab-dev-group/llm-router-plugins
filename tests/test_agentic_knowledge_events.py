@@ -16,6 +16,7 @@ from agentic_knowledge_support import FakeRedis, knowledge_event
 from llm_router_plugins.utils.knowledge.agentic_knowledge.events import (
     KnowledgeEventPublisher,
     STATUS_OK,
+    STATUS_PARTIAL,
     STATUS_UNAVAILABLE,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
@@ -86,12 +87,53 @@ def test_unconfigured_connection_reports_unavailable():
     assert status.published == 0
 
 
-def test_set_failure_leaves_the_event_unpublished():
+def test_set_failure_is_an_outage_not_a_duplicate():
     redis = FakeRedis()
     redis.fail_on.add("set")
     status = publisher(client=redis).publish([knowledge_event()])
-    assert status.status == STATUS_OK
+    # A refused claim is Redis being down, not the episode being known
+    # already. Reported as ok, a dead Redis reads as a healthy run whose
+    # episodes were all deduplicated — the one outcome an operator cannot
+    # tell apart from success.
+    assert status.status == STATUS_UNAVAILABLE
     assert status.published == 0
+    assert status.deduplicated == 0
+    assert status.errors == 1
+
+
+def test_publish_stops_at_the_first_transport_error():
+    class DeadRedis(FakeRedis):
+        def __init__(self):
+            super().__init__()
+            self.set_calls = 0
+
+        def set(self, *args, **kwargs):
+            self.set_calls += 1
+            raise ConnectionError("redis down")
+
+    redis = DeadRedis()
+    events = [knowledge_event(fingerprint=f"f{i}") for i in range(200)]
+    status = publisher(client=redis).publish(events)
+    # One timeout per request, not one per event: a compaction window can
+    # carry hundreds of events and the request path cannot wait on each.
+    assert redis.set_calls == 1
+    assert status.status == STATUS_UNAVAILABLE
+    assert status.errors == 1
+
+
+def test_partial_publish_is_reported_as_partial():
+    class HalfWorking(FakeRedis):
+        def xadd(self, *args, **kwargs):
+            if len(self.stream) >= 1:
+                raise ConnectionError("redis went away")
+            return super().xadd(*args, **kwargs)
+
+    redis = HalfWorking()
+    events = [knowledge_event(fingerprint=f"p{i}") for i in range(3)]
+    status = publisher(client=redis).publish(events)
+    assert status.published == 1
+    assert status.status == STATUS_PARTIAL
+    assert status.errors == 1
 
 
 def test_append_failure_releases_the_claim_for_a_retry():
