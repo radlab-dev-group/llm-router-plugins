@@ -13,12 +13,20 @@ and the retention day, the embedded header gives the failure signature, the
 paths and the thread (see
 :mod:`llm_router_plugins.utils.knowledge.agentic_knowledge.documents`).
 
-One engine detail shapes how filters may be written: the backend combines
-several ``metadata_filters`` with **OR**, whatever the caller meant, so this
-module sends at most one — the thread an archived window belongs to.  Isolation
-between repositories does not come from a filter at all; it comes from there
-being one collection per repository, so a forgotten filter cannot leak another
-team's fixes into the prompt.
+Two engine details shape how filters may be written
+(``sse_api.engine.controllers.search.semantic``).  ``use_and_operator``
+(default ``False``) combines the *filter families* — categories, directly named
+documents, query templates, the metadata filter, ``relative_path_contains`` —
+by intersection; left alone their document names are unioned.  Within the
+metadata family, though, several ``metadata_filters`` are always unioned with
+each other: the controller calls its own metadata filter with
+``use_and_operator=False`` hardcoded.  This module therefore sets
+``use_and_operator: True`` and sends a single ``metadata_filters`` entry — the
+thread an archived window belongs to, intersected with the requested categories
+rather than added to them, and with nothing in it that would quietly widen the
+set again.  Isolation between repositories does not come from a filter at all;
+it comes from there being one collection per repository, so a forgotten filter
+cannot leak another team's fixes into the prompt.
 """
 
 import logging
@@ -28,6 +36,9 @@ from typing import Any, Iterable, List, Optional, Tuple
 
 __all__ = [
     "KnowledgeStore",
+    "SCALE_COSINE",
+    "SCALE_RRF",
+    "SCALE_RERANKER",
     "SearchRequest",
     "SearchResult",
     "StoreHit",
@@ -44,6 +55,16 @@ STATUS_DISABLED = "disabled"
 
 #: The search was attempted and failed, or its library is not installed.
 STATUS_UNAVAILABLE = "unavailable"
+
+#: :attr:`SearchResult.score_scale` — cosine similarity of the vector leg.
+SCALE_COSINE = "cosine"
+
+#: :attr:`SearchResult.score_scale` — Reciprocal Rank Fusion of both legs.
+SCALE_RRF = "rrf"
+
+#: :attr:`SearchResult.score_scale` — a cross-encoder logit, squashed to
+#: :math:`[0, 1]` by the sigmoid when it is normalized.
+SCALE_RERANKER = "reranker"
 
 _MAX_HIT_CHARS = 1200
 
@@ -89,11 +110,20 @@ class StoreHit:
     text : str
         The chunk, header not yet removed.
     score : float or None
-        Raw retrieval score.
+        Raw retrieval score, on whatever scale the run used — see
+        :attr:`score_scale`.
     score_normalized : float or None
-        Relevance on the engine's common ``[0, 1]`` scale.
+        :attr:`score` mapped onto ``[0, 1]`` by the engine.  The mapping depends
+        on :attr:`score_scale` — linear for cosine, a sigmoid for a reranker
+        logit, a rescaling for a fused rank — so this is *not* a cosine
+        similarity and must not be compared with the configured
+        ``min_similarity``, which the engine applies to the vector leg before
+        any of that.  Relative order within one result set is the only safe use.
     relative_path : str
         Path the engine associates with the document, when it has one.
+    score_scale : str
+        ``"reranker"``, ``"rrf"``, ``"cosine"`` or ``""`` when the answer did
+        not say; what the two scores mean.
     """
 
     collection: str = ""
@@ -102,6 +132,7 @@ class StoreHit:
     score: Optional[float] = None
     score_normalized: Optional[float] = None
     relative_path: str = ""
+    score_scale: str = ""
 
 
 @dataclass(frozen=True)
@@ -117,11 +148,20 @@ class SearchResult:
         Retrieved chunks; empty unless the search answered.
     reason : str
         Why a search did not answer; a class name, never a payload.
+    score_scale : str
+        The scale every hit's scores were produced on, taken from the engine's
+        own ``results.score_scale``: :data:`SCALE_RERANKER` under
+        ``rerank_results=True``, :data:`SCALE_RRF` in a plain hybrid search,
+        :data:`SCALE_COSINE` for a vector-only one, ``""`` when the answer did
+        not state it.  Recorded so that no consumer mistakes
+        :attr:`StoreHit.score_normalized` for the cosine similarity
+        ``min_similarity`` cuts on.
     """
 
     status: str = STATUS_DISABLED
     hits: Tuple[StoreHit, ...] = ()
     reason: str = ""
+    score_scale: str = ""
 
 
 class KnowledgeStore:
@@ -133,7 +173,11 @@ class KnowledgeStore:
     host : str
         Engine host; empty means the store is unavailable.
     api_prefix : str
-        API prefix of the engine.
+        API prefix of the engine.  ``""`` — the default — leaves the choice to
+        :data:`sse_lib.endpoints.DEFAULT_API_PREFIX`, which is what the
+        deployment in front of us actually serves; guessing ``/api/v1`` here
+        404s against an unversioned engine and fails open into a silently
+        empty knowledge base.
     token : str
         Bearer token.
     timeout_seconds : float
@@ -141,7 +185,10 @@ class KnowledgeStore:
     verify : bool
         Whether TLS certificates are verified.
     min_similarity : float
-        Cosine floor applied to every search.
+        Cosine floor of the *vector leg only*.  The engine hands it to the
+        vector store before the full-text leg runs and before the two are
+        fused, so a chunk found by the full-text side never meets it, and it is
+        not a floor on anything the caller sees — see :func:`_options`.
     logger : logging.Logger, optional
         Where to report failures; never with payload content.
     client : Any, optional
@@ -151,7 +198,7 @@ class KnowledgeStore:
     def __init__(
         self,
         host: str = "",
-        api_prefix: str = "/api/v1",
+        api_prefix: str = "",
         token: str = "",
         timeout_seconds: float = 1.5,
         verify: bool = True,
@@ -161,7 +208,7 @@ class KnowledgeStore:
     ) -> None:
         """Bind the connection; build no client until the first search."""
         self._host = (host or "").strip()
-        self._api_prefix = (api_prefix or "/api/v1").strip()
+        self._api_prefix = (api_prefix or "").strip()
         self._token = (token or "").strip()
         self._timeout = float(timeout_seconds)
         self._verify = bool(verify)
@@ -219,8 +266,11 @@ class KnowledgeStore:
                 type(exc).__name__,
             )
             return SearchResult(STATUS_UNAVAILABLE, reason=type(exc).__name__)
+        scale = _score_scale(response)
         return SearchResult(
-            STATUS_OK, hits=tuple(_hits(request.collection, response))
+            STATUS_OK,
+            hits=tuple(_hits(request.collection, response, scale)),
+            score_scale=scale,
         )
 
     def close(self) -> None:
@@ -252,7 +302,7 @@ class KnowledgeStore:
 
         self._client = SSEClient(
             self._host,
-            api_prefix=self._api_prefix,
+            api_prefix=self._api_prefix or None,
             token=self._token,
             timeout=self._timeout,
             verify=self._verify,
@@ -278,7 +328,12 @@ def _options(request: SearchRequest, min_similarity: float) -> Any:
     request : SearchRequest
         What to look for.
     min_similarity : float
-        Cosine floor of the vector side of the search.
+        Cosine floor of the vector leg only.  The engine passes it straight to
+        the vector store (``semantic.py``, ``self.search(min_similarity=…)``),
+        which runs *before* the PostgreSQL full-text leg and the Reciprocal
+        Rank Fusion of the two; a chunk found only by the full-text search was
+        never measured against it.  It is a pre-rerank cutoff on one leg, not a
+        floor on the relevance of what comes back.
 
     Returns
     -------
@@ -290,12 +345,19 @@ def _options(request: SearchRequest, min_similarity: float) -> Any:
         "hybrid_search": True,
         "rerank_results": True,
         "min_similarity": float(min_similarity),
-        # Categories and the metadata filter have to intersect; the engine's
-        # default would union them and return the whole collection.
+        # ``use_and_operator`` is what intersects the *filter families* —
+        # categories, named documents, templates, the metadata filter,
+        # relative_path_contains.  At the engine default of False their
+        # document names are unioned and the categories only widen the set.
         "use_and_operator": True,
     }
     if request.categories:
         options["categories"] = list(request.categories)
+    # Exactly one metadata filter, whatever it filters on: the engine unions
+    # several ``metadata_filters`` with each other even here
+    # (``semantic.py`` calls ``__filter_documents_based_on_metadata`` with
+    # ``use_and_operator=False`` hardcoded), so a second one would broaden the
+    # archived window instead of narrowing it.
     if request.thread_id:
         options["metadata_filters"] = [
             {"operator": "eq", "field": {"thread_id": request.thread_id}}
@@ -303,8 +365,17 @@ def _options(request: SearchRequest, min_similarity: float) -> Any:
     return options
 
 
-def _hits(collection: str, response: Any) -> Iterable[StoreHit]:
-    """Turn one engine response into hits, tolerating an unusual body."""
+def _hits(
+    collection: str, response: Any, score_scale: str = ""
+) -> Iterable[StoreHit]:
+    """
+    Turn one engine response into hits, tolerating an unusual body.
+
+    *score_scale* is what the caller read off the same answer; when it is not
+    given it is read here, so a hit is never stamped with a scale nobody
+    established.
+    """
+    scale = score_scale or _score_scale(response)
     for hit in _iter_hits(response):
         raw = getattr(hit, "raw", None) or {}
         text = getattr(hit, "text", None) or _text_of(raw)
@@ -317,6 +388,7 @@ def _hits(collection: str, response: Any) -> Iterable[StoreHit]:
             score=_number(getattr(hit, "score", None)),
             score_normalized=_number(getattr(hit, "score_normalized", None)),
             relative_path=str(getattr(hit, "relative_filepath", "") or ""),
+            score_scale=scale,
         )
 
 
@@ -345,18 +417,55 @@ def _iter_hits(response: Any) -> List[Any]:
 
 
 def _flatten(entry: Any) -> Any:
-    """Flatten one raw ``detailed_results`` entry into a namespace."""
+    """
+    Flatten one raw ``detailed_results`` entry into a namespace.
+
+    Two shapes arrive here and they name the path differently.  The reformatted
+    answer the endpoint actually serves — ``reformat_search_results_to_display``,
+    which is what :meth:`sse_lib.models.SearchHit.from_api` reads — carries the
+    path under ``relative_filepath``, taken from the document's ``relative_path``
+    column.  An *un*reformatted entry nests the database row under
+    ``result.text``, where the same value is keyed ``relative_path``.  Both are
+    accepted, the served spelling first.
+    """
     if not isinstance(entry, dict):
         return entry
     inner = (entry.get("result") or {}).get("text") or {}
     merged = {**inner, **{k: v for k, v in entry.items() if k != "result"}}
     return _Entry(
         document_name=merged.get("document_name"),
-        relative_filepath=merged.get("relative_path"),
+        relative_filepath=(
+            merged.get("relative_filepath") or merged.get("relative_path")
+        ),
         text=merged.get("text_str"),
         score=merged.get("score"),
         score_normalized=merged.get("score_normalized"),
     )
+
+
+def _score_scale(response: Any) -> str:
+    """Read ``results.score_scale`` off an answer, or ``""`` when it says none.
+
+    The engine states which scale it scored on — ``"reranker"`` under
+    ``rerank_results=True``, ``"rrf"`` for a plain hybrid search,
+    ``"cosine"`` for a vector-only one — and the answer is not a hint: the
+    number a hit carries means something different under each of them.
+    """
+    candidates = []
+    if isinstance(response, dict):
+        results = response.get("results")
+        if isinstance(results, dict):
+            candidates.append(results.get("score_scale"))
+        candidates.append(response.get("score_scale"))
+    else:
+        results = getattr(response, "results", None)
+        if isinstance(results, dict):
+            candidates.append(results.get("score_scale"))
+        candidates.append(getattr(response, "score_scale", None))
+    for value in candidates:
+        if value:
+            return str(value)
+    return ""
 
 
 class _Entry:

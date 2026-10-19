@@ -86,11 +86,17 @@ class QueryBuilder:
                 # and an unfiltered archive is another team's conversation.
                 continue
             name = str(self.collection_namer(turn.scope, kind))
-            grouped.setdefault(name, []).append(kind)
+            kinds = grouped.setdefault(name, [])
+            # A policy may list one category twice; keeping it once means the
+            # "archive-only?" test below reads the set of kinds, not their
+            # multiplicity, so a repeated `session_archive` cannot turn the
+            # thread filter off and expose the whole repository's windows.
+            if kind not in kinds:
+                kinds.append(kind)
             limits[name] = limits.get(name, 0) + int(source.max_items)
         requests: List[SearchRequest] = []
         for name, categories in grouped.items():
-            archived = KIND_SESSION_ARCHIVE in categories and len(categories) == 1
+            archived = KIND_SESSION_ARCHIVE in categories
             requests.append(
                 SearchRequest(
                     collection=name,

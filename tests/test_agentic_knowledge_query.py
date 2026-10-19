@@ -71,3 +71,27 @@ def _rebuild(turn, **overrides):
     from dataclasses import replace
 
     return replace(turn, **overrides)
+
+
+def test_a_category_listed_twice_still_restricts_the_archive_to_the_thread():
+    # A policy that names `session_archive` twice must not turn the thread
+    # filter off.  The old code decided "archive-only" from the *count* of
+    # categories, so a duplicated source dropped the filter and made every
+    # thread's archived window in the repository searchable.
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        ModePolicy,
+        SourcePolicy,
+    )
+
+    policy = ModePolicy(
+        name="debug",
+        sources=(
+            SourcePolicy(category="session_archive", weight=0.6),
+            SourcePolicy(category="session_archive", weight=0.4),
+        ),
+    )
+    turn = turn_for(mode="debug")
+    requests = builder().build(turn, policy)
+    assert len(requests) == 1
+    assert requests[0].categories == ("session_archive",)
+    assert requests[0].thread_id == "thread-1"

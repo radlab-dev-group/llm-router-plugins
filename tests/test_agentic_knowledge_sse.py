@@ -1,0 +1,161 @@
+"""
+The read path: the options the engine is sent, and what comes back from it.
+
+Two contract details live here and neither is visible from the plugin's own
+types.  The first is what the two score numbers mean: ``min_similarity`` is a
+cosine cutoff the engine applies to the vector leg before the full-text leg
+runs, while the ``score_normalized`` of a hit is whatever the final stage
+produced — a sigmoid of a cross-encoder logit under ``rerank_results=True`` —
+and the engine says which one it was in ``results.score_scale``.  Reading that
+field is the only way a consumer can tell.  The second is that a document's
+path is keyed ``relative_filepath`` in the reformatted answer the endpoint
+serves and ``relative_path`` in the unreformatted row.
+"""
+
+import sys
+import pathlib
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
+from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+    STATUS_OK,
+    KnowledgeStore,
+    SearchRequest,
+    _flatten,
+    _hits,
+    _options,
+    _score_scale,
+)
+
+
+class _Reply:
+    """The object ``sse_lib`` hands back: reformatted hits and the scale."""
+
+    def __init__(self, hits, score_scale="reranker"):
+        self.hits = hits
+        self.results = {"score_scale": score_scale}
+
+
+class _Hit:
+    """One ``sse_lib.models.SearchHit``."""
+
+    def __init__(self, **values):
+        self.text = values.get("text")
+        self.document_name = values.get("document_name", "")
+        self.relative_filepath = values.get("relative_filepath", "")
+        self.score = values.get("score")
+        self.score_normalized = values.get("score_normalized")
+        self.raw = values
+
+
+class _Client:
+    def __init__(self, reply):
+        self.reply = reply
+        self.calls = []
+
+    def search(self, collection, query, options):
+        self.calls.append((collection, query, options))
+        return self.reply
+
+
+# --------------------------------------------------------------- the options -
+def test_the_thread_filter_and_the_categories_intersect():
+    """
+    ``use_and_operator`` combines the filter families, and must be on.
+
+    Left at the engine's default the categories and the thread filter would be
+    unioned, so an archived window would be answered with the whole collection.
+    """
+    options = _options(
+        SearchRequest(
+            collection="agentic-kb-webapp-sessions",
+            query="boom",
+            categories=("session_archive",),
+            thread_id="thread-1",
+        ),
+        0.35,
+    )
+    assert options["use_and_operator"] is True
+    assert options["categories"] == ["session_archive"]
+    assert options["metadata_filters"] == [
+        {"operator": "eq", "field": {"thread_id": "thread-1"}}
+    ]
+
+
+def test_a_request_without_a_thread_sends_no_metadata_filter():
+    options = _options(SearchRequest(collection="c", query="q"), 0.35)
+    assert "metadata_filters" not in options
+
+
+# ---------------------------------------------------------------- the scale -
+def test_the_score_scale_of_the_answer_is_carried_through():
+    store = KnowledgeStore(client=_Client(_Reply([], score_scale="rrf")))
+    assert (
+        store.search(SearchRequest(collection="c", query="q")).score_scale == "rrf"
+    )
+
+
+def test_the_score_scale_is_read_from_both_shapes():
+    assert _score_scale(_Reply([], "reranker")) == "reranker"
+    assert _score_scale({"results": {"score_scale": "cosine"}}) == "cosine"
+    assert _score_scale({"score_scale": "cosine"}) == "cosine"
+    assert _score_scale({}) == ""
+    assert _score_scale(None) == ""
+
+
+def test_a_scale_is_copied_onto_every_hit():
+    """The scale is read once per answer and stamped on the hits it produced."""
+    reply = _Reply([_Hit(text="t", score=2.1, score_normalized=0.9)], "rrf")
+    assert tuple(_hits("c", reply, "rrf"))[0].score_scale == "rrf"
+    assert tuple(_hits("c", reply))[0].score_scale == "rrf"
+
+
+# ------------------------------------------------------------------- the path -
+def test_the_reformatted_hit_names_its_path_relative_filepath():
+    """The served key is ``relative_filepath``, not ``relative_path``."""
+    entry = {
+        "score": 1.0,
+        "score_normalized": 0.8,
+        "document_name": "recipe:20261016:abc",
+        "relative_filepath": "recipe:20261016:abc",
+        "text_str": "body",
+    }
+    assert _flatten(entry).relative_filepath == "recipe:20261016:abc"
+
+
+def test_an_unreformatted_row_keeps_its_relative_path():
+    entry = {
+        "result": {
+            "text": {
+                "document_name": "recipe:20261016:abc",
+                "relative_path": "src/a.py",
+                "text_str": "body",
+                "score": 0.4,
+            }
+        }
+    }
+    assert _flatten(entry).relative_filepath == "src/a.py"
+
+
+def test_a_flattened_entry_reaches_the_caller_as_a_hit():
+    body = {
+        "results": {
+            "score_scale": "reranker",
+            "detailed_results": {
+                "0": {
+                    "score": 2.5,
+                    "score_normalized": 0.92,
+                    "document_name": "recipe:20261016:abc",
+                    "relative_filepath": "recipe:20261016:abc",
+                    "text_str": "the fix",
+                }
+            },
+        }
+    }
+    store = KnowledgeStore(client=_Client(body))
+    result = store.search(SearchRequest(collection="agentic-kb-webapp", query="q"))
+    assert result.status == STATUS_OK
+    assert result.score_scale == "reranker"
+    assert result.hits[0].relative_path == "recipe:20261016:abc"
+    assert result.hits[0].text == "the fix"
+    assert result.hits[0].score_normalized == 0.92
