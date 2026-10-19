@@ -21,13 +21,22 @@ request annotation rather than pretending to be consistent across workers.
 import dataclasses
 import json
 import threading
+import time
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
     KnowledgeContext,
     KnowledgeHit,
+    best_recipe_score,
+    deadends_of,
+)
+from llm_router_plugins.utils.knowledge.agentic_knowledge.redisclient import (
+    RedisClientHandle,
+)
+from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
+    RedisConnectionSettings,
 )
 
 __all__ = [
@@ -90,8 +99,12 @@ class GenerationContextCache:
     Parameters
     ----------
     client : Any, optional
-        A Redis client.  Built by the plugin when a connection is configured;
-        ``None`` makes the cache report itself disabled.
+        A Redis client.  ``None`` (with no *connection*) makes the cache report
+        itself disabled.
+    connection : RedisConnectionSettings, optional
+        Where to connect when no client is given.  The client is then built on
+        first use and rebuilt in a forked process, so a preloaded proxy does
+        not hand its workers an inherited connection pool.
     key_prefix : str
         Namespace of this plugin's keys.
     ttl_seconds : int
@@ -106,9 +119,10 @@ class GenerationContextCache:
         key_prefix: str = "agentic-kb",
         ttl_seconds: int = 3600,
         logger: Any = None,
+        connection: Optional[RedisConnectionSettings] = None,
     ) -> None:
         """Bind the store and the entry lifetime."""
-        self._client = client
+        self._handle = RedisClientHandle(connection, client, logger)
         self._prefix = key_prefix
         self._ttl = int(ttl_seconds)
         self._logger = logger
@@ -116,7 +130,7 @@ class GenerationContextCache:
     @property
     def enabled(self) -> bool:
         """Whether anything can be cached at all."""
-        return self._client is not None
+        return self._handle.configured
 
     def get(self, scope: str, generation: str) -> Optional[CachedContext]:
         """
@@ -134,10 +148,13 @@ class GenerationContextCache:
         CachedContext or None
             The entry, or ``None`` when there is none or Redis did not answer.
         """
-        if self._client is None or not scope or not generation:
+        if not scope or not generation:
+            return None
+        client = self._handle.get()
+        if client is None:
             return None
         try:
-            raw = self._client.get(self._key(scope, generation))
+            raw = client.get(self._key(scope, generation))
         except Exception as exc:
             self._warn("knowledge context cache read failed: %s", type(exc).__name__)
             return None
@@ -168,12 +185,13 @@ class GenerationContextCache:
         bool
             ``True`` when the entry was written.
         """
-        if self._client is None or not scope or not generation:
+        if not scope or not generation:
+            return False
+        client = self._handle.get()
+        if client is None:
             return False
         try:
-            self._client.set(
-                self._key(scope, generation), _encode(entry), ex=self._ttl
-            )
+            client.set(self._key(scope, generation), _encode(entry), ex=self._ttl)
         except Exception as exc:
             self._warn(
                 "knowledge context cache write failed: %s", type(exc).__name__
@@ -237,13 +255,24 @@ class InMemoryContextCache(GenerationContextCache):
 
     For tests and for a single-worker deployment.  It implements exactly the
     same contract, which is the point: the plugin cannot tell it from Redis, so
-    the code path that ships is the one that is tested.
+    the code path that ships is the one that is tested — including the two
+    things Redis does for free and this class used not to do at all: an entry
+    older than the TTL is dropped, and the store stops growing.
+
+    Parameters
+    ----------
+    ttl_seconds : int
+        How long an entry survives, as it does in Redis.
+    max_entries : int
+        Ceiling of remembered generations; the oldest is evicted to hold it, so
+        a long-lived proxy process cannot accumulate a block per request.
     """
 
-    def __init__(self, ttl_seconds: int = 3600) -> None:
+    def __init__(self, ttl_seconds: int = 3600, max_entries: int = 2048) -> None:
         """Start with an empty store."""
         super().__init__(client=None, ttl_seconds=ttl_seconds)
-        self._entries: Dict[str, str] = {}
+        self._entries: Dict[str, Tuple[float, str]] = {}
+        self._max_entries = max(1, int(max_entries))
         self._lock = threading.Lock()
 
     @property
@@ -252,19 +281,33 @@ class InMemoryContextCache(GenerationContextCache):
         return True
 
     def get(self, scope: str, generation: str) -> Optional[CachedContext]:
-        """Return the entry stored for one generation."""
+        """Return the entry stored for one generation, unless it has aged out."""
         if not scope or not generation:
             return None
+        key = f"{scope}:{generation}"
         with self._lock:
-            raw = self._entries.get(f"{scope}:{generation}")
+            stored = self._entries.get(key)
+            if stored is None:
+                return None
+            stored_at, raw = stored
+            if self._ttl > 0 and time.time() - stored_at > self._ttl:
+                # Reported as a miss and replaced on the next put, exactly as
+                # Redis would have expired it.
+                del self._entries[key]
+                return None
         return _decode(raw) if raw else None
 
     def put(self, scope: str, generation: str, entry: CachedContext) -> bool:
-        """Store an entry for one generation."""
+        """Store an entry for one generation, evicting the oldest when full."""
         if not scope or not generation:
             return False
+        key = f"{scope}:{generation}"
         with self._lock:
-            self._entries[f"{scope}:{generation}"] = _encode(entry)
+            self._entries.pop(key, None)
+            self._entries[key] = (time.time(), _encode(entry))
+            while len(self._entries) > self._max_entries:
+                # Insertion order: the generation written longest ago goes first.
+                self._entries.pop(next(iter(self._entries)))
         return True
 
 
@@ -350,38 +393,59 @@ def _encode(entry: CachedContext) -> str:
 
 
 def _decode(raw: Any) -> Optional[CachedContext]:
-    """Rebuild one cache entry, dropping an entry of another schema."""
+    """
+    Rebuild one cache entry, dropping anything this reader cannot trust.
+
+    Never raises.  A cache value is foreign input: it may have been written by
+    an earlier build that shared the schema number, or by anything else with
+    access to the key prefix, and a single field of the wrong type would
+    otherwise propagate out of the cache read — and out of ``apply()`` — turning
+    a knowledge-cache hiccup into a failed request.  An entry that does not
+    decode is a miss, nothing more.
+    """
     try:
         payload = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
     except (TypeError, ValueError):
         return None
     if not isinstance(payload, dict) or payload.get("schema") != _SCHEMA:
         return None
-    hits = tuple(
-        KnowledgeHit(
-            category=str(item.get("category", "")),
-            document_name=str(item.get("document_name", "")),
-            text=str(item.get("text", "")),
-            score=float(item.get("score") or 0.0),
-            weight=float(item.get("weight") or 0.0),
-            created_at=item.get("created_at"),
-            paths=tuple(item.get("paths") or ()),
-            signature=str(item.get("signature", "")),
+    try:
+        stored_hits = payload.get("hits") or ()
+        if not isinstance(stored_hits, (list, tuple)):
+            stored_hits = ()
+        hits = tuple(
+            KnowledgeHit(
+                category=str(item.get("category", "")),
+                document_name=str(item.get("document_name", "")),
+                text=str(item.get("text", "")),
+                score=float(item.get("score") or 0.0),
+                weight=float(item.get("weight") or 0.0),
+                created_at=item.get("created_at"),
+                paths=tuple(item.get("paths") or ()),
+                signature=str(item.get("signature", "")),
+            )
+            for item in stored_hits
+            if isinstance(item, dict)
         )
-        for item in payload.get("hits") or ()
-        if isinstance(item, dict)
-    )
-    rendered = str(payload.get("rendered", ""))
-    context = KnowledgeContext(
-        hits=hits,
-        rendered=rendered,
-        chars=int(payload.get("chars") or len(rendered)),
-        status=str(payload.get("status", "ok")),
-    )
-    return CachedContext(
-        context=context,
-        evidence_fingerprint=str(payload.get("evidence", "")),
-        mode=str(payload.get("mode", "")),
-        escalated=bool(payload.get("escalated")),
-        escalated_model=str(payload.get("escalated_model", "")),
-    )
+        rendered = str(payload.get("rendered", ""))
+        context = KnowledgeContext(
+            hits=hits,
+            rendered=rendered,
+            chars=int(payload.get("chars") or len(rendered)),
+            # Recomputed, not restored: the escalation policy reads these two,
+            # and an entry that came back with a zero score would read as "this
+            # repo knows nothing" on the second request of a generation that was
+            # shown a strong recipe on the first.
+            best_recipe_score=best_recipe_score(hits),
+            deadends=deadends_of(hits),
+            status=str(payload.get("status", "ok")),
+        )
+        return CachedContext(
+            context=context,
+            evidence_fingerprint=str(payload.get("evidence", "")),
+            mode=str(payload.get("mode", "")),
+            escalated=bool(payload.get("escalated")),
+            escalated_model=str(payload.get("escalated_model", "")),
+        )
+    except (TypeError, ValueError):
+        return None

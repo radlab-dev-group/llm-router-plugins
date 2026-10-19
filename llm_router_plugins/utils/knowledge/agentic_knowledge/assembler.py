@@ -43,7 +43,13 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
     StoreHit,
 )
 
-__all__ = ["ContextAssembler", "KnowledgeContext", "KnowledgeHit"]
+__all__ = [
+    "ContextAssembler",
+    "KnowledgeContext",
+    "KnowledgeHit",
+    "best_recipe_score",
+    "deadends_of",
+]
 
 #: Marker around the injected block; also the adapter's idempotency detector.
 BLOCK_OPEN = "<agentic_knowledge>"
@@ -60,6 +66,10 @@ _MAX_PATH_BONUS = 0.24
 
 #: Most characters of a chunk quoted into the block.
 _QUOTE_CHARS = 420
+
+#: Fewest characters of a recipe worth quoting when a block is squeezed; below
+#: this the entry is dropped rather than rendered as a truncated fragment.
+_MIN_QUOTE_CHARS = 80
 
 _INTRO = (
     "Knowledge from earlier work in this repository. It is a record, not an "
@@ -156,6 +166,8 @@ class _Candidate:
     vote: float = 0.0
     source_max: int = 3
     section: int = len(_SECTIONS)
+    #: Ceiling of the rendered line; 0 means the entry renders whole.
+    render_limit: int = 0
 
 
 @dataclass(frozen=True)
@@ -203,25 +215,27 @@ class ContextAssembler:
             The block and what it is made of.
         """
         candidates = self._candidates(results, policy)
-        chosen = self._budget(candidates, policy.max_chars)
-        extra = [line for line in extra_lines if line and line.strip()]
+        extra = _deduplicated(
+            [
+                line.strip()
+                for line in (*self.local_deadends, *extra_lines)
+                if line and line.strip()
+            ]
+        )
+        # The lines this turn supplies itself are rendered whatever else fits,
+        # so they are charged against the budget first: without that a long
+        # "already tried" list would push the block past the mode's budget,
+        # which is the one number the operator can reason about.
+        extra = _fit_extra(extra, policy.max_chars - _block_overhead())
+        chosen = self._budget(candidates, policy.max_chars, _extra_cost(extra))
         rendered = self._render(chosen, extra)
         hits = tuple(candidate.hit for candidate in chosen)
-        recipes = [
-            candidate.vote
-            for candidate in chosen
-            if candidate.hit.category == KIND_RECIPE
-        ]
         return KnowledgeContext(
             hits=hits,
             rendered=rendered,
             chars=len(rendered),
-            best_recipe_score=max(recipes) if recipes else 0.0,
-            deadends=tuple(
-                candidate.hit
-                for candidate in chosen
-                if candidate.hit.category == KIND_DEADEND
-            ),
+            best_recipe_score=best_recipe_score(hits),
+            deadends=deadends_of(hits),
         )
 
     # ------------------------------------------------------------ ranking ---
@@ -289,34 +303,24 @@ class ContextAssembler:
         )
 
     def _meta(self, hit: StoreHit) -> Tuple[DocumentMeta, str]:
-        """Read the header, falling back to the document name."""
+        """Read the header, filling what it lacks from the document name."""
         meta, body = parse_document_text(hit.text)
         if not meta.kind or meta.date is None:
             from_name = parse_document_name(hit.document_name)
-            meta = DocumentMeta(
+            meta = _replace_meta(
+                meta,
                 kind=meta.kind or from_name.kind,
                 date=meta.date or from_name.date,
-                signature=meta.signature,
-                paths=meta.paths,
-                thread_id=meta.thread_id,
-                window_id=meta.window_id,
-                position=meta.position,
-                agent=meta.agent,
-                mode=meta.mode,
-                test_command=meta.test_command,
-                attempts=meta.attempts,
+                source=hit.document_name,
             )
-        meta = _replace_meta(meta, source=hit.document_name)
+        else:
+            meta = _replace_meta(meta, source=hit.document_name)
         return meta, body
 
     def _bonus(self, meta: DocumentMeta) -> float:
         """Reward the two facts the engine cannot rank."""
         bonus = 0.0
-        if (
-            self.signature_hash
-            and meta.signature
-            and _digest_of(meta.signature) == self.signature_hash
-        ):
+        if self.signature_hash and meta.signature_hash == self.signature_hash:
             bonus += SIGNATURE_BONUS
         if self.touched_paths and meta.paths:
             touched = {path.rsplit("/", 1)[-1] for path in self.touched_paths}
@@ -330,23 +334,39 @@ class ContextAssembler:
 
     # ------------------------------------------------------------- budget ---
     def _budget(
-        self, candidates: Sequence[_Candidate], max_chars: int
+        self,
+        candidates: Sequence[_Candidate],
+        max_chars: int,
+        reserved: int = 0,
     ) -> List[_Candidate]:
-        """Apply per-source caps and the mode's character budget."""
+        """
+        Apply per-source caps and the mode's character budget.
+
+        The budget is charged for everything the block is made of: the markers,
+        the intro, the title of every section that ends up with an entry, each
+        entry, and whatever this turn contributes itself (:attr:`reserved`).
+        Counting only the entries let a mode's documented budget be exceeded by
+        the section headings alone.
+        """
         used: Dict[str, int] = {}
+        opened: set = set()
         chosen: List[_Candidate] = []
-        overhead = len(BLOCK_OPEN) + len(BLOCK_CLOSE) + len(_INTRO) + 8
-        spent = overhead
+        spent = _block_overhead() + reserved
         for candidate in candidates:
             kind = candidate.hit.category
             if used.get(kind, 0) >= candidate.source_max:
                 continue
             cost = len(_entry(candidate)) + 1
+            if kind not in opened:
+                cost += len(_section_title(kind)) + 1
             if spent + cost > max_chars:
                 continue
             chosen.append(candidate)
+            opened.add(kind)
             used[kind] = used.get(kind, 0) + 1
             spent += cost
+        if not chosen:
+            chosen = _force_one_recipe(candidates, max_chars - spent, opened)
         return chosen
 
     # -------------------------------------------------------------- render --
@@ -362,7 +382,7 @@ class ContextAssembler:
         if extra_lines:
             deadend_section = _section_index(KIND_DEADEND)
             grouped.setdefault(deadend_section, []).extend(
-                f"- this turn already: {line.strip()}" for line in extra_lines
+                _extra_line(line) for line in extra_lines
             )
         parts = [BLOCK_OPEN, _INTRO]
         for index, (_, title) in enumerate(_SECTIONS):
@@ -374,8 +394,15 @@ class ContextAssembler:
         return "\n".join(parts)
 
 
-def _entry(candidate: _Candidate) -> str:
-    """Render one hit as one bullet of its section."""
+def _entry(candidate: _Candidate, limit: Optional[int] = None) -> str:
+    """
+    Render one hit as one bullet of its section.
+
+    ``limit`` cuts the quoted text so the rendered line is at most that long;
+    it defaults to the ceiling the candidate was given when it was selected,
+    and is used only when the block has room for nothing else and the
+    alternative is injecting no recipe at all.
+    """
     hit = candidate.hit
     citation = [hit.category]
     if hit.created_at:
@@ -386,10 +413,86 @@ def _entry(candidate: _Candidate) -> str:
         )
     if hit.paths:
         citation.append(", ".join(hit.paths[:4]))
+    head = f"- [{' · '.join(part for part in citation if part)}] "
     text = hit.text.replace("\n", " ").strip()
     if len(text) > _QUOTE_CHARS:
         text = text[:_QUOTE_CHARS].rstrip() + "…"
-    return f"- [{' · '.join(part for part in citation if part)}] {text}"
+    ceiling = candidate.render_limit if limit is None else limit
+    if 0 < ceiling < len(head) + len(text):
+        room = ceiling - len(head) - 1
+        if room < _MIN_QUOTE_CHARS:
+            return ""
+        text = text[:room].rstrip() + "…"
+    return head + text
+
+
+def _block_overhead() -> int:
+    """What the block costs before any entry: markers, intro, blank lines."""
+    return len(BLOCK_OPEN) + len(BLOCK_CLOSE) + len(_INTRO) + 8
+
+
+def _section_title(kind: str) -> str:
+    """The heading one kind renders under, or ``""`` when it opens no section."""
+    for name, title in _SECTIONS:
+        if name == kind:
+            return title
+    return ""
+
+
+def _extra_line(line: str) -> str:
+    """Render one "this turn already tried" line."""
+    return f"- this turn already: {line.strip()}"
+
+
+def _extra_cost(lines: Sequence[str]) -> int:
+    """What the turn's own lines will cost in the rendered block."""
+    if not lines:
+        return 0
+    cost = len(_section_title(KIND_DEADEND)) + 1
+    return cost + sum(len(_extra_line(line)) + 1 for line in lines)
+
+
+def _fit_extra(lines: Sequence[str], budget: int) -> Tuple[str, ...]:
+    """Keep as many of the turn's own lines as the mode's budget allows."""
+    if budget <= 0:
+        return ()
+    kept: List[str] = []
+    spent = len(_section_title(KIND_DEADEND)) + 1
+    for line in lines:
+        cost = len(_extra_line(line)) + 1
+        if spent + cost > budget:
+            break
+        kept.append(line)
+        spent += cost
+    return tuple(kept)
+
+
+def _force_one_recipe(
+    candidates: Sequence[_Candidate], room: int, opened: set
+) -> List[_Candidate]:
+    """
+    Make room for the best recipe when nothing else fit.
+
+    A mode that asked for recipes and has one should not answer with an empty
+    block because the first candidate was verbose: the entry is shortened to
+    what is left rather than dropped.
+    """
+    for candidate in candidates:
+        if candidate.hit.category != KIND_RECIPE:
+            continue
+        available = room
+        if KIND_RECIPE not in opened:
+            available -= len(_section_title(KIND_RECIPE)) + 1
+        # A limit of 0 means "no ceiling" to `_entry`, so it must never be what
+        # a too-small `available` collapses to — that would render the recipe at
+        # full length and blow the mode's budget.  No room means no recipe.
+        limit = available - 1
+        if limit <= 0:
+            return []
+        if not _entry(candidate, limit=limit):
+            return []
+        return [_replace_meta(candidate, render_limit=limit)]
+    return []
 
 
 def _section_index(kind: str) -> int:
@@ -400,15 +503,55 @@ def _section_index(kind: str) -> int:
     return len(_SECTIONS)
 
 
+def best_recipe_score(hits: Iterable[KnowledgeHit]) -> float:
+    """
+    Return how strongly the best recipe matches, on the engine's own scale.
+
+    This is the number the escalation policy compares against
+    ``strong_recipe_score``, so it is the *normalized relevance the engine
+    reported* and not the weighted vote that ordered the block: a source's
+    weight and the signature and path bonuses decide what is read first, while
+    the threshold has to mean the same thing in every mode's policy.
+    """
+    recipes = [hit.score for hit in hits if (hit.category or "") == KIND_RECIPE]
+    return max(recipes) if recipes else 0.0
+
+
+def deadends_of(hits: Iterable[KnowledgeHit]) -> Tuple[KnowledgeHit, ...]:
+    """Return the dead ends among *hits*, in the order they were rendered."""
+    return tuple(hit for hit in hits if (hit.category or "") == KIND_DEADEND)
+
+
 def _kind_from_categories(hit: StoreHit, categories: Sequence[str]) -> str:
-    """Guess a kind from the search that returned the chunk."""
-    for kind in DOCUMENT_KINDS:
-        if kind in categories:
-            return kind
+    """
+    Read a kind from a chunk that carries no header.
+
+    The document name is the reliable signal — this plugin names every document
+    it writes ``<kind>:<day>:<fingerprint>``.  Failing that, a search that asked
+    for exactly one kind says what came back; a search that asked for several
+    says nothing, and guessing the first would file a conventions page under
+    “verified fixes”, at the recipes' weight and as a recipe for the escalation
+    policy to believe.
+    """
     match = re.match(r"^([a-z_]+):", hit.document_name or "")
     if match and match.group(1) in DOCUMENT_KINDS:
         return match.group(1)
+    named = [kind for kind in DOCUMENT_KINDS if kind in categories]
+    if len(categories) == 1 and named:
+        return named[0]
     return KIND_DOC
+
+
+def _deduplicated(lines: Iterable[str]) -> Tuple[str, ...]:
+    """Keep the first of every equal line, preserving order."""
+    seen = set()
+    kept: List[str] = []
+    for line in lines:
+        if line in seen:
+            continue
+        seen.add(line)
+        kept.append(line)
+    return tuple(kept)
 
 
 def _clean(body: str) -> str:
@@ -425,17 +568,3 @@ def _timestamp(date: Optional[datetime.date]) -> Optional[float]:
         date.year, date.month, date.day, tzinfo=datetime.timezone.utc
     )
     return moment.timestamp()
-
-
-def _digest_of(signature: str) -> str:
-    """Recompute a signature digest for comparison with a document's."""
-    from llm_router_plugins.utils.knowledge.agentic_knowledge.signature import (
-        signature_of,
-    )
-
-    computed = signature_of(signature)
-    if computed is not None:
-        return computed.signature_hash
-    import hashlib
-
-    return hashlib.sha256(signature.encode("utf-8")).hexdigest()[:16]

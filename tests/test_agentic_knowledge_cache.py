@@ -79,3 +79,37 @@ def test_lookup_limiter_isolated_per_generation():
     assert limiter.allow("repo", "gen")
     assert not limiter.allow("repo", "gen")
     assert limiter.allow("other", "gen")
+
+
+def test_decode_drops_malformed_entries_instead_of_raising():
+    # A cache value is foreign input: an older build sharing this schema number,
+    # or anything else with the key prefix, can leave a field of the wrong type.
+    # Decoding must miss, never raise — a raise propagates out of apply().
+    import json
+
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import _decode
+
+    assert _decode(json.dumps({"schema": 1, "chars": "not-an-int"})) is None
+    assert (
+        _decode(
+            json.dumps(
+                {"schema": 1, "hits": [{"score": "high", "category": "recipe"}]}
+            )
+        )
+        is None
+    )
+    # A non-list `hits` is not a crash either — it is no hits.
+    degraded = _decode(json.dumps({"schema": 1, "hits": 5, "rendered": "x"}))
+    assert degraded is None or degraded.context.hits == ()
+
+
+def test_decode_still_reads_a_good_entry():
+    import json
+
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
+        _decode,
+        _encode,
+    )
+
+    decoded = _decode(_encode(entry()))
+    assert decoded is not None and decoded.mode == "debug"

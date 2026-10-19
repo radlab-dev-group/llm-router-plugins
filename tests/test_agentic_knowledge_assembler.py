@@ -112,3 +112,56 @@ def test_a_document_named_for_one_kind_is_not_misclassified():
     context = assemble(results_for(hit(category="recipe", score=0.9)))
     assert context.best_recipe_score > 0
     assert all(h.category == "recipe" for h in context.hits)
+
+
+def test_a_headerless_document_from_a_multi_kind_search_is_a_document():
+    """
+    Conventions are not verified fixes, whatever the search happened to ask.
+
+    One request covers a collection's several kinds, so the request's categories
+    cannot label a chunk that carries neither a header nor a plugin name.
+    Guessing one would file a conventions page under “verified fixes”, at the
+    recipes' weight, and hand the escalation policy a “strong recipe” that is
+    only a style guide.
+    """
+    from agentic_knowledge_support import StoreHit
+
+    page = StoreHit(
+        collection="agentic-kb-webapp",
+        document_name="conventions.md",
+        text="Use four spaces and keyword arguments.",
+        score=0.95,
+        score_normalized=0.95,
+    )
+    context = assemble(
+        ((SearchResult(STATUS_OK, hits=(page,)), ("recipe", "doc")),),
+        mode="implement",
+    )
+    assert context.hits[0].category == "doc"
+    assert "## Verified fixes in this repo" not in context.rendered
+    assert context.best_recipe_score == 0.0
+
+
+def test_a_forced_recipe_never_breaks_the_character_budget():
+    # When nothing else fit, the best recipe is shortened to the room left —
+    # not rendered at full length.  A limit that collapsed to 0 used to be read
+    # by the entry renderer as "no ceiling", so a near-the-floor budget produced
+    # an injection several times over max_chars.
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        ModePolicy,
+        SourcePolicy,
+    )
+
+    long_text = build_document_text(
+        "recipe", "a long verified fix " * 40, date=datetime.date.today()
+    )
+    policy = ModePolicy(
+        name="debug",
+        max_chars=200,
+        sources=(SourcePolicy(category="recipe", weight=1.0, max_items=3),),
+    )
+    results = (
+        (SearchResult(STATUS_OK, hits=(store_hit(text=long_text),)), ("recipe",)),
+    )
+    context = ContextAssembler().assemble(results, policy)
+    assert context.chars <= policy.max_chars
