@@ -55,6 +55,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import (
 from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
     RedisConnectionSettings,
     connection_from_env,
+    validate_connection,
 )
 
 __all__ = [
@@ -68,7 +69,11 @@ __all__ = [
 #: Prefix of every environment variable this plugin reads.
 AGENTIC_KNOWLEDGE_ENV_PREFIX = "LLM_ROUTER_KNOWLEDGE_AGENTIC_"
 
-_DEFAULT_SSE_PREFIX = "/api/v1"
+#: Empty means "ask the client library", which resolves its own default
+#: (``api``, or ``SSE_API_PREFIX``) — see :meth:`KnowledgeStore._ensure_client`.
+#: A guessed ``/api/v1`` here would 404 against an unversioned deployment and
+#: fail open into a silently knowledge-less proxy.
+_DEFAULT_SSE_PREFIX = ""
 _DEFAULT_STREAM_KEY = "agentic_kb:events"
 _DEFAULT_KEY_PREFIX = "agentic-kb"
 
@@ -207,6 +212,9 @@ class AgenticKnowledgeConfig:
     scope_default: str = ""
 
     read_enabled: bool = True
+    #: Budget of the read path: how long the knowledge layer may spend on the
+    #: engine for one request.  It drives the engine client's own timeout, so
+    #: the number the operator wrote is the number a request waits.
     read_timeout_seconds: float = _DEFAULT_READ_TIMEOUT_SECONDS
     min_similarity: float = _DEFAULT_MIN_SIMILARITY
     cache_ttl_seconds: int = _DEFAULT_CACHE_TTL_SECONDS
@@ -237,6 +245,9 @@ class AgenticKnowledgeConfig:
 
     redis: RedisConnectionSettings = field(default_factory=RedisConnectionSettings)
     worker: WorkerSettings = field(default_factory=WorkerSettings)
+    #: Why the Redis connection was discarded, when :meth:`override_from_env`
+    #: dropped a malformed one; empty when the settings were accepted.
+    redis_error: str = ""
 
     # ---------------------------------------------------------------- load ---
     @classmethod
@@ -321,7 +332,7 @@ class AgenticKnowledgeConfig:
             scope_overrides=_overrides(scope.get("overrides", {})),
             scope_default=str(scope.get("default", "") or ""),
             read_enabled=_boolean(read.get("enabled", True), "read.enabled"),
-            read_timeout_seconds=_positive(
+            read_timeout_seconds=_positive_float(
                 read.get("timeout_seconds", _DEFAULT_READ_TIMEOUT_SECONDS),
                 "read.timeout_seconds",
             ),
@@ -406,21 +417,28 @@ class AgenticKnowledgeConfig:
             ("WRITE_ENABLED", "write_enabled", _boolean),
             ("ESCALATION_ENABLED", "escalation_enabled", _boolean),
             ("ARCHIVE_ENABLED", "archive_enabled", _boolean),
-            ("COLLECTION_PREFIX", "collection_prefix", _safe_text),
-            ("KEY_PREFIX", "key_prefix", _safe_text),
+            # The same `_safe` the JSON goes through: an env prefix is cut to a
+            # collection-name fragment, not merely checked for emptiness, or
+            # `--foo` from the environment would reach the collection names.
+            ("COLLECTION_PREFIX", "collection_prefix", _safe),
+            ("KEY_PREFIX", "key_prefix", _safe),
             ("SSE_API_HOST", "sse_host", _text),
             ("SSE_API_PREFIX", "sse_prefix", _text),
             ("SSE_API_TOKEN", "sse_token", _text),
             ("SSE_VERIFY", "sse_verify", _boolean),
         ):
-            raw = os.getenv(f"{prefix}{name}")
-            if raw is None or raw == "":
+            raw = _env_override(prefix, name)
+            if raw is None:
                 continue
             setattr(self, target, cast(raw, f"{prefix}{name}"))
 
+        # Whether the operator pinned the transport timeout apart from the read
+        # budget; `SSE_API_TIMEOUT` is one name among many below, so the flag
+        # has to start false rather than appear with it.
+        sse_timeout_overridden = False
         for name, target, cast in (
-            ("SSE_API_TIMEOUT", "sse_timeout_seconds", _positive),
-            ("READ_TIMEOUT_SECONDS", "read_timeout_seconds", _positive),
+            ("SSE_API_TIMEOUT", "sse_timeout_seconds", _positive_float),
+            ("READ_TIMEOUT_SECONDS", "read_timeout_seconds", _positive_float),
             ("MIN_SIMILARITY", "min_similarity", _fraction),
             ("CACHE_TTL_SECONDS", "cache_ttl_seconds", _positive),
             ("MAX_LOOKUPS_PER_GENERATION", "max_lookups_per_generation", _positive),
@@ -432,22 +450,42 @@ class AgenticKnowledgeConfig:
             ("LOOP_THRESHOLD", "loop_threshold", _positive),
             ("STRONG_RECIPE_SCORE", "strong_recipe_score", _fraction),
         ):
-            raw = os.getenv(f"{prefix}{name}")
-            if raw is None or raw == "":
+            raw = _env_override(prefix, name)
+            if raw is None:
                 continue
             setattr(self, target, cast(raw, f"{prefix}{name}"))
+            if name == "SSE_API_TIMEOUT":
+                sse_timeout_overridden = True
 
+        # The read budget is what a request waits for the engine; the transport
+        # timeout is the same number unless the operator said otherwise.  Left
+        # as two fields because the worker indexes with a far longer timeout
+        # than the proxy searches with, and shares this one.
+        if not sse_timeout_overridden:
+            self.sse_timeout_seconds = self.read_timeout_seconds
         # A request path may not wait forever, whatever the operator set.
         self.sse_timeout_seconds = min(
             max(self.sse_timeout_seconds, 0.1), _MAX_SSE_TIMEOUT_SECONDS
         )
+        self.read_timeout_seconds = min(
+            max(self.read_timeout_seconds, 0.1), _MAX_SSE_TIMEOUT_SECONDS
+        )
         self.worker = _worker_from_env(self.worker, prefix)
         try:
-            self.redis = connection_from_env(prefix)
+            connection = connection_from_env(prefix)
+            # `connection_from_env` only parses; this is where an out-of-range
+            # port, database, protocol or a non-positive timeout is caught, so
+            # a typo surfaces here instead of as a warning on every request.
+            validate_connection(connection)
+            self.redis = connection
         except ValueError as exc:
             # A malformed connection setting does not invalidate the policy;
-            # the feature it belongs to is simply unavailable.
+            # the feature it belongs to is simply unavailable.  It is said out
+            # loud, though: an operator who set a port and got a write path that
+            # never writes has to be able to find out why without a debugger,
+            # and the worker is the process that would notice first.
             self.redis = RedisConnectionSettings()
+            self.redis_error = str(exc)
             if logger is not None:
                 logger.warning("Agentic knowledge Redis connection ignored: %s", exc)
         return self
@@ -494,6 +532,16 @@ class AgenticKnowledgeConfig:
                     raise ValueError(
                         f"modes.{policy.name} source {source.category} "
                         "must allow at least one item"
+                    )
+                if not 0.0 < float(source.weight) <= 1.0:
+                    # A source's weight multiplies a normalized score, so it
+                    # has to stay inside the interval the escalation threshold
+                    # (``strong_recipe_score``) is read against: a weight above
+                    # 1 would inflate a weak recipe past it, a negative one
+                    # would rank a hit below nothing.
+                    raise ValueError(
+                        f"modes.{policy.name} source {source.category} "
+                        f"weight must be in (0, 1], got {source.weight}"
                     )
 
     # ------------------------------------------------------------ readiness -
@@ -699,6 +747,20 @@ def _mode_map(raw: Any) -> Dict[str, str]:
     return {str(key): str(value) for key, value in raw.items() if str(value).strip()}
 
 
+def _env_override(prefix: str, name: str) -> Optional[str]:
+    """
+    Read one variable of this plugin's prefix, ``None`` when it is not set.
+
+    A variable that is present but empty is an override attempt like any other
+    and goes on to be validated — the contract the Codex memory settings use
+    (``state._resolve``) and the reason a mistyped value cannot quietly leave
+    the policy at its default.  Only a variable that is genuinely absent from
+    the environment falls back.
+    """
+    raw = os.environ.get(f"{prefix}{name}")
+    return None if raw is None else raw.strip()
+
+
 def _worker_from_env(worker: WorkerSettings, prefix: str) -> WorkerSettings:
     """Build worker settings over the environment."""
     values: Dict[str, Any] = {}
@@ -715,8 +777,8 @@ def _worker_from_env(worker: WorkerSettings, prefix: str) -> WorkerSettings:
         ("RETENTION_INTERVAL_SECONDS", "retention_interval_seconds", _non_negative),
         ("MAX_PENDING", "max_pending", _positive),
     ):
-        raw = os.getenv(f"{prefix}{name}")
-        if raw is None or raw == "":
+        raw = _env_override(prefix, name)
+        if raw is None:
             continue
         values[target] = cast(raw, f"{prefix}{name}")
     index_type = values.get("index_type", worker.index_type)
@@ -746,6 +808,21 @@ def _positive(value: Any, label: str) -> int:
     if int(number) <= 0:
         raise ValueError(f"{label} must be a positive integer, got {value!r}")
     return int(number)
+
+
+def _positive_float(value: Any, label: str) -> float:
+    """
+    Read a strictly positive duration.
+
+    A separate cast because a timeout is not a count: reading ``1.5`` as an
+    integer quietly makes it ``1``, and reading a deliberate ``0.5`` makes it
+    ``0`` and then an error, so the sub-second budgets a request path actually
+    wants would be the one thing the configuration refused to say.
+    """
+    number = _number(value, label)
+    if float(number) <= 0:
+        raise ValueError(f"{label} must be a positive number, got {value!r}")
+    return float(number)
 
 
 def _non_negative(value: Any, label: str) -> int:

@@ -114,6 +114,52 @@ def test_env_prefix_is_stable():
     assert AGENTIC_KNOWLEDGE_ENV_PREFIX == "LLM_ROUTER_KNOWLEDGE_AGENTIC_"
 
 
+def test_an_empty_env_variable_is_validated_not_ignored(monkeypatch):
+    """
+    `VAR=` is an override attempt, not a variable that was never set.
+
+    Silently ignoring it is how a deployment ends up with the default budget
+    after an operator meant to change it and typed the value into the wrong
+    line of the unit file.
+    """
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}MIN_SIMILARITY", "")
+    config = AgenticKnowledgeConfig.from_file()
+    with pytest.raises(ValueError):
+        config.override_from_env()
+
+
+def test_a_malformed_env_number_names_the_variable(monkeypatch):
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}LOOP_THRESHOLD", "three")
+    config = AgenticKnowledgeConfig.from_file()
+    with pytest.raises(ValueError, match="LOOP_THRESHOLD"):
+        config.override_from_env()
+
+
+def test_an_env_collection_prefix_is_cut_like_the_json_one(monkeypatch):
+    """The environment must not be a way to reach the collection names raw."""
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}COLLECTION_PREFIX", "--foo")
+    config = AgenticKnowledgeConfig.from_file()
+    config.override_from_env()
+    assert config.collection_prefix == "foo"
+
+
+def test_a_malformed_redis_connection_is_reported(monkeypatch):
+    """Redis off is survivable, but the operator has to be able to see why."""
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}REDIS_PORT", "not-a-port")
+    config = AgenticKnowledgeConfig.from_file()
+    config.override_from_env()
+    assert config.redis.configured is False
+    assert config.redis_error
+
+
+def test_a_working_redis_connection_leaves_no_error(monkeypatch):
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}REDIS_HOST", "redis.internal")
+    config = AgenticKnowledgeConfig.from_file()
+    config.override_from_env()
+    assert config.redis.configured is True
+    assert config.redis_error == ""
+
+
 def test_mode_and_source_policies_are_frozen():
     policy = ModePolicy(name="debug", sources=(SourcePolicy("recipe", 1.0, 3),))
     with pytest.raises(Exception):

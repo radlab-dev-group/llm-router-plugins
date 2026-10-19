@@ -314,7 +314,7 @@ All use the prefix `LLM_ROUTER_KNOWLEDGE_AGENTIC_`. Booleans accept `1/0`, `true
 | `…_COLLECTION_PREFIX`                 | `agentic-kb`     | prefix of every SSE collection                           |
 | `…_KEY_PREFIX`                        | `agentic-kb`     | Redis key namespace                                      |
 | `…_SSE_API_HOST`                      | **empty**        | **empty ⇒ no reads**                                     |
-| `…_SSE_API_PREFIX`                    | `/api/v1`        | SSE API prefix                                           |
+| `…_SSE_API_PREFIX`                    | **empty**        | empty ⇒ `sse_lib.endpoints.DEFAULT_API_PREFIX` (`api`); set it only when the engine is mounted elsewhere |
 | `…_SSE_API_TOKEN`                     | empty            | SSE token (never logged)                                 |
 | `…_SSE_API_TIMEOUT`                   | `1.5`            | per-request ceiling, clamped to `0.1…10` s               |
 | `…_SSE_VERIFY`                        | `true`           | TLS certificate verification                             |
@@ -432,5 +432,5 @@ leak-free.
 ## See also
 
 - `llm_router_plugins/utils/routing/agentic_routing/codex/README.md` — the routing plugin this layer builds on.
-- `agentic-knowledge-layer.md` in the repository root — the plan this implementation follows.
+- `../../../../agentic-knowledge-layer-re.md` in the repository root — the plan this implementation follows.
 - `scripts/agentic-kb-eval.sh` — the offline replay.
