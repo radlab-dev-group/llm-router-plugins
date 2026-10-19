@@ -32,7 +32,7 @@ import datetime
 import re
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
     AgentTurn,
@@ -66,6 +66,17 @@ _RECIPE_MIN_PATCHES = 1
 
 _WINDOW_CHUNK_RE = re.compile(r"\n(?=\[[a-z_]+\]\n)")
 
+#: A rerun that narrows the suite away: passing it says nothing about the tests
+#: that were left out, which is exactly the test that failed.
+_EXCLUSION_RE = re.compile(
+    r"(?:^|\s)(?:-k\b|--deselect|--ignore(?:-path)?|--collect-only|--co\b|-m\b)(?:\s|$)"
+)
+
+#: Source or test file a command line names.
+_TEST_FILE_RE = re.compile(
+    r"[\w./@-]+\.(?:py|pyi|go|rs|ts|tsx|js|jsx|java|kt|rb|php|cs|c|cc|cpp|h)"
+)
+
 
 @dataclass(frozen=True)
 class MiningResult:
@@ -97,9 +108,41 @@ class _Failure:
 
     evidence: PhaseEvidence
     signature: Optional[ErrorSignature]
+    #: The command whose output failed, read back out of the activity; what a
+    #: green run has to be compared against to count as a verification.
+    command: str = ""
     patches: List[PhaseEvidence] = field(default_factory=list)
+    #: Position of each patch in the evidence sequence; a test run verifies a
+    #: fix only if it came after the last of them.
+    patch_positions: List[int] = field(default_factory=list)
     later_failures: List[PhaseEvidence] = field(default_factory=list)
     resolved_by: Optional[PhaseEvidence] = None
+    #: Command line of the green run; "" when there was none.
+    green_command: str = ""
+    #: Position of the green run, ``-1`` when there was none.
+    resolved_at: int = -1
+
+    @property
+    def first_identity(self) -> str:
+        """Identity of the first attempted patch; the episode's own fingerprint.
+
+        The *first* patch, not the set of them: Codex replays the whole turn on
+        every request, so a set grows as the turn goes on and a fingerprint built
+        from it changes mid-episode — which publishes the same episode once per
+        attempt and leaves the superseded documents indexed.
+        """
+        if not self.patches:
+            return ""
+        first = self.patches[0]
+        return first.call_id or first.event_id or ""
+
+    def verified(self) -> bool:
+        """Whether a green run after the last patch actually re-ran this failure."""
+        if self.resolved_by is None or not self.patch_positions:
+            return False
+        if self.resolved_at < max(self.patch_positions):
+            return False
+        return _verifies(self.command, self.green_command)
 
 
 class EpisodeMiner:
@@ -157,23 +200,17 @@ class EpisodeMiner:
         events = [
             event
             for event in (
-                [
-                    *(
-                        self._recipe(turn, item)
-                        for item in failures
-                        if item.resolved_by
-                    ),
-                    *(
-                        self._deadend(turn, item)
-                        for item in failures
-                        if item.later_failures
-                    ),
-                ]
+                *(self._recipe(turn, item) for item in failures if item.verified()),
+                *(
+                    self._deadend(turn, item)
+                    for item in failures
+                    if item.later_failures
+                ),
             )
             if event is not None
         ]
         loop = self._loop(turn, failures)
-        tried = tuple(
+        tried = _deduplicated(
             tried
             for tried in (self._summary(turn, item) for item in failures)
             if tried
@@ -187,28 +224,61 @@ class EpisodeMiner:
 
     # ------------------------------------------------------------- episodes -
     def _episodes(self, turn: AgentTurn) -> List[_Failure]:
-        """Group the turn's evidence into failures and what followed them."""
+        """
+        Group the turn's evidence into failures and what followed them.
+
+        Episodes are keyed by failure *signature*, not by position: an agent that
+        ping-pongs between two errors (`A, patch, B, patch, A`) has two episodes,
+        each with its own dead end, and comparing only with the newest one would
+        report neither.
+
+        A repeated signature joins the episode it belongs to and takes back any
+        green run in between — a test that passed once and then failed again on
+        the same signature did not verify anything, and publishing it as a recipe
+        would both write a fix that does not work and hand the escalation policy
+        a "strong recipe" that keeps the looping model in place.
+        """
         texts = _output_texts(turn)
-        failures: List[_Failure] = []
-        for evidence in turn.evidence:
+        commands = _call_arguments(turn)
+        episodes: List[_Failure] = []
+        by_signature: Dict[str, _Failure] = {}
+        latest: Optional[_Failure] = None
+        for position, evidence in enumerate(turn.evidence):
             if evidence.kind == EVIDENCE_TEST_FAILURE:
                 signature = signature_of(texts.get(evidence.call_id, ""))
-                previous = failures[-1] if failures else None
-                if previous is not None and _same_failure(previous, signature):
-                    # The same wall again: this is what makes it a dead end,
-                    # and it does not start a new episode.
-                    previous.later_failures.append(evidence)
+                known = (
+                    by_signature.get(signature.signature_hash)
+                    if signature is not None
+                    else None
+                )
+                if known is not None:
+                    known.later_failures.append(evidence)
+                    known.resolved_by = None
+                    known.resolved_at = -1
+                    known.green_command = ""
+                    latest = known
                     continue
-                failures.append(_Failure(evidence=evidence, signature=signature))
+                latest = _Failure(
+                    evidence=evidence,
+                    signature=signature,
+                    command=_command_line(commands.get(evidence.call_id) or ""),
+                )
+                episodes.append(latest)
+                if signature is not None:
+                    by_signature[signature.signature_hash] = latest
                 continue
-            if not failures:
+            if latest is None:
                 continue
-            latest = failures[-1]
             if evidence.kind == EVIDENCE_PATCH:
                 latest.patches.append(evidence)
+                latest.patch_positions.append(position)
             elif self._is_green_test(evidence):
                 latest.resolved_by = evidence
-        return failures
+                latest.resolved_at = position
+                latest.green_command = _command_line(
+                    commands.get(evidence.call_id) or ""
+                )
+        return episodes
 
     def _failure_evidence(self, turn: AgentTurn) -> List[PhaseEvidence]:
         """Every test failure of this turn, including repeats."""
@@ -223,18 +293,27 @@ class EpisodeMiner:
         )
 
     def _loop(self, turn: AgentTurn, failures: List[_Failure]) -> MiningResult:
-        """Count the repetitions of the most frequent failure of this turn."""
+        """
+        Count the repetitions of the failure this turn is stuck on.
+
+        On a tie the *most recently seen* failure wins: a turn that failed A
+        twice and then B twice ended on B, and the loop identity is what the
+        injected advice and the escalation annotation are about.  Breaking the
+        tie by hash would make it arbitrary — same loop, arbitrary identity.
+        """
         texts = _output_texts(turn)
         counts: Dict[str, int] = {}
-        for evidence in self._failure_evidence(turn):
+        seen_at: Dict[str, int] = {}
+        for position, evidence in enumerate(self._failure_evidence(turn)):
             signature = signature_of(texts.get(evidence.call_id, ""))
             key = signature.signature_hash if signature else ""
             if not key:
                 key = evidence.call_id or evidence.event_id or "?"
             counts[key] = counts.get(key, 0) + 1
+            seen_at[key] = position
         if not counts:
             return MiningResult()
-        key = max(counts, key=lambda name: (counts[name], name))
+        key = max(counts, key=lambda name: (counts[name], seen_at[name]))
         return MiningResult(loop_count=counts[key], signature_hash=key)
 
     def _summary(self, turn: AgentTurn, failure: _Failure) -> str:
@@ -252,7 +331,9 @@ class EpisodeMiner:
         if len(failure.patches) < _RECIPE_MIN_PATCHES or failure.signature is None:
             return None
         patch_text = self._patch_text(turn, failure.patches)
-        command = self._command_text(turn, failure.resolved_by)
+        command = failure.green_command or self._command_text(
+            turn, failure.resolved_by
+        )
         body = "\n".join(
             part
             for part in (
@@ -265,21 +346,12 @@ class EpisodeMiner:
             )
             if part is not None
         )
-        identities = tuple(
-            sorted(
-                {
-                    item.call_id or item.event_id
-                    for item in (*failure.patches, failure.resolved_by)
-                    if item is not None and (item.call_id or item.event_id)
-                }
-            )
-        )
         return self._event(
             turn,
             KIND_RECIPE,
             body,
             signature=failure.signature,
-            parts=("recipe", failure.signature.signature_hash, *identities),
+            parts=self._episode_parts(turn, "recipe", failure),
             test_command=command,
             paths=_merge_paths(turn.touched_paths, failure.signature.paths),
         )
@@ -302,24 +374,38 @@ class EpisodeMiner:
                 patch_text,
             )
         )
-        identities = tuple(
-            sorted(
-                {
-                    item.call_id or item.event_id
-                    for item in (*failure.patches, *failure.later_failures)
-                    if item.call_id or item.event_id
-                }
-            )
-        )
         return self._event(
             turn,
             KIND_DEADEND,
             body,
             signature=failure.signature,
-            parts=("deadend", failure.signature.signature_hash, *identities),
-            test_command=self._command_text(turn, failure.evidence),
+            parts=self._episode_parts(turn, "deadend", failure),
+            test_command=failure.command
+            or self._command_text(turn, failure.evidence),
             paths=_merge_paths(turn.touched_paths, failure.signature.paths),
         )
+
+    def _episode_parts(
+        self, turn: AgentTurn, kind: str, failure: _Failure
+    ) -> Tuple[str, ...]:
+        """
+        The fingerprint parts of one episode: what it is, where, of what.
+
+        Scope belongs in the digest because the deduplication key does not carry
+        it — without it, two repositories that hit the same normalized failure
+        would compute the same fingerprint and the second one's episode would be
+        dropped as a duplicate of the first.  The identity of the *first* patch
+        belongs in it because it names this episode and never changes while the
+        turn replays; the patches and failures that came after it do change, and
+        a digest that covered them would publish one document per attempt.
+        """
+        parts: List[str] = [
+            kind,
+            failure.signature.signature_hash if failure.signature else "",
+            turn.scope,
+            failure.first_identity,
+        ]
+        return tuple(part for part in parts if part)
 
     # ------------------------------------------------------------ archive ---
     def _archive(self, turn: AgentTurn) -> Tuple[KnowledgeEvent, ...]:
@@ -388,6 +474,7 @@ class EpisodeMiner:
             body,
             date=_today(),
             signature=signature.signature if signature else "",
+            signature_hash=signature.signature_hash if signature else "",
             paths=paths,
             thread_id=turn.thread_id,
             agent=turn.agent,
@@ -495,6 +582,64 @@ def _same_failure(previous: _Failure, signature: Optional[ErrorSignature]) -> bo
     if signature is None or previous.signature is None:
         return False
     return signature.signature_hash == previous.signature.signature_hash
+
+
+def _deduplicated(lines: Iterable[str]) -> Tuple[str, ...]:
+    """Keep the first of every equal line, in order."""
+    seen: set = set()
+    kept: List[str] = []
+    for line in lines:
+        if line in seen:
+            continue
+        seen.add(line)
+        kept.append(line)
+    return tuple(kept)
+
+
+def _normalized_command(raw: str) -> str:
+    """A command line compared against another one: whitespace, not much else."""
+    return " ".join((raw or "").split())
+
+
+def _test_files(command: str) -> Tuple[str, ...]:
+    """Test file paths a command names, e.g. ``pytest tests/test_a.py``."""
+    return tuple(_TEST_FILE_RE.findall(command or ""))
+
+
+def _verifies(failing: str, green: str) -> bool:
+    """
+    Whether a green run is the failing test, run again.
+
+    A recipe is the strongest claim this layer makes — it says *this* change made
+    *this* failure pass — and the escalation policy trusts it: a recipe scoring
+    above the strong-recipe threshold is what keeps a looping model in place.  So
+    "a command exited 0 afterwards" is not enough.  ``pytest -k 'not test_total'``,
+    a different test file, and ``--collect-only`` all go green while proving
+    nothing, and a recipe written from one of them is worse than no recipe at all.
+
+    Parameters
+    ----------
+    failing : str
+        Command whose output produced the failure.
+    green : str
+        Command that exited successfully after the fix.
+
+    Returns
+    -------
+    bool
+        ``True`` when the green run re-ran the failing test: the same command, or
+        the same named test files without narrowing anything away.
+    """
+    left = _normalized_command(failing)
+    right = _normalized_command(green)
+    if not left or not right:
+        return False
+    if _EXCLUSION_RE.search(right):
+        return False
+    if left == right:
+        return True
+    named = _test_files(left)
+    return any(path in right for path in named)
 
 
 def _merge_paths(
