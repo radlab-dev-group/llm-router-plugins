@@ -152,6 +152,8 @@ class AgenticKnowledgePlugin(PluginInterface):
                 timeout_seconds=config.sse_timeout_seconds,
                 verify=config.sse_verify,
                 min_similarity=config.min_similarity,
+                hybrid_search=config.hybrid_search,
+                rerank_results=config.rerank_results,
                 logger=self._logger,
             )
         if self._publisher is None:
@@ -639,6 +641,11 @@ def _turn_shape(turn: Any) -> str:
     )
 
 
+def _on_off(value: bool) -> str:
+    """Render a switch the way the wiring line reads."""
+    return "on" if value else "off"
+
+
 def _wiring_summary(
     config: AgenticKnowledgeConfig, adapters: Optional[Tuple[AgentAdapter, ...]]
 ) -> str:
@@ -660,6 +667,8 @@ def _wiring_summary(
         f", engine={'configured' if config.sse_host.strip() else 'NOT configured'}"
         f", redis={'configured' if config.redis.configured else 'NOT configured'}"
         f", read={config.read_available}"
+        f", retrieval=hybrid:{_on_off(config.hybrid_search)}"
+        f"/rerank:{_on_off(config.rerank_results)}"
         f", write={config.write_available}"
         f", archive={config.archive_available}"
         f", escalation={config.escalation_available}"

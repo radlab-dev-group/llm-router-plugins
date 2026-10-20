@@ -346,6 +346,7 @@ means the feature is unavailable.
   "collection_prefix": "agentic_kb",
   "scope": {"strategy": "repo_basename", "overrides": {}, "default": ""},
   "read": {"enabled": true, "timeout_seconds": 1.5, "min_similarity": 0.35,
+            "hybrid_search": true, "rerank_results": false,
             "cache_ttl_seconds": 3600, "max_lookups_per_generation": 20},
   "modes": { "debug": {…}, "test": {…}, "implement": {…},
               "plan": {…}, "git_review": {…}, "review": {…} },
@@ -358,6 +359,15 @@ means the feature is unavailable.
   "escalation": {"enabled": false, "loop_threshold": 3, "strong_recipe_score": 0.75}
 }
 ```
+
+The retrieval legs of one search are `read.hybrid_search` and `read.rerank_results`,
+switched by `…_HYBRID_SEARCH` and `…_RERANK_RESULTS`.  They also decide the scale every score comes
+back on — the engine's `results.score_scale`: a squashed cross-encoder logit with the reranker on,
+a Reciprocal Rank Fusion rank in a plain hybrid search, and a cosine similarity when the legs are
+off — so `escalation.strong_recipe_score` is a threshold on that scale: a reranker logit under
+`rerank_results: true`, an RRF rank otherwise.  Raising it against an RRF scale is a no-op in
+practice, which is why the reranker stays off by default: it costs a model call per search and a
+collection whose engine serves no reranker answers nothing with it on.
 
 A mode accepts `max_chars`, `sources`, `escalation_model_name` and `cheap_model_name`. The last one is parsed and
 kept, but no policy in the code reads it yet — it is the model a strong recipe would recommend — so setting it
@@ -385,6 +395,8 @@ All use the prefix `LLM_ROUTER_KNOWLEDGE_AGENTIC_`. Booleans accept `1/0`, `true
 | `…_SSE_VERIFY`                        | `true`           | TLS certificate verification                             |
 | `…_READ_TIMEOUT_SECONDS`              | `1.5`            | read-path timeout budget                                 |
 | `…_MIN_SIMILARITY`                    | `0.35`           | floor for a hit                                          |
+| `…_HYBRID_SEARCH`                     | `true`           | fuse the vector leg with the full-text leg               |
+| `…_RERANK_RESULTS`                    | **`false`**      | re-score the hits with the collection's cross-encoder    |
 | `…_CACHE_TTL_SECONDS`                 | `3600`           | lifetime of one generation's context                     |
 | `…_MAX_LOOKUPS_PER_GENERATION`        | `20`             | per-process ceiling on searches, applied with or without Redis |
 | `…_MAX_STREAM_LEN`                    | `100000`         | `XADD MAXLEN ~`                                          |

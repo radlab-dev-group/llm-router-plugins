@@ -215,6 +215,13 @@ class KnowledgeStore:
         vector store before the full-text leg runs and before the two are
         fused, so a chunk found by the full-text side never meets it, and it is
         not a floor on anything the caller sees — see :func:`_options`.
+    hybrid_search : bool
+        Ask the engine to fuse its vector leg with its full-text leg.
+    rerank_results : bool
+        Ask the engine to re-score what it retrieved with the cross-encoder
+        bound to the collection.  Off by default: it costs a model call per
+        search, and it decides the scale every score comes back on — see
+        :func:`_options`.
     logger : logging.Logger, optional
         Where to report failures; never with payload content.
     client : Any, optional
@@ -229,6 +236,8 @@ class KnowledgeStore:
         timeout_seconds: float = 1.5,
         verify: bool = True,
         min_similarity: float = 0.35,
+        hybrid_search: bool = True,
+        rerank_results: bool = False,
         logger: Optional[logging.Logger] = None,
         client: Any = None,
         username: str = "",
@@ -246,6 +255,8 @@ class KnowledgeStore:
         self._timeout = float(timeout_seconds)
         self._verify = bool(verify)
         self._min_similarity = float(min_similarity)
+        self._hybrid_search = bool(hybrid_search)
+        self._rerank_results = bool(rerank_results)
         self._logger = logger
         self._client = client
         self._unavailable_reason = (
@@ -290,7 +301,12 @@ class KnowledgeStore:
             response = client.search(
                 request.collection,
                 request.query,
-                _options(request, self._min_similarity),
+                _options(
+                    request,
+                    self._min_similarity,
+                    hybrid_search=self._hybrid_search,
+                    rerank_results=self._rerank_results,
+                ),
             )
         except Exception as exc:  # sse_lib.SSEError and anything transport-shaped
             if _collection_missing(exc):
@@ -381,13 +397,24 @@ def _collection_missing(exc: Exception) -> bool:
     return False
 
 
-def _options(request: SearchRequest, min_similarity: float) -> Any:
+def _options(
+    request: SearchRequest,
+    min_similarity: float,
+    hybrid_search: bool = True,
+    rerank_results: bool = False,
+) -> Any:
     """
     Build the search options of one request, as the engine expects them.
 
     A mapping rather than a ``SearchOptions`` instance, so that building a
     query never requires the optional dependency to be installed; the client
     accepts either.
+
+    The two retrieval legs are the operator's, not the caller's: they come from
+    the policy, and they decide what the scores mean.  A reranked answer comes
+    back on a squashed cross-encoder logit, an unreranked hybrid one on a
+    Reciprocal Rank Fusion rank, and a plain vector one on cosine similarity —
+    see :attr:`SearchResult.score_scale`.
 
     Parameters
     ----------
@@ -400,6 +427,10 @@ def _options(request: SearchRequest, min_similarity: float) -> Any:
         Rank Fusion of the two; a chunk found only by the full-text search was
         never measured against it.  It is a pre-rerank cutoff on one leg, not a
         floor on the relevance of what comes back.
+    hybrid_search : bool
+        Fuse the vector leg with the full-text leg.
+    rerank_results : bool
+        Re-score the retrieved chunks with the collection's cross-encoder.
 
     Returns
     -------
@@ -408,8 +439,8 @@ def _options(request: SearchRequest, min_similarity: float) -> Any:
     """
     options: dict = {
         "max_results": int(request.max_results),
-        "hybrid_search": True,
-        "rerank_results": True,
+        "hybrid_search": bool(hybrid_search),
+        "rerank_results": bool(rerank_results),
         "min_similarity": float(min_similarity),
         # ``use_and_operator`` is what intersects the *filter families* —
         # categories, named documents, templates, the metadata filter,

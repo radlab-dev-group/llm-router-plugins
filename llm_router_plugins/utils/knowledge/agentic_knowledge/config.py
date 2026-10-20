@@ -25,6 +25,7 @@ JSON structure::
       "collection_prefix": "agentic_kb",
       "scope": {"strategy": "repo_basename", "overrides": {}, "default": ""},
       "read": {"enabled": true, "timeout_seconds": 1.5, "min_similarity": 0.35,
+               "hybrid_search": true, "rerank_results": false,
                "cache_ttl_seconds": 3600, "max_lookups_per_generation": 20},
       "modes": {
         "debug": {"max_chars": 6000, "escalation_model_name": "…", "sources": [
@@ -106,6 +107,13 @@ _DEFAULT_COLLECTION_PREFIX = _engine_collection_fragment(
 _MAX_SSE_TIMEOUT_SECONDS = 10.0
 _DEFAULT_READ_TIMEOUT_SECONDS = 1.5
 _DEFAULT_MIN_SIMILARITY = 0.35
+
+#: Both legs of the engine fused by Reciprocal Rank Fusion is what its
+#: collections are built for, so it is the default.  The cross-encoder reranker
+#: is not: it is a second model call over every retrieved chunk, and an engine
+#: without a reranker bound to the collection answers nothing with one on.
+_DEFAULT_HYBRID_SEARCH = True
+_DEFAULT_RERANK_RESULTS = False
 _DEFAULT_CACHE_TTL_SECONDS = 3600
 _DEFAULT_MAX_LOOKUPS = 20
 _DEFAULT_MAX_CHARS = 6000
@@ -254,6 +262,10 @@ class AgenticKnowledgeConfig:
     #: the number the operator wrote is the number a request waits.
     read_timeout_seconds: float = _DEFAULT_READ_TIMEOUT_SECONDS
     min_similarity: float = _DEFAULT_MIN_SIMILARITY
+    #: Fuse the vector leg with the engine's full-text leg.
+    hybrid_search: bool = _DEFAULT_HYBRID_SEARCH
+    #: Re-score what the engine retrieved with its cross-encoder.
+    rerank_results: bool = _DEFAULT_RERANK_RESULTS
     cache_ttl_seconds: int = _DEFAULT_CACHE_TTL_SECONDS
     max_lookups_per_generation: int = _DEFAULT_MAX_LOOKUPS
 
@@ -383,6 +395,14 @@ class AgenticKnowledgeConfig:
                 read.get("min_similarity", _DEFAULT_MIN_SIMILARITY),
                 "read.min_similarity",
             ),
+            hybrid_search=_boolean(
+                read.get("hybrid_search", _DEFAULT_HYBRID_SEARCH),
+                "read.hybrid_search",
+            ),
+            rerank_results=_boolean(
+                read.get("rerank_results", _DEFAULT_RERANK_RESULTS),
+                "read.rerank_results",
+            ),
             cache_ttl_seconds=_positive(
                 read.get("cache_ttl_seconds", _DEFAULT_CACHE_TTL_SECONDS),
                 "read.cache_ttl_seconds",
@@ -486,6 +506,8 @@ class AgenticKnowledgeConfig:
             ("SSE_API_TIMEOUT", "sse_timeout_seconds", _positive_float),
             ("READ_TIMEOUT_SECONDS", "read_timeout_seconds", _positive_float),
             ("MIN_SIMILARITY", "min_similarity", _fraction),
+            ("HYBRID_SEARCH", "hybrid_search", _boolean),
+            ("RERANK_RESULTS", "rerank_results", _boolean),
             ("CACHE_TTL_SECONDS", "cache_ttl_seconds", _positive),
             ("MAX_LOOKUPS_PER_GENERATION", "max_lookups_per_generation", _positive),
             ("MAX_STREAM_LEN", "max_stream_len", _positive),
