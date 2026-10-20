@@ -249,6 +249,39 @@ def test_a_source_without_phases_reads_every_phase():
     assert config.modes["debug"].sources[0].phases == ()
 
 
+def test_a_source_can_restrict_its_modes():
+    config = AgenticKnowledgeConfig.from_json(
+        '{"modes": {"implement": {"sources": '
+        '[{"category": "recipe", "modes": ["debug"]}]}}}'
+    )
+    source = config.modes["implement"].sources[0]
+    assert source.modes == ("debug",)
+
+
+def test_an_archive_source_cannot_restrict_phases_or_modes():
+    """The thread filter owns the metadata slot; a second would widen it."""
+    with pytest.raises(ValueError, match="session_archive"):
+        AgenticKnowledgeConfig.from_json(
+            '{"modes": {"debug": {"sources": '
+            '[{"category": "session_archive", "phases": ["test"]}]}}}'
+        )
+    with pytest.raises(ValueError, match="session_archive"):
+        AgenticKnowledgeConfig.from_json(
+            '{"modes": {"debug": {"sources": '
+            '[{"category": "session_archive", "modes": ["debug"]}]}}}'
+        )
+
+
+def test_phases_and_modes_cannot_share_a_request():
+    """One metadata dimension per request; the engine unions, not intersects."""
+    with pytest.raises(ValueError, match="phases and modes"):
+        AgenticKnowledgeConfig.from_json(
+            '{"modes": {"debug": {"sources": '
+            '[{"category": "recipe", "phases": ["test"]}, '
+            '{"category": "deadend", "modes": ["debug"]}]}}}'
+        )
+
+
 def test_phases_must_be_a_list_of_names():
     with pytest.raises(ValueError):
         AgenticKnowledgeConfig.from_json(

@@ -199,16 +199,20 @@ Each mode has a policy — the sources it reads, their weights, `max_items`, and
 
 A source may also restrict the **phases** it is read in — the work the episode was
 doing (`test`, `implement`, …), which is *not* the document kind: a `recipe` mined
-while `implement`ing is still a recipe.  An empty `phases` list — the default —
-reads the source in every phase.  The restriction becomes engine-side
-`metadata_filters` on `phase`, one filter per phase, which the engine unions; it
-intersects with the source's categories.  One source without a restriction
-leaves the whole request unrestricted (sources of one collection are retrieved
-by one search), and an archived source never carries one: its `thread_id` filter
-owns the single metadata slot the engine allows.
+while `implement`ing is still a recipe — or its **modes**, the routing mode the
+router resolved for the request that produced it.  An empty list — the default —
+reads the source in every phase or mode.  The restriction becomes engine-side
+`metadata_filters` on `phase` (or `mode`), one filter per name, which the engine
+unions; it intersects with the source's categories.  Phases and modes share the
+single metadata slot the engine allows, so a policy may restrict one dimension
+but not both in one request (configuration error), an archived source never
+carries either — its `thread_id` filter owns the slot — and one source without a
+restriction leaves the whole request unrestricted (sources of one collection are
+retrieved by one search).
 
 ```jsonc
 {"category": "recipe", "weight": 1.0, "max_items": 3, "phases": ["test", "debug"]}
+{"category": "deadend", "weight": 0.9, "modes": ["debug"]}
 ```
 
 `ContextAssembler` normalizes SSE's `score_normalized`, multiplies by the source weight, adds a bonus when a document's
@@ -252,8 +256,9 @@ deduplicated before publishing: `SET NX <fingerprint> EX <dedup_ttl_seconds>` in
 <max_stream_len>`. If `XADD` fails the dedup key is released, so the episode is retried rather than silently lost.
 
 The worker (`llm-router-agentic-kb-worker`) consumes the stream with a consumer group, masks every document with
-`FastMasker` and **discards the mappings** (no re-identification is possible downstream), creates the collection on
-first use, then `index_documents(category=<kind>, options=<metadata>)`. Logs never contain document text. Retention
+`FastMasker` and **discards the mappings** (no re-identification is possible downstream) — the filter keys
+(`thread_id`, `scope`, `kind`, `mode`, `phase`, …) are written verbatim so a document can be read back — creates the
+collection on first use, then `index_documents(category=<kind>, options=<metadata>)`. Logs never contain document text. Retention
 deletes only this plugin's own documents older than the configured TTL (`session_archive` on `archive.ttl_seconds`).
 Events with an unknown version are acknowledged and logged; an indexing error is retried up to a bounded number of
 attempts and then dropped with a log, so one poison event cannot stall the stream.

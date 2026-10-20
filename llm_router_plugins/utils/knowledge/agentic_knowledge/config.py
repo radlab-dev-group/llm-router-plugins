@@ -140,14 +140,20 @@ class SourcePolicy:
     phases : Tuple[str, ...]
         Work phases this source is read in; empty — the default — reads it in
         every phase.  A phase is the work the episode was doing (`test`,
-        `implement`), the document kind is what it produced (`recipe`); the
-        engine filters them with different options and they intersect.
+        `implement`), the document kind is what it produced (`recipe`).
+    modes : Tuple[str, ...]
+        Routing modes this source is read in; empty — the default — reads it in
+        every mode.  Mutually exclusive with *phases* for sources retrieved by
+        one request: the engine offers a single metadata slot and unions
+        whatever is put in it, so a second dimension would widen the result
+        instead of narrowing it.
     """
 
     category: str
     weight: float = 1.0
     max_items: int = 3
     phases: Tuple[str, ...] = ()
+    modes: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -583,6 +589,32 @@ class AgenticKnowledgeConfig:
                         f"modes.{policy.name} source {source.category} "
                         f"weight must be in (0, 1], got {source.weight}"
                     )
+                if source.category == "session_archive" and (
+                    source.phases or source.modes
+                ):
+                    # The archive is read through a thread filter, and that
+                    # filter owns the metadata slot; a phase or mode filter
+                    # would be unioned with it and return every thread of the
+                    # repository, so it is a misconfiguration rather than a
+                    # restriction.
+                    raise ValueError(
+                        f"modes.{policy.name} source {source.category} is read "
+                        "through a thread filter and cannot restrict phases "
+                        "or modes"
+                    )
+            shared = [
+                source
+                for source in policy.sources
+                if source.category != "session_archive"
+            ]
+            if any(source.phases for source in shared) and any(
+                source.modes for source in shared
+            ):
+                raise ValueError(
+                    f"modes.{policy.name} restricts both phases and modes: one "
+                    "request carries one metadata dimension, the engine unions "
+                    "several filters instead of intersecting them"
+                )
 
     # ------------------------------------------------------------ readiness -
     @property
@@ -765,7 +797,13 @@ def _sources(raw: Any, mode: str) -> Tuple[SourcePolicy, ...]:
     for entry in raw:
         if not isinstance(entry, Mapping):
             raise ValueError(f"modes.{mode}.sources entries must be objects")
-        unknown = set(entry) - {"category", "weight", "max_items", "phases"}
+        unknown = set(entry) - {
+            "category",
+            "weight",
+            "max_items",
+            "phases",
+            "modes",
+        }
         if unknown:
             raise ValueError(f"Unknown modes.{mode}.sources keys: {sorted(unknown)}")
         sources.append(
@@ -777,6 +815,9 @@ def _sources(raw: Any, mode: str) -> Tuple[SourcePolicy, ...]:
                 ),
                 phases=_phase_names(
                     entry.get("phases", ()), f"modes.{mode}.sources.phases"
+                ),
+                modes=_phase_names(
+                    entry.get("modes", ()), f"modes.{mode}.sources.modes"
                 ),
             )
         )

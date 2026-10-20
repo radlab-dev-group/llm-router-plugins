@@ -78,12 +78,13 @@ class QueryBuilder:
             return ()
         grouped: Dict[str, List[str]] = {}
         limits: Dict[str, int] = {}
-        # A missing key is "phases of the sources seen so far"; ``None`` is
-        # "any phase".  One source that does not restrict phases makes the
-        # whole collection unrestricted, because both are retrieved by one
-        # request and the other's filter would silently drop half of what the
-        # mode asked to read.
+        # A missing key is "restrictions of the sources seen so far"; ``None``
+        # is "any".  One source that does not restrict makes the whole
+        # collection unrestricted, because both are retrieved by one request
+        # and the other's filter would silently drop half of what the mode
+        # asked to read.
         phase_limits: Dict[str, Optional[List[str]]] = {}
+        mode_limits: Dict[str, Optional[List[str]]] = {}
         for source in policy.sources:
             kind = source.category
             archived = kind == KIND_SESSION_ARCHIVE
@@ -108,10 +109,19 @@ class QueryBuilder:
                 phase_limits[name] = list(
                     dict.fromkeys(phase_limits[name] + list(source.phases))
                 )
+            if not source.modes:
+                mode_limits[name] = None
+            elif name not in mode_limits:
+                mode_limits[name] = list(source.modes)
+            elif mode_limits[name] is not None:
+                mode_limits[name] = list(
+                    dict.fromkeys(mode_limits[name] + list(source.modes))
+                )
         requests: List[SearchRequest] = []
         for name, categories in grouped.items():
             archived = KIND_SESSION_ARCHIVE in categories
             restricted = phase_limits.get(name)
+            restricted_modes = mode_limits.get(name)
             requests.append(
                 SearchRequest(
                     collection=name,
@@ -122,6 +132,7 @@ class QueryBuilder:
                     # An archived window is already narrowed to one thread, and
                     # the engine cannot intersect two metadata filters.
                     phases=() if archived else tuple(restricted or ()),
+                    modes=() if archived else tuple(restricted_modes or ()),
                 )
             )
         return tuple(requests)

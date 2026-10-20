@@ -153,6 +153,40 @@ def test_restricting_sources_of_one_collection_union_their_phases():
     assert requests[0].phases == ("test", "debug")
 
 
+def test_a_source_mode_restriction_reaches_the_request():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        ModePolicy,
+        SourcePolicy,
+    )
+
+    policy = ModePolicy(
+        name="implement",
+        sources=(SourcePolicy(category="recipe", weight=1.0, modes=("debug",)),),
+    )
+    requests = builder().build(turn_for(), policy)
+    assert requests
+    assert requests[0].modes == ("debug",)
+    assert requests[0].phases == ()
+
+
+def test_a_source_that_reads_every_mode_widens_the_request():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        ModePolicy,
+        SourcePolicy,
+    )
+
+    policy = ModePolicy(
+        name="implement",
+        sources=(
+            SourcePolicy(category="recipe", weight=1.0, modes=("debug",)),
+            SourcePolicy(category="deadend", weight=0.9),
+        ),
+    )
+    requests = builder().build(turn_for(), policy)
+    assert len(requests) == 1
+    assert requests[0].modes == ()
+
+
 def test_an_archive_request_never_carries_phases():
     from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
         ModePolicy,
