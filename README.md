@@ -284,9 +284,14 @@ the pre-compaction archive of the current scope, and injects the result as a sep
 context block. It also learns from the traffic: the miner turns a `test_failure → patch → test
 pass` episode into a `recipe` and a repeated failure into a `deadend`, publishes them to a Redis
 Stream, and an indexing worker masks them with `FastMasker` before indexing; the window a
-`compaction` request is about to summarize is archived whole. The retrieval result is a routing
-signal: an agent looping on one error signature with no known fix is moved to a configured,
-stronger model (*knowledge-or-escalate*, **off by default**).
+`compaction` request is about to summarize is archived whole. Every mined episode also carries the
+work **phase** its evidence names (`test`, `implement`, …), and a retrieval source can be
+restricted to phases in its policy, so a mode can read only what was learned while doing its kind
+of work. The retrieval result is a routing signal: an agent looping on one error signature with no
+known fix is moved to a configured, stronger model (*knowledge-or-escalate*, **off by default**).
+
+The engine may be reached by a pre-issued token or by a username/password login
+(`SSE_API_USERNAME`/`SSE_API_PASSWORD`; the client logs in on its first call).
 
 Connection settings (SSE and Redis) come only from `LLM_ROUTER_KNOWLEDGE_AGENTIC_*`; the policy
 (adapters, per-mode sources, weights and budgets, escalation models, retention) is
