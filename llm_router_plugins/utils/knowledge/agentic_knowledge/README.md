@@ -84,6 +84,18 @@ llm-router-agentic-kb-worker
 Without a worker the layer only reads: nothing new is ever learned. The embedder and reranker are required because the
 worker creates a collection the first time a scope produces knowledge.
 
+The worker is a second process, started by the operator — the router never spawns it. `scripts/` wraps that for a
+deployment whose configuration lives in the router's own run script: it reads that script's assignments (never
+executes it, so no second server starts), exports them, and runs the worker with the rest of its arguments.
+
+```bash
+bash scripts/run-agentic-kb-worker.sh [ROUTER_SCRIPT] [--once | --no-retain | --log-level …]
+bash scripts/run-agentic-kb-worker-pk.sh    # the personal run-rest-api-gunicorn-pk.sh environment
+```
+
+Run it with `--once` from cron to drain a backlog, or without it as a daemon. `--once` logs what the batch did,
+because otherwise a cron run that indexed nothing and a cron run that did nothing are indistinguishable.
+
 ### 5. Verify
 
 ```bash

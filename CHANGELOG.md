@@ -50,6 +50,13 @@ release tagged as `v<version>`.
   its `thread_id` filter owns the slot, and a second would widen the archived
   window to every thread of the repository.  The phase is cited on every
   injected entry (`[recipe · in test · 2026-10-12 · src/a.py]`).
+- **Added:** `scripts/run-agentic-kb-worker.sh` starts the indexing worker with
+  the environment of the router's own run script — it reads that script's
+  assignments rather than executing it, so no second server starts — and
+  `scripts/run-agentic-kb-worker-pk.sh` the same over the personal
+  `run-rest-api-gunicorn-pk.sh`.  A `--once` run now also logs how many events
+  the batch drained, so a cron worker is not indistinguishable from one that
+  never ran.
 - **Fix:** a search for a repository whose knowledge has not been indexed yet
   stops being a per-request failure.  The engine answers a missing collection
   with an error code in a 200 body rather than with an empty list, so every

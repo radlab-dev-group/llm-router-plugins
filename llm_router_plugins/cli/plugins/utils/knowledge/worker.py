@@ -1056,13 +1056,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     worker = _build_worker(args)
     if args.once:
+        logger = logging.getLogger("agentic-kb-worker")
         try:
-            worker.run_once(block_ms=0)
+            processed = worker.run_once(block_ms=0)
         except Exception as exc:
-            logging.getLogger("agentic-kb-worker").error(
+            logger.error(
                 "knowledge worker batch failed: %s", type(exc).__name__
             )
             return 1
+        # A drained batch is the only evidence a cron-driven worker leaves
+        # behind; silence and "it worked" would be indistinguishable.
+        logger.info("knowledge worker drained one batch: %d event(s)", processed)
         return 0
     worker.run()
     return 0

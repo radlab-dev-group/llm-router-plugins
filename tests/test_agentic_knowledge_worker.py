@@ -34,6 +34,7 @@ from llm_router_plugins.cli.plugins.utils.knowledge.worker import (
     _require_settings,
     _verify_model_names,
 )
+from llm_router_plugins.cli.plugins.utils.knowledge import worker as worker_cli
 from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     KIND_SESSION_ARCHIVE,
     parse_document_text,
@@ -461,6 +462,22 @@ def test_backlog_below_the_threshold_is_quiet(caplog):
     with caplog.at_level("WARNING"):
         work._warn_backlog()
     assert "backlog" not in caplog.text
+
+
+def test_a_drained_batch_says_so(caplog, monkeypatch):
+    """
+    A cron-run worker leaves no other trace: without a line about the batch it
+    processed nothing and did nothing look exactly the same.
+    """
+
+    class _CountingWorker:
+        def run_once(self, block_ms=None):
+            return 3
+
+    monkeypatch.setattr(worker_cli, "_build_worker", lambda args: _CountingWorker())
+    with caplog.at_level("INFO", logger="agentic-kb-worker"):
+        assert worker_cli.main(["--once"]) == 0
+    assert "3 event(s)" in caplog.text
 
 
 def test_malformed_or_unversioned_message_is_acked_and_skipped():

@@ -293,6 +293,11 @@ known fix is moved to a configured, stronger model (*knowledge-or-escalate*, **o
 The engine may be reached by a pre-issued token or by a username/password login
 (`SSE_API_USERNAME`/`SSE_API_PASSWORD`; the client logs in on its first call).
 
+The worker is a separate process the operator starts — `scripts/run-agentic-kb-worker.sh` (and the personal
+`scripts/run-agentic-kb-worker-pk.sh`) take its environment from the router's own run script. It creates a
+repository's collection on that repository's first event; a project that has produced nothing yet simply has an
+empty knowledge base.
+
 Connection settings (SSE and Redis) come only from `LLM_ROUTER_KNOWLEDGE_AGENTIC_*`; the policy
 (adapters, per-mode sources, weights and budgets, escalation models, retention) is
 [agentic_knowledge.json](llm_router_plugins/resources/knowledge/agentic_knowledge.json). No SSE
