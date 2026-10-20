@@ -49,6 +49,7 @@ import threading
 import time
 
 from datetime import date, timedelta
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Tuple
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
@@ -65,11 +66,21 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     is_knowledge_document,
     parse_document_name,
 )
+from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
+    RedisConnectionSettings,
+)
 
 __all__ = ["KnowledgeIndexWorker", "main"]
 
 #: Wire version this worker understands.
 EVENT_VERSION = 1
+
+#: Slack added to the socket timeout of a worker that blocks on a read.  The
+#: connection settings are shared with the request path, whose socket must give
+#: up after a second; a worker asks the server to hold a read open for
+#: ``worker.block_ms`` (5 s by default), and the socket closed first — every
+#: idle wait then surfaced as a ``TimeoutError`` and the loop never blocked.
+BLOCK_SOCKET_MARGIN_SECONDS = 2.0
 
 #: Attempts before a message is dropped; a poison message must not stall the
 #: group, so after this many failures it is acknowledged with a log.
@@ -714,7 +725,11 @@ class KnowledgeIndexWorker:
         if self._redis is None:
             import redis  # noqa: PLC0415 - optional dependency
 
-            self._redis = redis.Redis(**self._config.redis.client_kwargs())
+            self._redis = redis.Redis(
+                **_reading_connection(
+                    self._config.redis, self._config.worker.block_ms
+                ).client_kwargs()
+            )
         return self._redis
 
     def _sse_client(self) -> Any:
@@ -788,6 +803,33 @@ def _entries(response: Any) -> List[Tuple[Any, Dict[str, Any]]]:
             if entry_id is not None:
                 entries.append((entry_id, fields))
     return entries
+
+
+def _reading_connection(
+    settings: RedisConnectionSettings, block_ms: int
+) -> RedisConnectionSettings:
+    """
+    Return *settings* with a socket timeout that outlives the blocking read.
+
+    Parameters
+    ----------
+    settings : RedisConnectionSettings
+        The connection as configured — a request-path timeout, short on
+        purpose so a dead Redis cannot stall a routed request.
+    block_ms : int
+        How long the worker asks the server to hold a read open; ``0`` means
+        the read does not block.
+
+    Returns
+    -------
+    RedisConnectionSettings
+        The same settings, with :attr:`socket_timeout` raised when it would
+        otherwise be shorter than the wait this worker deliberately starts.
+    """
+    needed = max(0, int(block_ms)) / 1000.0 + BLOCK_SOCKET_MARGIN_SECONDS
+    if settings.socket_timeout >= needed:
+        return settings
+    return replace(settings, socket_timeout=needed)
 
 
 def _message(message: Any) -> Tuple[Any, Dict[str, Any]]:

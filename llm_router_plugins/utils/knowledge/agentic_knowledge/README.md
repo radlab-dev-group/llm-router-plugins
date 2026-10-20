@@ -400,7 +400,7 @@ Redis settings come from these fixed variables only — never from JSON, a Redis
 | `…_WORKER_GROUP`                            | `agentic-kb`   | consumer group name                             |
 | `…_WORKER_CONSUMER`                         | `worker-<ts>-<pid>` | this consumer's name in the group          |
 | `…_WORKER_BATCH`                            | `32`           | events claimed per read                         |
-| `…_WORKER_BLOCK_MS`                         | `5000`         | how long a read waits for work                  |
+| `…_WORKER_BLOCK_MS`                         | `5000`         | how long a read waits for work; the worker's own socket timeout is raised above this automatically, so an idle block does not surface as a `TimeoutError` |
 | `…_MAX_PENDING`                             | `1000`         | pending length above which the worker warns     |
 | `…_SSE_EMBEDDER`                            | empty          | **required** to create a collection             |
 | `…_SSE_RERANKER`                            | empty          | **required** to create a collection             |

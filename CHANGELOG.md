@@ -50,6 +50,12 @@ release tagged as `v<version>`.
   its `thread_id` filter owns the slot, and a second would widen the archived
   window to every thread of the repository.  The phase is cited on every
   injected entry (`[recipe · in test · 2026-10-12 · src/a.py]`).
+- **Fix:** the daemon worker no longer reports a ``TimeoutError`` on every idle
+  read.  Its blocking read waits ``worker.block_ms`` (5 s) server-side, but its
+  Redis socket timeout came from the request-path settings, where 1 s is a
+  feature — the socket closed first and the loop never actually blocked.  The
+  worker now raises only its own socket timeout over its own block (plus a
+  margin); an operator-set socket timeout that already covers it is kept.
 - **Added:** `scripts/run-agentic-kb-worker.sh` starts the indexing worker with
   the environment of the router's own run script — it reads that script's
   assignments rather than executing it, so no second server starts — and

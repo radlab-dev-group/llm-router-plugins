@@ -31,6 +31,7 @@ from llm_router_plugins.cli.plugins.utils.knowledge.worker import (
     KnowledgeIndexWorker,
     _engine_client,
     _entries,
+    _reading_connection,
     _require_settings,
     _verify_model_names,
 )
@@ -462,6 +463,32 @@ def test_backlog_below_the_threshold_is_quiet(caplog):
     with caplog.at_level("WARNING"):
         work._warn_backlog()
     assert "backlog" not in caplog.text
+
+
+def test_the_socket_timeout_outlives_the_blocking_read():
+    """
+    A daemon worker blocks a read for ``worker.block_ms``; the socket timeout
+    comes from the request-path settings, where 1 s is a feature.  Left alone
+    it is shorter than the block, so every idle wait times out and the loop
+    never waits.  The worker must raise its own socket timeout over its block.
+    """
+    settings = RedisConnectionSettings(host="r", socket_timeout=1.0)
+    assert _reading_connection(settings, 5000).socket_timeout == 7.0
+
+
+def test_a_longer_operator_block_raises_the_socket_with_it():
+    settings = RedisConnectionSettings(host="r", socket_timeout=1.0)
+    assert _reading_connection(settings, 15000).socket_timeout == 17.0
+
+
+def test_a_socket_already_long_enough_is_kept():
+    settings = RedisConnectionSettings(host="r", socket_timeout=10.0)
+    assert _reading_connection(settings, 5000).socket_timeout == 10.0
+
+
+def test_a_non_blocking_read_needs_only_the_margin():
+    settings = RedisConnectionSettings(host="r", socket_timeout=1.0)
+    assert _reading_connection(settings, 0).socket_timeout == 2.0
 
 
 def test_a_drained_batch_says_so(caplog, monkeypatch):
