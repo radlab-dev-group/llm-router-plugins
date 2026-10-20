@@ -129,6 +129,15 @@ def load_phase_rules(
     """
     candidate = path or _phase_config_path()
     if candidate is None:
+        # Without the file the layer still injects, but it records no episode at
+        # all — and an operator whose collections stay empty has to be able to
+        # tell "nothing worth mining happened" from "the rules were never read".
+        if logger is not None:
+            logger.warning(
+                "agentic knowledge: episode mining off, no Codex routing config"
+                " found (set %s or install the routing resources)",
+                PHASE_CONFIG_ENV,
+            )
         return None
     try:
         with open(candidate, "r", encoding="utf-8") as handle:
@@ -177,6 +186,9 @@ class CodexAgentAdapter(AgentAdapter):
         Phase rules; loaded from the Codex routing config when omitted.
     scope_resolver : ScopeResolver, optional
         Repository scope resolver.
+    logger : logging.Logger, optional
+        Where the rules report that they were not read; without it the adapter
+        mines nothing and says nothing.
     """
 
     name = "codex"
@@ -186,11 +198,14 @@ class CodexAgentAdapter(AgentAdapter):
         parser: Optional[CodexPayloadParser] = None,
         phase_rules: Optional[CodexPhaseConfig] = None,
         scope_resolver: Optional[ScopeResolver] = None,
+        logger: Any = None,
     ) -> None:
         """Bind the collaborators, loading the phase rules when needed."""
         self._parser = parser or CodexPayloadParser()
         self._phase_rules = (
-            phase_rules if phase_rules is not None else load_phase_rules()
+            phase_rules
+            if phase_rules is not None
+            else load_phase_rules(logger=logger)
         )
         self._scope_resolver = scope_resolver or ScopeResolver()
 
