@@ -127,6 +127,15 @@ _DEFAULT_STRONG_RECIPE_SCORE = 0.75
 _DEFAULT_RETENTION_INTERVAL_SECONDS = 21_600
 _DEFAULT_MAX_PENDING = 1_000
 _DEFAULT_WORKER_BATCH = 32
+
+#: Chunking declared for a collection the worker creates.  The engine cuts the
+#: *embedded* text at 508 tokens however a collection is declared, so a chunk
+#: of 500 is truncated by the embedder while one of 400 is not: at 400 tokens
+#: with a 60-token overlap a chunk and its neighbour still share a sentence or
+#: two, which is what makes a recipe's failure and its fix retrieve together.
+#: ``0`` still means "declare nothing" and leaves the engine's own default.
+_DEFAULT_CHUNK_TOKENS = 400
+_DEFAULT_CHUNK_OVERLAP = 60
 _DEFAULT_WORKER_BLOCK_MS = 5_000
 
 _INDEX_TYPES = ("HNSW", "IVF_FLAT")
@@ -214,9 +223,12 @@ class WorkerSettings:
     index_type : str
         Vector index type for a new collection.
     chunk_tokens : int
-        Chunk size declared for a new collection; ``0`` leaves the server default.
+        Chunk size declared for a new collection; ``0`` leaves the server
+        default.  Applied when a collection is *created* only — changing it
+        never re-splits one that already exists.
     chunk_overlap : int
-        Chunk overlap declared for a new collection.
+        Chunk overlap declared for a new collection, in tokens, and smaller
+        than *chunk_tokens*.
     retention_interval_seconds : int
         Seconds between retention passes; ``0`` disables them.
     max_pending : int
@@ -230,8 +242,8 @@ class WorkerSettings:
     embedder: str = ""
     reranker: str = ""
     index_type: str = "HNSW"
-    chunk_tokens: int = 0
-    chunk_overlap: int = 0
+    chunk_tokens: int = _DEFAULT_CHUNK_TOKENS
+    chunk_overlap: int = _DEFAULT_CHUNK_OVERLAP
     retention_interval_seconds: int = _DEFAULT_RETENTION_INTERVAL_SECONDS
     max_pending: int = _DEFAULT_MAX_PENDING
 
@@ -916,7 +928,17 @@ def _worker_from_env(worker: WorkerSettings, prefix: str) -> WorkerSettings:
             f"{prefix}SSE_INDEX_TYPE must be one of {list(_INDEX_TYPES)}, "
             f"got {index_type!r}"
         )
-    return replace(worker, **values)
+    settings = replace(worker, **values)
+    # An overlap of the chunk size or more makes every chunk a copy of its
+    # neighbour: the engine accepts the pair and the collection indexes the
+    # same text over and over, so the combination is refused rather than
+    # discovered a week later in a knowledge base of duplicates.
+    if settings.chunk_tokens and settings.chunk_overlap >= settings.chunk_tokens:
+        raise ValueError(
+            f"{prefix}SSE_CHUNK_OVERLAP ({settings.chunk_overlap}) must be "
+            f"smaller than SSE_CHUNK_TOKENS ({settings.chunk_tokens})"
+        )
+    return settings
 
 
 def _boolean(value: Any, label: str) -> bool:

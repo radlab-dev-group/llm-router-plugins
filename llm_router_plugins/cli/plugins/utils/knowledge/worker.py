@@ -465,12 +465,16 @@ class KnowledgeIndexWorker:
         """
         Create *name* if the engine does not have it yet.
 
-        Chunking: with ``chunk_tokens`` at its default of ``0`` nothing is
-        declared and the engine splits at its own default of 500 tokens, while
-        the *embedded* text is cut at 508 tokens however the collection is
-        configured.  One knowledge document is then several chunks, and the
-        metadata header — the first line of the text — is only on the first of
-        them.
+        Chunking is declared here and only here: changing it never re-splits a
+        collection that already exists, so a deployment that changes the numbers
+        has to drop and re-index.  The default pair is 400 tokens with a 60
+        overlap — under the 508 tokens the embedder cuts at, and wide enough
+        that a recipe keeps its failure and its fix in one chunk.  With
+        ``chunk_tokens`` set to ``0`` nothing is declared and the engine splits
+        at its own default of 500 tokens, which the embedder then truncates at
+        508.  Either way one knowledge document is usually several chunks, and
+        the metadata header — the first line of the text — rides on the first
+        of them only.
 
         The engine does not check the embedder or the reranker name against
         what it actually serves: it stores whatever it is given and an unknown

@@ -427,8 +427,14 @@ Redis settings come from these fixed variables only — never from JSON, a Redis
 | `…_SSE_EMBEDDER`                            | empty          | **required** to create a collection             |
 | `…_SSE_RERANKER`                            | empty          | **required** to create a collection             |
 | `…_SSE_INDEX_TYPE`                          | `HNSW`         | `HNSW` or `IVF_FLAT`                            |
-| `…_SSE_CHUNK_TOKENS` / `…_SSE_CHUNK_OVERLAP` | `0`            | `0` leaves the server default                   |
+| `…_SSE_CHUNK_TOKENS`                         | `400`          | chunk size declared for a **new** collection; `0` leaves the engine default (500 tokens, embedded text cut at 508) |
+| `…_SSE_CHUNK_OVERLAP`                        | `60`           | chunk overlap in tokens, must be `< SSE_CHUNK_TOKENS` |
 | `…_RETENTION_INTERVAL_SECONDS`              | `21600`        | seconds between retention passes; `0` disables  |
+
+Chunking is declared when a collection is **created** and never rewritten afterwards: change
+`…_SSE_CHUNK_TOKENS`/`…_SSE_CHUNK_OVERLAP` and only collections created from then on get the new split, so applying a
+new size means dropping the `<prefix>_<scope>[…_sessions]` collections and letting the worker index them again. The
+default 400/60 sits under the 508 tokens the embedder cuts at, which a chunk of the engine's 500 default does not.
 
 CLI: `--config <path>`, `--once` (drain one batch and exit — cron friendly), `--no-retain`, `--log-level`.
 
@@ -445,6 +451,12 @@ paths and the compaction window all come from it. Contract tests for `CodexReque
 
 Tool output is recognized by the Codex envelope (`Process exited with code N`); without it the phase pipeline cannot
 see a test failure, so no `test_failure` evidence, no recipe, no loop.
+
+A patch is read out of the **envelope**, never out of the tool name: releases differ in how they carry one, and a
+current CLI applies it by piping `*** Begin Patch` … `*** End Patch` to `apply_patch` as a here-document inside
+`exec_command`. Both shapes count — the `patch`/`input` argument of an `apply_patch` call and a here-document the
+command applies — and a quoted envelope in a command that applies nothing does not. Without this a turn edits files
+invisibly, `EpisodeMiner.verified()` stays false, and the collections stay empty however healthy the layer looks.
 
 ### Claude Code (basic)
 

@@ -667,3 +667,27 @@ def test_retention_ignores_foreign_collections_in_the_listing():
     # Neither is a `-sessions` archive of ours; nothing is listed for deletion.
     assert work.run_retention()["deleted"] == 0
     assert sse.deleted == []
+
+
+def test_the_default_chunking_is_declared_on_a_new_collection():
+    """A collection created with the defaults carries 400/60, not nothing."""
+    seen = {}
+
+    class Recording(FakeSSE):
+        def create_collection(self, name, description="", **kwargs):
+            seen.update(kwargs)
+            super().create_collection(name, description=description, **kwargs)
+
+    config = knowledge_config()
+    config.sse_host = "http://engine.test"
+    config.worker = dataclasses.replace(
+        config.worker, embedder="embed", reranker="rerank"
+    )
+    work = KnowledgeIndexWorker(
+        config=config, redis_client=FakeRedis(), sse_client=Recording()
+    )
+    work._ensure_collection("agentic_kb_webapp")
+    assert seen["chunking"] == {
+        "max_tokens_in_chunk": 400,
+        "number_of_overlap_tokens": 60,
+    }

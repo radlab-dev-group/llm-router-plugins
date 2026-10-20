@@ -351,3 +351,33 @@ def test_a_malformed_retrieval_switch_is_an_error(monkeypatch):
     config = AgenticKnowledgeConfig.from_file()
     with pytest.raises(ValueError, match="RERANK_RESULTS"):
         config.override_from_env()
+
+
+def test_the_worker_declares_a_chunking_by_default():
+    """400 tokens with a 60 overlap, under the 508 the embedder cuts at."""
+    worker = AgenticKnowledgeConfig.from_file().worker
+    assert worker.chunk_tokens == 400
+    assert worker.chunk_overlap == 60
+
+
+def test_the_chunking_is_switchable_from_the_environment(monkeypatch):
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_CHUNK_TOKENS", "900")
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_CHUNK_OVERLAP", "120")
+    config = AgenticKnowledgeConfig.from_file()
+    config.override_from_env()
+    assert (config.worker.chunk_tokens, config.worker.chunk_overlap) == (900, 120)
+
+
+def test_zero_chunk_leaves_the_split_to_the_engine(monkeypatch):
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_CHUNK_TOKENS", "0")
+    config = AgenticKnowledgeConfig.from_file()
+    config.override_from_env()
+    assert config.worker.chunk_tokens == 0
+
+
+def test_an_overlap_that_eats_the_chunk_is_an_error(monkeypatch):
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_CHUNK_TOKENS", "300")
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_CHUNK_OVERLAP", "300")
+    config = AgenticKnowledgeConfig.from_file()
+    with pytest.raises(ValueError, match="SSE_CHUNK_OVERLAP"):
+        config.override_from_env()
