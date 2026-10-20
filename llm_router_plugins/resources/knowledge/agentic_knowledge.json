@@ -10,6 +10,8 @@
     "enabled": true,
     "timeout_seconds": 1.5,
     "min_similarity": 0.35,
+    "hybrid_search": true,
+    "rerank_results": false,
     "cache_ttl_seconds": 3600,
     "max_lookups_per_generation": 20
   },
