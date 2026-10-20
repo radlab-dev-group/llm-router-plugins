@@ -26,6 +26,7 @@ from agentic_knowledge_support import (
     knowledge_config,
     main_payload,
     recipe_payload,
+    recipe_items,
     store_hit,
 )
 
@@ -241,6 +242,57 @@ def test_write_disabled_publishes_nothing_but_still_reads():
     out = plugin.apply(recipe_payload())
     assert publisher.published == []
     assert MARKER in json.dumps(out)
+
+
+def test_a_request_of_an_unknown_repository_publishes_nothing():
+    """
+    Without a declared directory there is no repository's collection to write
+    to, and the bare prefix would gather the conversations of every other
+    scope-less checkout.
+    """
+    config = knowledge_config()
+    publisher = FakePublisher()
+    plugin = make_plugin(config, publisher=publisher)
+    out = plugin.apply(codex_payload(recipe_items()[1:]))
+    assert publisher.published == []
+    knowledge = out["routing"]["knowledge"]
+    assert knowledge["scope"] == ""
+    assert knowledge["write"]["status"] == "disabled"
+
+
+def test_a_compaction_of_an_unknown_repository_archives_nothing():
+    config = knowledge_config()
+    publisher = FakePublisher()
+    plugin = make_plugin(config, publisher=publisher)
+    payload = compaction_payload()
+    payload["input"] = [
+        item for item in payload["input"] if "environment_context" not in str(item)
+    ]
+    out = plugin.apply(payload)
+    assert publisher.published == []
+    assert out["routing"]["knowledge"]["write"]["status"] == "disabled"
+
+
+def test_a_window_archived_from_a_replayed_history_keeps_its_repository():
+    """
+    The shape Codex really sends on a compaction: the whole conversation, with
+    the environment-context item no longer first.  Its fragments must still be
+    archived under the repository that produced them.
+    """
+    config = knowledge_config()
+    publisher = FakePublisher()
+    plugin = make_plugin(config, publisher=publisher)
+    payload = compaction_payload()
+    context = payload["input"].pop(0)
+    filler = {
+        "type": "message",
+        "role": "developer",
+        "content": [{"type": "input_text", "text": "You are a coding agent. " * 900}],
+    }
+    payload["input"] = [filler, filler, filler, context] + payload["input"]
+    plugin.apply(payload)
+    assert publisher.published
+    assert {event.scope for event in publisher.published} == {"webapp"}
 
 
 # ------------------------------------------------------------- compaction --

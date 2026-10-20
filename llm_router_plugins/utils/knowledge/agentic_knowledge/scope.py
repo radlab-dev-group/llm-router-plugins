@@ -4,9 +4,10 @@ Repository scope of one agent request, and the collections it maps to.
 Knowledge is worth retrieving only inside the repository it was produced in: a
 verified fix to a pytest fixture in one service says nothing about the next.
 The CLI declares no repository, so the only usable identifier is the one the
-agent itself prints in the ``<environment_context>`` block it prepends to the
-first ``input`` item — ``<cwd>`` for Codex, the ``Working directory`` line for
-Claude Code.
+agent itself prints in the ``<environment_context>`` block of its first user
+message — ``<cwd>`` for Codex, the ``Working directory`` line for Claude Code.
+That message is not the first item of every request: a compaction re-sends the
+whole conversation, so the leading messages are searched rather than assumed.
 
 The declared path is turned into a stable, path-free *scope key* (by default
 the repository's directory name, with an override table for organizations and
@@ -20,7 +21,7 @@ import re
 import posixpath
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Iterator, Mapping, Optional, Tuple
 
 __all__ = [
     "STRATEGY_REPO_BASENAME",
@@ -49,6 +50,17 @@ _WORKING_DIRECTORY_RE = re.compile(
 )
 _CONTEXT_RE = re.compile(r"<(?:environment_context|system)\b")
 
+#: Characters of one message searched for a declaration.  A compaction request
+#: re-sends the whole conversation, so the CLI's context block sits tens of
+#: kilobytes into the payload, behind the developer instructions; a search of
+#: this much text costs well under a millisecond.
+_SCAN_MESSAGE_CHARS = 256_000
+
+#: Ceiling on that search for one request.  A declaration is in one of the
+#: leading messages; a longer payload is not read to the end, so a request path
+#: never pays for a history it does not need.
+_SCAN_TOTAL_CHARS = 1_000_000
+
 #: Characters a collection name may carry; SSE replaces spaces itself, but the
 #: plugin normalizes the rest so the name it derives is the name it queries.
 _UNSAFE_RE = re.compile(r"[^a-z0-9._-]+")
@@ -64,42 +76,40 @@ def _clean_path(value: str) -> str:
     return posixpath.normpath(text.replace(os.sep, "/"))
 
 
-def _candidate_text(payload: Any) -> str:
+def _message_texts(payload: Any) -> Iterator[str]:
     """
-    Return the text of a payload that may declare the working directory.
+    Yield the texts of a payload in which a directory may be declared.
 
-    Only the leading items are scanned: the context block is prepended by the
-    CLI, and a long history is neither scanned nor copied into memory.
+    Message texts only, in the order the agent sent them: the CLI writes its
+    context block into a message, while a tool output can quote the ``<cwd>``
+    of some other checkout, and a quoted path is not a declaration.  Nothing
+    is copied here — the caller decides how much of each text it reads.
     """
-    if not isinstance(payload, dict):
-        return ""
-    parts = []
     instructions = payload.get("instructions")
     if isinstance(instructions, str):
-        parts.append(instructions[:8000])
+        yield instructions
     system = payload.get("system")
     if isinstance(system, str):
-        parts.append(system[:8000])
+        yield system
     elif isinstance(system, list):
-        for block in system[:4]:
+        for block in system:
             if isinstance(block, dict) and isinstance(block.get("text"), str):
-                parts.append(block["text"][:8000])
+                yield block["text"]
     items = payload.get("input")
     if isinstance(items, list):
-        for item in items[:3]:
+        for item in items:
             if isinstance(item, str):
-                parts.append(item[:8000])
+                yield item
                 continue
             if not isinstance(item, dict):
                 continue
             content = item.get("content")
             if isinstance(content, str):
-                parts.append(content[:8000])
+                yield content
             elif isinstance(content, list):
-                for part in content[:3]:
+                for part in content:
                     if isinstance(part, dict) and isinstance(part.get("text"), str):
-                        parts.append(part["text"][:8000])
-    return "\n".join(parts)
+                        yield part["text"]
 
 
 def declared_working_directory(payload: Any) -> str:
@@ -107,7 +117,10 @@ def declared_working_directory(payload: Any) -> str:
     Return the working directory the agent declared, or ``""``.
 
     Prefers the machine-readable ``<cwd>`` tag, then the ``<workspace_roots>``
-    entry Codex adds, then the prose line Claude Code sends.
+    entry Codex adds, then the prose line Claude Code sends.  Messages are read
+    in the order they were sent and the first declaration wins, so a directory
+    quoted later — from another checkout, inside a tool output — cannot stand
+    in for the one this request was made in.
 
     Parameters
     ----------
@@ -119,15 +132,20 @@ def declared_working_directory(payload: Any) -> str:
     str
         A normalized POSIX path, or ``""`` when the payload declares none.
     """
-    text = _candidate_text(payload)
-    if not text:
+    if not isinstance(payload, dict):
         return ""
-    for pattern in (_CWD_TAG_RE, _ROOT_TAG_RE, _WORKING_DIRECTORY_RE):
-        match = pattern.search(text)
-        if match:
-            path = _clean_path(match.group(1))
-            if path:
-                return path
+    remaining = _SCAN_TOTAL_CHARS
+    for text in _message_texts(payload):
+        if remaining <= 0:
+            break
+        end = min(len(text), remaining, _SCAN_MESSAGE_CHARS)
+        remaining -= end
+        for pattern in (_CWD_TAG_RE, _ROOT_TAG_RE, _WORKING_DIRECTORY_RE):
+            match = pattern.search(text, 0, end)
+            if match:
+                path = _clean_path(match.group(1))
+                if path:
+                    return path
     return ""
 
 

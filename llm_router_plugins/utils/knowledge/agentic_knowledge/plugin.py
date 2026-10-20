@@ -62,6 +62,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.query import QueryBuil
 from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import ScopeResolver
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
     KnowledgeStore,
+    STATUS_DISABLED,
     STATUS_OK,
     STATUS_UNAVAILABLE,
 )
@@ -218,7 +219,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             return payload
 
         mining = self._mine(turn)
-        publish = self._publish(mining, config)
+        publish = self._publish(mining, config, turn)
 
         if turn.request_class == _REQUEST_CLASS_COMPACTION:
             # A window about to be summarized is written, never read from.
@@ -426,11 +427,23 @@ class AgenticKnowledgePlugin(PluginInterface):
             self._warn("knowledge mining failed: %s", type(exc).__name__)
             return MiningResult()
 
-    def _publish(self, mining: Any, config: AgenticKnowledgeConfig) -> PublishStatus:
-        """Hand mined episodes to the worker; never blocks or raises on Redis."""
+    def _publish(
+        self, mining: Any, config: AgenticKnowledgeConfig, turn: AgentTurn
+    ) -> PublishStatus:
+        """
+        Hand mined episodes to the worker; never blocks or raises on Redis.
+
+        A request whose repository is unknown publishes nothing.  Its documents
+        would have no repository's collection to live in — the reader asks for
+        a scope's collection and never looks at the bare prefix — and the
+        conversations of every other scope-less checkout would meet there,
+        which is the isolation the scope exists to prevent.
+        """
         events = getattr(mining, "events", ())
         if not events or not config.write_available or self._publisher is None:
             return PublishStatus()
+        if not turn.scope:
+            return PublishStatus(STATUS_DISABLED, reason="no scope")
         try:
             return self._publisher.publish(events)
         except Exception as exc:

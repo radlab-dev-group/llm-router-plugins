@@ -143,7 +143,10 @@ re-annotates, so an escalation decision cannot be overwritten by it.
 
 Knowledge is only worth retrieving inside the repository that produced it. The CLI announces no repository, so the
 identifier is the one the agent itself prints: `<cwd>` in Codex's `<environment_context>`, the `Working directory` line
-in Claude Code's `system`. That path becomes a path-free **scope key** (`scope.strategy`):
+in Claude Code's `system`. A compaction re-sends the whole conversation, and that block then sits behind the
+developer instructions — so the leading messages are searched (a fraction of a millisecond, bounded) rather than the
+first item assumed. A directory quoted in a tool output is not a declaration: only what the agent sends as a message
+names a repository. That path becomes a path-free **scope key** (`scope.strategy`):
 
 - `repo_basename` (default) — the name of the checked-out directory;
 - `parent_directory` — `<parent>/<repo>`, for monorepos under a common parent;
@@ -254,6 +257,9 @@ the newest one breaking a tie, the turn's mode when it names none — which the 
 header and into `metadata_json.phase`, verbatim (it is a filter key, like `thread_id`). Codex resends the whole history with every request, so episodes are recomputed each time and
 deduplicated before publishing: `SET NX <fingerprint> EX <dedup_ttl_seconds>` in front of `XADD`, and `XADD … MAXLEN ~
 <max_stream_len>`. If `XADD` fails the dedup key is released, so the episode is retried rather than silently lost.
+A request whose repository is unknown publishes nothing: its documents would have no repository's collection to live
+in — the reader asks for a scope's collection, never the bare prefix — and every scope-less checkout would archive
+into that one prefix, which is the isolation the scope exists to prevent.
 
 The worker (`llm-router-agentic-kb-worker`) consumes the stream with a consumer group, masks every document with
 `FastMasker` and **discards the mappings** (no re-identification is possible downstream) — the filter keys
@@ -302,7 +308,7 @@ flaky test looks exactly like a loop. The "already tried" list comes from the cu
   "loop_count": 3,
   "escalation": {"action": "escalate", "reason": "loop_without_recipe",
                   "from": "auto_codex", "to": "qwen/Qwen3.8-27B"},
-  "write": {"published": 1, "deduplicated": 0, "status": "ok"}   // ok | unavailable
+  "write": {"published": 1, "deduplicated": 0, "status": "ok"}   // ok | partial | unavailable | disabled
 }
 ```
 

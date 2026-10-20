@@ -91,3 +91,74 @@ def test_unknown_strategy_is_rejected_by_config():
     except ValueError:
         return
     raise AssertionError("expected an unknown strategy to be rejected")
+
+
+def _message(role, text):
+    return {
+        "type": "message",
+        "role": role,
+        "content": [{"type": "input_text", "text": text}],
+    }
+
+
+def _context(cwd="/home/u/dev/webapp"):
+    return f"<environment_context>\n<cwd>{cwd}</cwd>\n</environment_context>"
+
+
+def test_declaration_behind_the_leading_messages_is_still_read():
+    """
+    A compaction request re-sends the window, so the context block is no longer
+    among the first items — and the scope of the whole conversation depends on
+    finding it there.
+    """
+    developer = _message("developer", "You are a coding agent. " * 900)
+    payload = {
+        "input": [
+            developer,
+            _message("developer", "instructions"),
+            _message("assistant", "ok"),
+            _message("user", _context() + "\ncontinue"),
+        ]
+    }
+    assert declared_working_directory(payload) == "/home/u/dev/webapp"
+
+
+def test_declaration_deep_in_one_message_is_read():
+    payload = {"input": [_message("user", "x" * 30_000 + "\n" + _context())]}
+    assert declared_working_directory(payload) == "/home/u/dev/webapp"
+
+
+def test_a_directory_quoted_in_a_tool_output_is_not_a_declaration():
+    """Only what the agent sends as a message declares a repository."""
+    payload = {
+        "input": [
+            _message("user", "what is in there?"),
+            {"type": "function_call_output", "output": _context("/other/repo")},
+        ]
+    }
+    assert declared_working_directory(payload) == ""
+
+
+def test_the_first_declaration_wins_over_a_later_quoted_one():
+    payload = {
+        "input": [
+            _message("user", _context("/home/u/dev/webapp")),
+            _message("user", "and in another checkout: " + _context("/home/u/other")),
+        ]
+    }
+    assert declared_working_directory(payload) == "/home/u/dev/webapp"
+
+
+def test_the_scan_is_bounded_per_message():
+    """
+    A request path may not pay for a history it does not need: past the ceiling
+    of one message the payload is simply not searched.
+    """
+    payload = {"input": [_message("user", "x" * 300_000 + "\n" + _context())]}
+    assert declared_working_directory(payload) == ""
+
+
+def test_the_scan_is_bounded_per_request():
+    lead = [_message("user", "x" * 200_000) for _ in range(12)]
+    payload = {"input": lead + [_message("user", _context())]}
+    assert declared_working_directory(payload) == ""
