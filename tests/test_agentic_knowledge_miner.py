@@ -18,6 +18,7 @@ from agentic_knowledge_support import (
     codex_payload,
     compaction_payload,
     deadend_items,
+    heredoc_recipe_items,
     loop_items,
     recipe_items,
 )
@@ -140,3 +141,39 @@ def test_an_archived_fragment_carries_the_mode_of_its_turn():
     assert result.events
     for event in result.events:
         assert event.metadata["phase"] == "implement"
+
+
+def test_recipe_is_mined_from_a_patch_piped_through_the_shell():
+    """A current Codex CLI patches through ``exec_command``, naming no tool."""
+    result = mine(codex_payload(heredoc_recipe_items()))
+    kinds = [event.kind for event in result.events]
+    assert kinds == [KIND_RECIPE]
+
+
+def test_recipe_quotes_the_envelope_not_the_command_that_carried_it():
+    result = mine(codex_payload(heredoc_recipe_items()))
+    event = result.events[0]
+    _, body = parse_document_text(event.text)
+    assert "*** Begin Patch" in body
+    assert "apply_patch <<'PATCH'" not in body
+    assert '"cmd"' not in body
+
+
+def test_a_python_module_invocation_verifies_the_recipe():
+    """`python3 -m pytest` is a launcher; its `-m` does not narrow the suite."""
+    command = "python3 -m pytest tests/test_a.py"
+    result = mine(
+        codex_payload(recipe_items(command=command, green_command=command))
+    )
+    kinds = [event.kind for event in result.events]
+    assert kinds == [KIND_RECIPE]
+
+
+def test_a_marker_filter_still_voids_the_recipe():
+    command = "python3 -m pytest tests/test_a.py"
+    result = mine(
+        codex_payload(
+            recipe_items(command=command, green_command=command + ' -m "not slow"')
+        )
+    )
+    assert result.events == ()

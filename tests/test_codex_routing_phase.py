@@ -835,3 +835,51 @@ def test_the_activity_description_keeps_the_newest_distinct_actions(rules):
         "ran pytest",
         "ran make",
     ]
+
+
+def test_a_patch_piped_through_the_shell_is_a_patch(rules):
+    """Current CLI releases apply a patch by piping it to ``apply_patch``."""
+    envelope = (
+        "*** Begin Patch\n*** Update File: src/main.py\n@@\n-old\n+new\n"
+        "*** End Patch"
+    )
+    activity = (
+        command(f"cd /repo && apply_patch <<'PATCH'\n{envelope}\nPATCH"),
+        output("Process exited with code 0\nOutput:\nSuccess."),
+    )
+    evidence = collect_phase_evidence(activity, rules)
+    assert len(evidence) == 1
+    assert (evidence[0].kind, evidence[0].mode, evidence[0].succeeded) == (
+        "patch",
+        "implement",
+        True,
+    )
+    assert detect_phase(activity, rules) == "implement"
+
+
+def test_a_failing_patch_piped_through_the_shell_settles_failed(rules):
+    envelope = (
+        "*** Begin Patch\n*** Update File: src/main.py\n@@\n-old\n+new\n"
+        "*** End Patch"
+    )
+    activity = (
+        command(f"apply_patch <<'PATCH'\n{envelope}\nPATCH"),
+        output("Process exited with code 1\nOutput:\nerror: patch does not apply"),
+    )
+    evidence = collect_phase_evidence(activity, rules)
+    assert len(evidence) == 1
+    assert evidence[0].succeeded is False
+
+
+def test_an_unrelated_here_document_stays_not_a_patch(rules):
+    """Quoting an envelope in a script that never applies one is not a patch."""
+    activity = (
+        command(
+            "python3 - <<'EOF'\n"
+            "sample = '*** Begin Patch\\n*** End Patch'\n"
+            "print(sample)\n"
+            "EOF"
+        ),
+        output("Process exited with code 0\nOutput:\n*** Begin Patch"),
+    )
+    assert collect_phase_evidence(activity, rules) == ()

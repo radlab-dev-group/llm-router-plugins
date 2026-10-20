@@ -85,18 +85,36 @@ def _command_output(call_id, event_id, body, code=1):
     }
 
 
-def _patch(call_id, event_id, paths=("src/a.py",)):
+def patch_envelope(paths=("src/a.py",)):
+    """A Codex patch envelope touching *paths*."""
     body = "*** Begin Patch\n"
     for path in paths:
         body += f"*** Update File: {path}\n@@\n-x = 1\n+x = 2\n"
     body += "*** End Patch"
+    return body
+
+
+def _patch(call_id, event_id, paths=("src/a.py",)):
     return {
         "type": "function_call",
         "name": "apply_patch",
         "call_id": call_id,
         "id": event_id,
-        "arguments": body,
+        "arguments": patch_envelope(paths),
     }
+
+
+def _heredoc_patch(call_id, event_id, paths=("src/a.py",), cwd="/repo"):
+    """
+    A patch the way a current Codex CLI applies one.
+
+    The envelope rides as a here-document piped to ``apply_patch`` inside an
+    ``exec_command``, so no call is named after the patch at all.
+    """
+    command = (
+        f"cd {cwd} && apply_patch <<'PATCH'\n{patch_envelope(paths)}\nPATCH"
+    )
+    return _command(call_id, event_id, command)
 
 
 def codex_payload(items, mode="debug", source="phase", turn_id="turn-7", **metadata):
@@ -138,13 +156,29 @@ def loop_items(failures=3, failure=FAILING):
     return items
 
 
-def recipe_items(failure=FAILING, paths=("src/export.py",)):
+def recipe_items(
+    failure=FAILING,
+    paths=("src/export.py",),
+    command="pytest tests/test_a.py",
+    green_command=None,
+):
     """Items describing a failure, a patch, and the same command passing."""
     return base_items() + [
-        _command("c1", "e1"),
+        _command("c1", "e1", command),
         _command_output("c1", "o1", failure, code=1),
         _patch("p1", "pe", paths),
-        _command("c2", "e2"),
+        _command("c2", "e2", green_command or command),
+        _command_output("c2", "o2", GREEN, code=0),
+    ]
+
+
+def heredoc_recipe_items(paths=("src/export.py",), command="pytest tests/test_a.py"):
+    """A recipe whose patch arrives as a here-document, not as a patch tool."""
+    return base_items() + [
+        _command("c1", "e1", command),
+        _command_output("c1", "o1", FAILING, code=1),
+        _heredoc_patch("p1", "pe", paths),
+        _command("c2", "e2", command),
         _command_output("c2", "o2", GREEN, code=0),
     ]
 
