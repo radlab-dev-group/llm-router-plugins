@@ -288,3 +288,36 @@ def test_a_thread_filter_wins_over_the_phases():
     assert options["metadata_filters"] == [
         {"operator": "eq", "field": {"thread_id": "thread-1"}}
     ]
+
+
+def test_the_retrieval_options_are_the_ones_configured():
+    """The legs and the reranker are the policy's, not the client's opinion."""
+    options = _options(
+        SearchRequest(collection="c", query="q"),
+        0.35,
+        hybrid_search=False,
+        rerank_results=True,
+    )
+    assert options["hybrid_search"] is False
+    assert options["rerank_results"] is True
+
+
+def test_a_search_goes_out_with_the_store_default_legs():
+    """Hybrid on, reranker off: the score comes back on the RRF scale."""
+    client = _Client(_Reply([], score_scale="rrf"))
+    store = KnowledgeStore(client=client)
+    assert (
+        store.search(SearchRequest(collection="c", query="q")).score_scale == "rrf"
+    )
+    (_collection, _query, options), = client.calls
+    assert options["hybrid_search"] is True
+    assert options["rerank_results"] is False
+
+
+def test_a_store_switches_every_search_it_makes():
+    client = _Client(_Reply([], score_scale="reranker"))
+    store = KnowledgeStore(client=client, hybrid_search=False, rerank_results=True)
+    store.search(SearchRequest(collection="c", query="q"))
+    (_collection, _query, options), = client.calls
+    assert options["hybrid_search"] is False
+    assert options["rerank_results"] is True

@@ -293,3 +293,61 @@ def test_phases_must_be_a_list_of_names():
             '{"modes": {"debug": {"sources": '
             '[{"category": "recipe", "phases": [""]}]}}}'
         )
+
+
+def test_the_retrieval_legs_are_hybrid_without_a_reranker():
+    """The engine fuses both legs; the cross-encoder costs a model call."""
+    config = AgenticKnowledgeConfig.from_file()
+    assert config.hybrid_search is True
+    assert config.rerank_results is False
+
+
+def test_both_retrieval_legs_are_written_in_the_bundled_policy():
+    """A switch an operator cannot see in the policy is a switch they lack."""
+    import json
+    import pathlib
+
+    path = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "llm_router_plugins/resources/knowledge/agentic_knowledge.json"
+    )
+    read = json.loads(path.read_text(encoding="utf-8"))["read"]
+    assert read["hybrid_search"] is True
+    assert read["rerank_results"] is False
+
+
+@pytest.mark.parametrize(
+    ("hybrid", "rerank"),
+    [("false", "true"), ("true", "true"), ("false", "false")],
+)
+def test_the_retrieval_legs_are_switchable_from_the_environment(
+    monkeypatch, hybrid, rerank
+):
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}HYBRID_SEARCH", hybrid)
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}RERANK_RESULTS", rerank)
+    config = AgenticKnowledgeConfig.from_file()
+    config.override_from_env()
+    assert config.hybrid_search is (hybrid == "true")
+    assert config.rerank_results is (rerank == "true")
+
+
+def test_the_bundled_policy_can_ask_for_a_reranker():
+    monkeypatch_env = True
+    raw = '{"read": {"rerank_results": true, "hybrid_search": false}}'
+    import os
+
+    os.environ[f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}CONFIG"] = raw
+    try:
+        config = AgenticKnowledgeConfig.from_file()
+        assert config.hybrid_search is False
+        assert config.rerank_results is True
+    finally:
+        del os.environ[f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}CONFIG"]
+
+
+
+def test_a_malformed_retrieval_switch_is_an_error(monkeypatch):
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}RERANK_RESULTS", "sometimes")
+    config = AgenticKnowledgeConfig.from_file()
+    with pytest.raises(ValueError, match="RERANK_RESULTS"):
+        config.override_from_env()

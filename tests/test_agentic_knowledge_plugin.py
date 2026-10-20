@@ -453,3 +453,35 @@ def test_escalation_applies_when_the_payload_carries_no_model():
     payload.pop("model")
     out = plugin.apply(payload)
     assert out["model"] == config.modes["debug"].escalation_model_name
+
+
+def test_the_configured_retrieval_legs_reach_the_store():
+    """The store the plugin builds for itself carries the policy's legs."""
+    config = knowledge_config()
+    plugin = AgenticKnowledgePlugin(config=config)
+    plugin._wire(config)  # build the store from the policy, as at startup
+    store = plugin._store
+    assert store._min_similarity == config.min_similarity
+    assert store._hybrid_search is config.hybrid_search
+    assert store._rerank_results is config.rerank_results
+
+
+def test_the_store_passes_its_legs_into_the_search_options():
+    """A request out the wire carries what the policy decided."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+        SearchRequest,
+        _options,
+    )
+
+    config = knowledge_config(hybrid_search=False, rerank_results=True)
+    plugin = AgenticKnowledgePlugin(config=config)
+    plugin._wire(config)
+    store = plugin._store
+    options = _options(
+        SearchRequest(collection="c", query="q"),
+        store._min_similarity,
+        hybrid_search=store._hybrid_search,
+        rerank_results=store._rerank_results,
+    )
+    assert options["hybrid_search"] is False
+    assert options["rerank_results"] is True
