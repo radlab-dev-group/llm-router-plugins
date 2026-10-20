@@ -68,6 +68,12 @@ SCALE_RERANKER = "reranker"
 
 _MAX_HIT_CHARS = 1200
 
+#: The engine's code for "collection not found or access denied"
+#: (``sse_api/engine/core/errors.py``, ``COLLECTION_ACCESS_DENIED``).  The
+#: engine answers with HTTP 200 and this code in the body, so it arrives as an
+#: API error rather than as an empty answer.
+_COLLECTION_MISSING_CODE = "engine_001"
+
 
 @dataclass(frozen=True)
 class SearchRequest:
@@ -287,6 +293,17 @@ class KnowledgeStore:
                 _options(request, self._min_similarity),
             )
         except Exception as exc:  # sse_lib.SSEError and anything transport-shaped
+            if _collection_missing(exc):
+                # A repository whose first episode has not been indexed yet has
+                # no collection at all, and the worker creates it on that first
+                # event.  To a reader that is the same answer as an empty
+                # collection — nothing known yet — so it is reported as an
+                # empty result rather than as a failure on every request of a
+                # young project.
+                self._note(
+                    "knowledge base of %s is not indexed yet", request.collection
+                )
+                return SearchResult(STATUS_OK, reason="no collection")
             self._warn(
                 "knowledge search failed (%s): %s",
                 request.collection,
@@ -342,6 +359,26 @@ class KnowledgeStore:
         """Log a warning when a logger was given."""
         if self._logger is not None:
             self._logger.warning(message, *args)
+
+    def _note(self, message: str, *args: Any) -> None:
+        """Log at debug level when a logger was given."""
+        if self._logger is not None:
+            self._logger.debug(message, *args)
+
+
+def _collection_missing(exc: Exception) -> bool:
+    """
+    Return whether *exc* is the engine saying it has no such collection.
+
+    Duck-typed on ``sse_lib.SSEAPIError.errors`` — the payload the engine puts
+    behind the message — because the client library is an optional dependency
+    and may not be importable here.
+    """
+    for entry in getattr(exc, "errors", None) or ():
+        code = entry.get("error_code") if isinstance(entry, dict) else None
+        if code == _COLLECTION_MISSING_CODE:
+            return True
+    return False
 
 
 def _options(request: SearchRequest, min_similarity: float) -> Any:

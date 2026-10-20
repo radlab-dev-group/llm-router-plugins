@@ -20,6 +20,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
     STATUS_OK,
+    STATUS_UNAVAILABLE,
     KnowledgeStore,
     SearchRequest,
     _flatten,
@@ -125,6 +126,57 @@ def test_the_thread_filter_and_the_categories_intersect():
     assert options["metadata_filters"] == [
         {"operator": "eq", "field": {"thread_id": "thread-1"}}
     ]
+
+
+# ----------------------------------------------------------- missing collection -
+class _EngineError(Exception):
+    """The shape ``sse_lib.SSEAPIError`` carries: HTTP 200 and a code in the body."""
+
+    def __init__(self, error_code, message):
+        super().__init__(message)
+        self.errors = [{"error_code": error_code, "message": message}]
+
+
+class _FailingClient:
+    def __init__(self, error):
+        self.error = error
+
+    def search(self, collection, query, options):
+        raise self.error
+
+
+def test_a_repository_not_indexed_yet_answers_as_an_empty_one():
+    """
+    A collection is created when the project's first episode is indexed, so
+    every earlier request of that project meets a collection that does not
+    exist.  The engine says so with an error code, not with an empty list; to a
+    reader both mean the same thing, and neither is worth a warning per request.
+    """
+    store = KnowledgeStore(
+        client=_FailingClient(
+            _EngineError("engine_001", "Kolekcja nie istnieje lub brak dostępu!")
+        )
+    )
+    result = store.search(SearchRequest(collection="agentic_kb_webapp", query="fix"))
+    assert result.status == STATUS_OK
+    assert result.hits == ()
+    assert result.reason == "no collection"
+
+
+def test_another_engine_error_is_still_an_unavailable_store():
+    store = KnowledgeStore(
+        client=_FailingClient(
+            _EngineError("engine_004", "Błąd modelu lub konfiguracji!")
+        )
+    )
+    result = store.search(SearchRequest(collection="agentic_kb_webapp", query="fix"))
+    assert result.status == STATUS_UNAVAILABLE
+
+
+def test_an_error_without_engine_codes_is_not_a_missing_collection():
+    store = KnowledgeStore(client=_FailingClient(RuntimeError("boom")))
+    result = store.search(SearchRequest(collection="agentic_kb_webapp", query="fix"))
+    assert result.status == STATUS_UNAVAILABLE
 
 
 def test_a_request_without_a_thread_sends_no_metadata_filter():

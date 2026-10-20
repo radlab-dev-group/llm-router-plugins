@@ -234,6 +234,8 @@ rendered in a fixed order inside constant markers:
 Every entry is cited with the phase it was learned in — `[recipe · in test · 2026-10-12 · src/a.py]` — so
 the agent can tell a fix it verified in a test run from one it learned by editing.
 
+A repository whose first episode has not been indexed yet has no collection at all, and the engine says so with an error code rather than an empty list; the read path answers it as an empty one (nothing known yet, no warning per request) until the worker creates the collection on that first event.
+
 The block is injected as **the last element of `input`** (Codex: a `developer` message) — not into `instructions`, so
 the prompt cache prefix of the CLI survives and the block stays removable. The client does not echo our element back,
 so the same block is re-injected for the whole command generation from the cache. If `<agentic_knowledge>` is already
