@@ -70,8 +70,8 @@ export LLM_ROUTER_KNOWLEDGE_AGENTIC_SSE_API_PASSWORD="…"
 export LLM_ROUTER_KNOWLEDGE_AGENTIC_REDIS_HOST="redis.internal"
 ```
 
-No `SSE_API_HOST` ⇒ **no reads** (requests pass through). No `REDIS_HOST` ⇒ **no writes and no cross-request cache**
-(reads stay stateless, see [Stateless mode](#stateless-mode)).
+No `SSE_API_HOST` ⇒ **no reads** (requests pass through). No `REDIS_HOST` ⇒ **no writes**, and the generation cache
+falls back to one that lives in the process only (reads stay stateless across workers, see [Stateless mode](#stateless-mode)).
 
 ### 4. Run the indexing worker
 
@@ -132,6 +132,9 @@ One request passes through: **adapter selection → parse → mine once → publ
 → inject → escalate → annotate**. Mining and publishing happen exactly once per request — the write path never
 re-annotates, so an escalation decision cannot be overwritten by it.
 
+A request the router classified `aux_title` is returned before any of this — a title generation has no repository
+knowledge to use, and none is mined from it, so it carries no annotation.
+
 | Module             | Responsibility                                                              |
 |--------------------|------------------------------------------------------------------------------|
 | `plugin.py`        | `AgenticKnowledgePlugin` — the whole request path, fail-open, annotation     |
@@ -143,7 +146,8 @@ re-annotates, so an escalation decision cannot be overwritten by it.
 | `signature.py`     | error/stack trace → stable signature + hash                                  |
 | `query.py`         | query and SSE filters per work mode                                          |
 | `assembler.py`     | weighted voting over sources, dedup, character budget, rendering             |
-| `cache.py`         | `GenerationContextCache` (Redis) + in-memory implementation for tests        |
+| `cache.py`         | `GenerationContextCache` (Redis) + in-process one when Redis is absent       |
+| `redisclient.py`   | `RedisClientHandle`: lazy, fork-aware Redis client shared by cache and pub   |
 | `miner.py`         | `EpisodeMiner`: recipe / deadend / loop / compaction → `KnowledgeEvent`      |
 | `events.py`        | `KnowledgeEventPublisher`: `SET NX` dedup + `XADD`                           |
 | `escalation.py`    | `EscalationPolicy.decide`                                                    |
@@ -257,7 +261,9 @@ element at all.
 ### Generation cache
 
 `GenerationContextCache` stores the injected set under `<key_prefix>:ctx:<scope>:<generation>` (`generation` =
-`thread_id` + `root_turn_id`, the same identity the Codex memory uses) with `cache_ttl_seconds` (default 3600). A hit
+the Codex `turn_id`, the same identity the Codex memory treats as one command generation; when the CLI sends none,
+the adapter falls back to a hash of `thread_id` + input items, then to `root_turn_id`) with `cache_ttl_seconds`
+(default 3600). A hit
 returns byte-identical text and issues **zero** SSE calls. The entry is refreshed when the mode changes or the phase
 evidence fingerprint moved. The escalated model is stored with the entry, so a loop escalated earlier in a generation
 stays escalated even when a later request no longer repeats the loop by itself.
@@ -286,7 +292,7 @@ attempts and then dropped with a log, so one poison event cannot stall the strea
 ### Compaction archive
 
 A request classified `compaction` is **written, never read from**: the full window is chunked at message/tool-result
-boundaries (`archive.max_chunk_chars`) and indexed into `<prefix>-<scope>-sessions` with `thread_id`, `window_id` and
+boundaries (`archive.max_chunk_chars`) and indexed into `<prefix>_<scope>_sessions` with `thread_id`, `window_id` and
 `position`. The next `main` request of the same thread reads that collection filtered by `thread_id`, so the exact
 lines a summary dropped come back as `## Exact context from before compaction`.
 
@@ -318,11 +324,11 @@ flaky test looks exactly like a loop. The "already tried" list comes from the cu
   "injected": 3,
   "chars": 1180,
   "sources": {"recipe": 2, "deadend": 1},
-  "cache": "hit",                  // hit | miss | disabled | unavailable
+  "cache": "hit",                  // hit | miss | disabled
   "loop_count": 3,
   "escalation": {"action": "escalate", "reason": "loop_without_recipe",
                   "from": "auto_codex", "to": "qwen/Qwen3.8-27B"},
-  "write": {"published": 1, "deduplicated": 0, "status": "ok"}   // ok | partial | unavailable | disabled
+  "write": {"published": 1, "deduplicated": 0, "errors": 0, "status": "ok"}   // ok | partial | unavailable | disabled
 }
 ```
 
@@ -353,6 +359,10 @@ means the feature is unavailable.
 }
 ```
 
+A mode accepts `max_chars`, `sources`, `escalation_model_name` and `cheap_model_name`. The last one is parsed and
+kept, but no policy in the code reads it yet — it is the model a strong recipe would recommend — so setting it
+changes nothing: routing stays as the router left it.
+
 ### Environment variables
 
 All use the prefix `LLM_ROUTER_KNOWLEDGE_AGENTIC_`. Booleans accept `1/0`, `true/false`, `yes/no`, `on/off`.
@@ -376,7 +386,7 @@ All use the prefix `LLM_ROUTER_KNOWLEDGE_AGENTIC_`. Booleans accept `1/0`, `true
 | `…_READ_TIMEOUT_SECONDS`              | `1.5`            | read-path timeout budget                                 |
 | `…_MIN_SIMILARITY`                    | `0.35`           | floor for a hit                                          |
 | `…_CACHE_TTL_SECONDS`                 | `3600`           | lifetime of one generation's context                     |
-| `…_MAX_LOOKUPS_PER_GENERATION`        | `20`             | in-process limiter used in stateless mode                |
+| `…_MAX_LOOKUPS_PER_GENERATION`        | `20`             | per-process ceiling on searches, applied with or without Redis |
 | `…_MAX_STREAM_LEN`                    | `100000`         | `XADD MAXLEN ~`                                          |
 | `…_DEDUP_TTL_SECONDS`                 | `604800`         | episode dedup window                                     |
 | `…_MAX_PATCH_CHARS`                   | `4000`           | patch text admitted into an event                        |
@@ -450,10 +460,13 @@ cannot be seen. Claude Code requests read the shared knowledge base; they do not
 
 ## Stateless mode
 
-With no Redis the plugin still reads: no cache, no writes, and `max_lookups_per_generation` as an **in-process**
-limiter. That limit is per worker process, so the number of SSE calls grows with the number of workers — there is no
-shared guarantee, and the escalated model does not survive to the next request of the generation. There is deliberately
-no local file fallback, because a fallback that diverges between workers is worse than no fallback at all.
+With no Redis the plugin still reads: no writes at all, and a cache that lives in **this process only**
+(`InMemoryContextCache`, the same contract and the same TTL as the Redis one), so a single-worker deployment loses
+nothing but the sharing. `max_lookups_per_generation` is enforced by an in-process `LookupLimiter` in both modes, so
+the ceiling on SSE calls is per worker either way and grows with the number of workers — there is no shared
+guarantee. The escalated model carries over to the next request of the generation only inside the worker that decided
+it. There is deliberately no local file fallback, because a fallback that diverges between workers is worse than no
+fallback at all.
 
 ## Evaluation
 
@@ -480,12 +493,13 @@ leak-free.
   `max_stream_len`.
 - **False escalations.** A flaky test looks like a loop. Identical signatures and `loop_threshold` help; keep
   `ESCALATION_ENABLED` off until the replay is convincing.
-- **No architectural decisions.** The `decision` document type is reserved, not mined — extraction needs generation.
+- **No architectural decisions.** The `doc` kind is the only one the miner never produces — conventions are indexed
+  by you, and extracting architectural decisions would need generation.
 - **Coupling to the `codex` package.** The adapter imports its parser, phase and state modules explicitly; their
   contracts are pinned by tests.
 
 ## See also
 
 - `llm_router_plugins/utils/routing/agentic_routing/codex/README.md` — the routing plugin this layer builds on.
-- `../../../../agentic-knowledge-layer-re.md` in the repository root — the plan this implementation follows.
+- `.plans/in_progress/agentic-knowledge-layer-re.md` — the plan this implementation follows.
 - `scripts/agentic-kb-eval.sh` — the offline replay.

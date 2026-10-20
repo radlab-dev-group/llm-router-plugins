@@ -301,7 +301,7 @@ empty knowledge base.
 Connection settings (SSE and Redis) come only from `LLM_ROUTER_KNOWLEDGE_AGENTIC_*`; the policy
 (adapters, per-mode sources, weights and budgets, escalation models, retention) is
 [agentic_knowledge.json](llm_router_plugins/resources/knowledge/agentic_knowledge.json). No SSE
-host means no reads, no Redis means no writes and no cross-request cache, and every failure is
+host means no reads, no Redis means no writes and a per-process cache instead of the shared one, and every failure is
 **fail-open** — the request passes through untouched. Codex is served fully (reads and writes);
 Claude Code is served in a basic, read-only form: scope, latest user text, injection into
 `system`.
