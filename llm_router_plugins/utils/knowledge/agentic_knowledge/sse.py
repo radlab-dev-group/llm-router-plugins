@@ -93,6 +93,11 @@ class SearchRequest:
         engine ORs several ``metadata_filters`` with each other, so a phase
         filter next to a thread filter would widen the archived window to every
         thread of the repository instead of narrowing it.
+    modes : Tuple[str, ...]
+        Routing modes to restrict the search to — the mode the router resolved
+        for the request that produced the episode.  Same single metadata slot
+        as *phases*, and it wins over them: one request expresses one metadata
+        dimension, never a conjunction of two.
     """
 
     collection: str
@@ -101,6 +106,7 @@ class SearchRequest:
     max_results: int = 6
     thread_id: str = ""
     phases: Tuple[str, ...] = ()
+    modes: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -381,9 +387,16 @@ def _options(request: SearchRequest, min_similarity: float) -> Any:
     # (``semantic.py`` calls ``__filter_documents_based_on_metadata`` with
     # ``use_and_operator=False`` hardcoded), so a second one would broaden the
     # archived window instead of narrowing it.
+    # One metadata dimension per request: the engine unions several
+    # ``metadata_filters`` with each other, so a second dimension would widen
+    # the result instead of narrowing it.  Priority: thread, mode, phase.
     if request.thread_id:
         options["metadata_filters"] = [
             {"operator": "eq", "field": {"thread_id": request.thread_id}}
+        ]
+    elif request.modes:
+        options["metadata_filters"] = [
+            {"operator": "eq", "field": {"mode": mode}} for mode in request.modes
         ]
     elif request.phases:
         # One filter per phase: the engine unions several ``metadata_filters``

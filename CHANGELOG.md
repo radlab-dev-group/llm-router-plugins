@@ -47,6 +47,12 @@ release tagged as `v<version>`.
   allows, and a second would widen the archived window to every thread of the
   repository.  The phase is cited on every injected entry
   (`[recipe · in test · 2026-10-12 · src/a.py]`).
+- **Fix:** the *scope* half of a collection name is reduced to the engine's
+  character set like the prefix — a hyphenated checkout (`llm-router`) could
+  never get a collection created (a 500, so nothing indexed), and the indexing
+  consumer group now starts at the start of the stream, so episodes the proxy
+  published while no worker was running are drained instead of skipped
+  silently.
 - **Read path.** Per-work-mode retrieval policies (`debug`, `test`, `implement`, `plan`, `git_review`, `review`) over
   weighted sources (`{category, weight, max_items}`) with a character budget per mode; `ContextAssembler` normalizes
   SSE scores, adds a bonus for a matching error signature or path, deduplicates by document name and cuts to the

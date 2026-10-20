@@ -638,9 +638,16 @@ class AgenticKnowledgeConfig:
         Returns
         -------
         str
-            A collection name.
+            A collection name, in the spelling the engine accepts.
         """
-        base = f"{self.collection_prefix}_{scope}"
+        # The scope arrives from a directory name and may hold anything a
+        # checkout is called — `llm-router` included.  The engine refuses to
+        # create a name with a hyphen (a 500, and nothing indexes ever), so
+        # the same reduction the prefix went through applies here; two scopes
+        # that differ only by punctuation are the same repository as far as a
+        # collection name is concerned.
+        fragment = _engine_collection_fragment(scope, "scope") if scope else ""
+        base = f"{self.collection_prefix}_{fragment}" if fragment else self.collection_prefix
         return f"{base}_sessions" if kind == "session_archive" else base
 
     @property

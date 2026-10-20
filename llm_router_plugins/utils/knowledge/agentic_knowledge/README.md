@@ -164,9 +164,12 @@ the scope is unknown, and both reads and writes are skipped (`scope: ""` in the 
 
 Default `<prefix>` is `agentic_kb`. A collection is `<prefix>_<scope>` (and
 `<prefix>_<scope>_sessions` for the archive); the engine's character set —
-letters, digits, `_`, `.` — is enforced at configuration time. A document is
-named `<kind>:<YYYYMMDD>:<fingerprint>` — the day bucket is what
-retention ages on. Every entry is one document with its metadata in `metadata_json`, filtered by `eq`/`in`.
+letters, digits, `_`, `.` — is enforced at configuration time, **on both the
+prefix and the scope**, because the scope is a checkout's directory name and
+the engine refuses a hyphen (a 500) in a collection name: `llm-router` becomes
+`<prefix>_llm_router`. A document is named `<kind>:<YYYYMMDD>:<fingerprint>` —
+the day bucket is what retention ages on. Every entry is one document with its
+metadata in `metadata_json`, filtered by `eq`/`in`.
 
 ### Read path: retrieval per work mode
 

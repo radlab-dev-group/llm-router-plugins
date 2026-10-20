@@ -102,6 +102,7 @@ IDENTITY_KEYS: Tuple[str, ...] = (
     "window_id",
     "scope",
     "kind",
+    "mode",
     "phase",
     "signature_hash",
 )
@@ -664,7 +665,11 @@ class KnowledgeIndexWorker:
             return
         client = self._redis_client()
         try:
-            client.xgroup_create(self._stream, self._group, id="$", mkstream=True)
+            # ``id="0"``, not ``"$"``: a group created at the end of the stream
+            # never sees what was published before it existed, so every episode
+            # the proxy wrote while no worker ran would be skipped silently —
+            # the worker would report a clean start and index nothing.
+            client.xgroup_create(self._stream, self._group, id="0", mkstream=True)
         except Exception as exc:
             if not _is_busy_group(exc):
                 raise

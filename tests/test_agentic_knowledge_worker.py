@@ -513,6 +513,34 @@ def test_retention_never_touches_documents_outside_the_plugin_shape():
     assert sse.deleted == []
 
 
+def test_the_consumer_group_reads_from_the_start_of_the_stream():
+    """
+    A group created at the end of the stream never sees what was published
+    before it, so episodes written while no worker ran would be skipped.
+    """
+    captured = {}
+
+    class Watching(FakeRedis):
+        def xgroup_create(self, stream, group, id="0", mkstream=False):
+            captured["id"] = id
+            return super().xgroup_create(stream, group, id=id, mkstream=mkstream)
+
+    work = worker(redis=Watching())
+    work._ensure_group()
+    assert captured["id"] == "0"
+
+
+def test_an_entry_published_before_the_first_run_is_consumed():
+    """A backlog that predates the group is drained, not lost."""
+    event = knowledge_event(kind="recipe", scope="webapp")
+    redis = FakeRedis(messages=[("0-1", stream_message(event))])
+    sse = FakeSSE()
+    work = worker(redis=redis, sse=sse)
+    processed = work.run_once(block_ms=0)
+    assert processed == 1
+    assert len(sse.indexed) == 1
+
+
 def test_ensure_group_tolerates_a_preexisting_group():
     class BusyGroup(FakeRedis):
         def xgroup_create(self, *a, **k):

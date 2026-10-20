@@ -153,6 +153,30 @@ def test_a_collection_prefix_with_hyphen_becomes_engine_safe(monkeypatch):
     assert config.collection_prefix == "agentic_kb"
 
 
+def test_a_hyphenated_repo_scope_gets_an_engine_safe_collection(monkeypatch):
+    """
+    The scope is a directory name; the engine rejects a hyphen in a collection
+    name.  Without this, every hyphenated repository (`llm-router`) could never
+    have a collection created, so nothing would ever be indexed.
+    """
+    config = AgenticKnowledgeConfig.from_file()
+    assert config.collection("llm-router-plugins", "recipe") == "agentic_kb_llm_router_plugins"
+    assert (
+        config.collection("kb-probe", "session_archive")
+        == "agentic_kb_kb_probe_sessions"
+    )
+    for scope in ("kb-probe", "llm-router", "a--b"):
+        name = config.collection(scope, "recipe")
+        assert "-" not in name, f"the engine would 500 on {name!r}"
+        assert not name[0].isdigit()
+
+
+def test_two_scopes_differing_only_by_punctuation_share_a_collection():
+    """A hyphen and an underscore name the same repository, for a name."""
+    config = AgenticKnowledgeConfig.from_file()
+    assert config.collection("my-repo", "recipe") == config.collection("my_repo", "recipe")
+
+
 def test_the_default_collection_prefix_is_engine_safe():
     config = AgenticKnowledgeConfig.from_file()
     for character in config.collection_prefix:
