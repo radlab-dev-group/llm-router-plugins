@@ -87,6 +87,12 @@ class SearchRequest:
     thread_id : str
         Restrict to one conversation thread; the archive's filter, ``""`` for
         everything else.
+    phases : Tuple[str, ...]
+        Work phases to restrict the search to — the phase an episode was mined
+        in, not the document kind.  Honored only without a *thread_id*: the
+        engine ORs several ``metadata_filters`` with each other, so a phase
+        filter next to a thread filter would widen the archived window to every
+        thread of the repository instead of narrowing it.
     """
 
     collection: str
@@ -94,6 +100,7 @@ class SearchRequest:
     categories: Tuple[str, ...] = ()
     max_results: int = 6
     thread_id: str = ""
+    phases: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -377,6 +384,13 @@ def _options(request: SearchRequest, min_similarity: float) -> Any:
     if request.thread_id:
         options["metadata_filters"] = [
             {"operator": "eq", "field": {"thread_id": request.thread_id}}
+        ]
+    elif request.phases:
+        # One filter per phase: the engine unions several ``metadata_filters``
+        # with each other, which here is exactly "the phase is one of these".
+        options["metadata_filters"] = [
+            {"operator": "eq", "field": {"phase": phase}}
+            for phase in request.phases
         ]
     return options
 

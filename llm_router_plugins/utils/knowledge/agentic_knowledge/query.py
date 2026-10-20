@@ -15,7 +15,7 @@ that the assembler will throw away.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
     AgentTurn,
@@ -78,6 +78,12 @@ class QueryBuilder:
             return ()
         grouped: Dict[str, List[str]] = {}
         limits: Dict[str, int] = {}
+        # A missing key is "phases of the sources seen so far"; ``None`` is
+        # "any phase".  One source that does not restrict phases makes the
+        # whole collection unrestricted, because both are retrieved by one
+        # request and the other's filter would silently drop half of what the
+        # mode asked to read.
+        phase_limits: Dict[str, Optional[List[str]]] = {}
         for source in policy.sources:
             kind = source.category
             archived = kind == KIND_SESSION_ARCHIVE
@@ -94,9 +100,18 @@ class QueryBuilder:
             if kind not in kinds:
                 kinds.append(kind)
             limits[name] = limits.get(name, 0) + int(source.max_items)
+            if not source.phases:
+                phase_limits[name] = None
+            elif name not in phase_limits:
+                phase_limits[name] = list(source.phases)
+            elif phase_limits[name] is not None:
+                phase_limits[name] = list(
+                    dict.fromkeys(phase_limits[name] + list(source.phases))
+                )
         requests: List[SearchRequest] = []
         for name, categories in grouped.items():
             archived = KIND_SESSION_ARCHIVE in categories
+            restricted = phase_limits.get(name)
             requests.append(
                 SearchRequest(
                     collection=name,
@@ -104,6 +119,9 @@ class QueryBuilder:
                     categories=tuple(dict.fromkeys(categories)),
                     max_results=max(1, limits.get(name, 3)),
                     thread_id=turn.thread_id if archived else "",
+                    # An archived window is already narrowed to one thread, and
+                    # the engine cannot intersect two metadata filters.
+                    phases=() if archived else tuple(restricted or ()),
                 )
             )
         return tuple(requests)

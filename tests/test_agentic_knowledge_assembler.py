@@ -165,3 +165,19 @@ def test_a_forced_recipe_never_breaks_the_character_budget():
     )
     context = ContextAssembler().assemble(results, policy)
     assert context.chars <= policy.max_chars
+
+def test_a_citation_names_the_phase_the_episode_was_mined_in():
+    text = build_document_text("recipe", "the fix body", phase="test")
+    result = SearchResult(STATUS_OK, hits=(store_hit(text=text),))
+    context = assemble([(result, ("recipe",))])
+    assert context.rendered
+    assert "recipe · in test" in context.rendered
+    assert context.hits[0].phase == "test"
+
+
+def test_a_document_without_a_phase_cites_without_one():
+    text = build_document_text("recipe", "the fix body")
+    result = SearchResult(STATUS_OK, hits=(store_hit(text=text),))
+    context = assemble([(result, ("recipe",))])
+    assert "in test" not in context.rendered
+    assert context.hits[0].phase == ""

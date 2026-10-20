@@ -114,3 +114,29 @@ def test_archive_can_be_disabled():
     miner = EpisodeMiner(archive_enabled=False)
     result = miner.mine(CodexAgentAdapter().parse(compaction_payload()))
     assert result.events == ()
+
+
+def test_a_recipe_carries_the_phase_of_its_own_episode():
+    """
+    Routing decided `debug` for the turn; the recipe was made while testing.
+
+    The phase is what a later request filters on, so it is the phase of the
+    episode — the mode its evidence names — not the mode of the whole turn.
+    """
+    event = mine(codex_payload(recipe_items(), mode="debug")).events[0]
+    assert event.mode == "debug"
+    assert event.metadata["phase"] == "test"
+    assert parse_document_text(event.text)[0].phase == "test"
+
+
+def test_a_deadend_carries_the_phase_it_was_stuck_in():
+    event = mine(codex_payload(deadend_items(), mode="debug")).events[0]
+    assert event.metadata["phase"] == "debug"
+    assert parse_document_text(event.text)[0].phase == "debug"
+
+
+def test_an_archived_fragment_carries_the_mode_of_its_turn():
+    result = mine(compaction_payload(mode="implement"))
+    assert result.events
+    for event in result.events:
+        assert event.metadata["phase"] == "implement"

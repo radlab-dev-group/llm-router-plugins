@@ -102,6 +102,7 @@ IDENTITY_KEYS: Tuple[str, ...] = (
     "window_id",
     "scope",
     "kind",
+    "phase",
     "signature_hash",
 )
 

@@ -194,6 +194,20 @@ Each mode has a policy — the sources it reads, their weights, `max_items`, and
 }
 ```
 
+A source may also restrict the **phases** it is read in — the work the episode was
+doing (`test`, `implement`, …), which is *not* the document kind: a `recipe` mined
+while `implement`ing is still a recipe.  An empty `phases` list — the default —
+reads the source in every phase.  The restriction becomes engine-side
+`metadata_filters` on `phase`, one filter per phase, which the engine unions; it
+intersects with the source's categories.  One source without a restriction
+leaves the whole request unrestricted (sources of one collection are retrieved
+by one search), and an archived source never carries one: its `thread_id` filter
+owns the single metadata slot the engine allows.
+
+```jsonc
+{"category": "recipe", "weight": 1.0, "max_items": 3, "phases": ["test", "debug"]}
+```
+
 `ContextAssembler` normalizes SSE's `score_normalized`, multiplies by the source weight, adds a bonus when a document's
 error signature or paths match the current turn, deduplicates by document name, and cuts to the budget. Sections are
 rendered in a fixed order inside constant markers:
@@ -206,6 +220,9 @@ rendered in a fixed order inside constant markers:
 ## Conventions
 </agentic_knowledge>
 ```
+
+Every entry is cited with the phase it was learned in — `[recipe · in test · 2026-10-12 · src/a.py]` — so
+the agent can tell a fix it verified in a test run from one it learned by editing.
 
 The block is injected as **the last element of `input`** (Codex: a `developer` message) — not into `instructions`, so
 the prompt cache prefix of the CLI survives and the block stays removable. The client does not echo our element back,
@@ -225,7 +242,9 @@ stays escalated even when a later request no longer repeats the loop by itself.
 
 `EpisodeMiner` reads the turn's phase evidence — `collect_phase_evidence` from the Codex package, no second parser —
 and emits `recipe` for a `test_failure → patch → test pass` episode and `deadend` for a failure that repeats with an
-identical signature. Codex resends the whole history with every request, so episodes are recomputed each time and
+identical signature.  Each event carries the **phase** its own evidence names — the mode most of its items are in,
+the newest one breaking a tie, the turn's mode when it names none — which the worker writes into the document
+header and into `metadata_json.phase`, verbatim (it is a filter key, like `thread_id`). Codex resends the whole history with every request, so episodes are recomputed each time and
 deduplicated before publishing: `SET NX <fingerprint> EX <dedup_ttl_seconds>` in front of `XADD`, and `XADD … MAXLEN ~
 <max_stream_len>`. If `XADD` fails the dedup key is released, so the episode is retried rather than silently lost.
 

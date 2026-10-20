@@ -141,6 +141,7 @@ class DocumentMeta:
     test_command: str = ""
     attempts: int = 0
     source: str = ""
+    phase: str = ""
 
 
 def _attribute(key: str, value: str) -> str:
@@ -162,6 +163,7 @@ def build_document_text(
     position: Optional[int] = None,
     agent: str = "",
     mode: str = "",
+    phase: str = "",
     test_command: str = "",
     attempts: int = 0,
 ) -> str:
@@ -189,6 +191,8 @@ def build_document_text(
         Order of the fragment inside its window.
     agent, mode : str, optional
         Who produced the episode and in which work mode.
+    phase : str, optional
+        Work phase the episode was mined in; a subset of the turn's mode.
     test_command : str, optional
         Command that decided the outcome.
     attempts : int, optional
@@ -220,6 +224,8 @@ def build_document_text(
         fields.append(_attribute("agent", agent))
     if mode:
         fields.append(_attribute("mode", mode))
+    if phase:
+        fields.append(_attribute("phase", phase))
     if test_command:
         fields.append(_attribute("test_command", test_command))
     if attempts:
@@ -296,6 +302,7 @@ def _meta_arguments(fields: dict) -> dict:
         ("agent", "agent"),
         ("mode", "mode"),
         ("test_command", "test_command"),
+        ("phase", "phase"),
     ):
         if fields.get(source):
             arguments[target] = fields[source]

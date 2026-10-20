@@ -354,6 +354,7 @@ class EpisodeMiner:
             parts=self._episode_parts(turn, "recipe", failure),
             test_command=command,
             paths=_merge_paths(turn.touched_paths, failure.signature.paths),
+            phase=_episode_phase(turn, failure),
         )
 
     # ------------------------------------------------------------- deadend --
@@ -383,6 +384,7 @@ class EpisodeMiner:
             test_command=failure.command
             or self._command_text(turn, failure.evidence),
             paths=_merge_paths(turn.touched_paths, failure.signature.paths),
+            phase=_episode_phase(turn, failure),
         )
 
     def _episode_parts(
@@ -420,6 +422,7 @@ class EpisodeMiner:
                 "window_id": turn.window_id,
                 "position": position,
                 "fragment_kind": role,
+                "phase": turn.mode,
                 "ttl_seconds": self._archive_ttl_seconds,
             }
             body = build_document_text(
@@ -431,6 +434,7 @@ class EpisodeMiner:
                 position=position,
                 agent=turn.agent,
                 mode=turn.mode,
+                phase=turn.mode,
             )
             events.append(
                 KnowledgeEvent(
@@ -466,6 +470,7 @@ class EpisodeMiner:
         parts: Sequence[str],
         test_command: str = "",
         paths: Tuple[str, ...] = (),
+        phase: str = "",
     ) -> KnowledgeEvent:
         """Assemble one publishable event out of the parts."""
         digest = fingerprint(*parts)
@@ -480,6 +485,7 @@ class EpisodeMiner:
             agent=turn.agent,
             mode=turn.mode,
             test_command=test_command,
+            phase=phase,
         )
         metadata: Dict[str, Any] = {
             "paths": list(paths),
@@ -487,6 +493,8 @@ class EpisodeMiner:
             "mode": turn.mode,
             "agent": turn.agent,
         }
+        if phase:
+            metadata["phase"] = phase
         if test_command:
             metadata["test_command"] = test_command
         return KnowledgeEvent(
@@ -640,6 +648,33 @@ def _verifies(failing: str, green: str) -> bool:
         return True
     named = _test_files(left)
     return any(path in right for path in named)
+
+
+def _episode_phase(turn: AgentTurn, failure: _Failure) -> str:
+    """
+    Return the work phase one episode happened in.
+
+    The mode routing resolved for the whole turn is not it: a turn that started
+    by debugging, patched, and ended running tests produced its recipe while
+    testing.  The phase is read from the episode's own evidence — the mode that
+    names most of its items, the newest one breaking a tie — and falls back to
+    the turn's mode when the episode names none, which is what an operator
+    filters on when nothing was recorded.
+    """
+    items = [failure.evidence, *failure.patches, *failure.later_failures]
+    if failure.resolved_by is not None:
+        items.append(failure.resolved_by)
+    counted: Dict[str, int] = {}
+    for item in items:
+        if item.mode:
+            counted[item.mode] = counted.get(item.mode, 0) + 1
+    if not counted:
+        return turn.mode
+    best = max(counted.values())
+    for item in reversed(items):
+        if counted.get(item.mode, 0) == best:
+            return item.mode
+    return turn.mode
 
 
 def _merge_paths(

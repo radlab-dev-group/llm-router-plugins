@@ -8,7 +8,7 @@ release tagged as `v<version>`.
 
 | Version | Changelog |
 | ------- | --------- |
-| 0.1.5 | **Added:** `agentic_knowledge` — a knowledge layer that runs behind the Codex router: per-work-mode retrieval of verified fixes, dead ends and the pre-compaction archive from the Semantic Search Engine, a masked learn-from-traffic write path through a Redis Stream and an indexing worker, and optional knowledge-or-escalate model selection. Adapters for Codex (full) and Claude Code (read-only), plus offline counterfactual evaluation. **Fix:** the `agentic_knowledge` collection names are reduced to the engine's character set at configuration time, so a repository scope that would produce a hyphen can no longer make every indexing attempt fail with a 500 at collection creation; the retention pass still sweeps the legacy `prefix-<scope>-sessions` archives. |
+| 0.1.5 | **Added:** `agentic_knowledge` — a knowledge layer that runs behind the Codex router: per-work-mode retrieval of verified fixes, dead ends and the pre-compaction archive from the Semantic Search Engine, a masked learn-from-traffic write path through a Redis Stream and an indexing worker, and optional knowledge-or-escalate model selection. Adapters for Codex (full) and Claude Code (read-only), plus offline counterfactual evaluation. **Fix:** the `agentic_knowledge` collection names are reduced to the engine's character set at configuration time, so a repository scope that would produce a hyphen can no longer make every indexing attempt fail with a 500 at collection creation; the retention pass still sweeps the legacy `prefix-<scope>-sessions` archives. **Added:** engine login for a Semantic Search Engine that authenticates by username and password rather than by a pre-issued token (`SSE_API_USERNAME`/`SSE_API_PASSWORD`); every mined episode now carries the work **phase** its evidence names (`test`, `implement`, …) in its header and in `metadata_json.phase`, and a retrieval source can be restricted to phases in its policy (`"phases": ["test"]`) — the filter is engine-side, unions across phases, intersects the source's categories, and never touches the archived window, whose `thread_id` owns the single metadata slot. |
 | 0.1.4 | **Fix:** the Codex routing record follows the phase that was actually routed with instead of the last signal it could rebuild, so an interleaved command no longer freezes the record and repeats a conflict on every request of the turn (captured-session replay: 11 conflicts -> 0). **Added:** `RememberResult` carries why a memory write was skipped; the log names the real cause instead of an undifferentiated `version conflict`. |
 | 0.1.3 | **Added:** an accepted semantic decision can be carried across one command generation (`MEMORY_CARRY_DECISIONS`). **Changed:** semantic rankings are read against their own scale; the phase layer separates work states from shell noise; CLI-injected context is kept out of the intent text. |
 | 0.1.2 | **Added:** optional Redis-backed shared session memory with `MEMORY_MAX_RETRIES`; offline routing evaluation with calibration replay; a configurable `phase` layer reading assistant actions and tool activity; heuristic `negation_pattern` / `min_margin` / `weights`; `per_target_top_k` aggregation. **Changed:** mode definitions refined; semantic context built from the latest assistant utterance only. |
@@ -28,6 +28,25 @@ release tagged as `v<version>`.
   what this repository has already learned from the Semantic Search Engine (SSE), and injects it as a separate,
   removable context block — with no cooperation from the agent. Fully fail-open: no SSE host means no reads, no Redis
   means no writes, and any failure passes the request through untouched.
+- **Engine login.** A Semantic Search Engine that authenticates by username and
+  password rather than by a pre-issued token now works: `…_SSE_API_USERNAME` and
+  `…_SSE_API_PASSWORD` flow from the environment through the store and the
+  indexing worker, and the client logs in on its first call.  A token, when set,
+  wins, and a name without a secret is no credential at all, so nothing is ever
+  attempted that would log a 401 as an indexing failure.
+- **Phases.** Every mined episode carries the work phase its own evidence names —
+  the mode most of its items are in, the newest one breaking a tie, the turn's
+  mode when it names none — written into the document header and into
+  `metadata_json.phase`, verbatim, because the reader filters on it.  A retrieval
+  source can be restricted to phases in the policy
+  (`{"category": "recipe", "phases": ["test", "debug"]}`): one engine-side
+  `metadata_filters` entry per phase (the engine unions them, which is exactly
+  "one of these"), intersecting the source's categories.  A source without a
+  restriction leaves the whole request unrestricted, and an archived source never
+  carries one — its `thread_id` filter owns the single metadata slot the engine
+  allows, and a second would widen the archived window to every thread of the
+  repository.  The phase is cited on every injected entry
+  (`[recipe · in test · 2026-10-12 · src/a.py]`).
 - **Read path.** Per-work-mode retrieval policies (`debug`, `test`, `implement`, `plan`, `git_review`, `review`) over
   weighted sources (`{category, weight, max_items}`) with a character budget per mode; `ContextAssembler` normalizes
   SSE scores, adds a bonus for a matching error signature or path, deduplicates by document name and cuts to the

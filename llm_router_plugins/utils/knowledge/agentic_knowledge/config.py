@@ -137,11 +137,17 @@ class SourcePolicy:
         Multiplier of a hit's normalized score when the sources vote.
     max_items : int
         Most hits this source may contribute, whatever its score.
+    phases : Tuple[str, ...]
+        Work phases this source is read in; empty — the default — reads it in
+        every phase.  A phase is the work the episode was doing (`test`,
+        `implement`), the document kind is what it produced (`recipe`); the
+        engine filters them with different options and they intersect.
     """
 
     category: str
     weight: float = 1.0
     max_items: int = 3
+    phases: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -752,7 +758,7 @@ def _sources(raw: Any, mode: str) -> Tuple[SourcePolicy, ...]:
     for entry in raw:
         if not isinstance(entry, Mapping):
             raise ValueError(f"modes.{mode}.sources entries must be objects")
-        unknown = set(entry) - {"category", "weight", "max_items"}
+        unknown = set(entry) - {"category", "weight", "max_items", "phases"}
         if unknown:
             raise ValueError(f"Unknown modes.{mode}.sources keys: {sorted(unknown)}")
         sources.append(
@@ -762,9 +768,28 @@ def _sources(raw: Any, mode: str) -> Tuple[SourcePolicy, ...]:
                 max_items=_positive(
                     entry.get("max_items", 3), f"modes.{mode}.sources.max_items"
                 ),
+                phases=_phase_names(
+                    entry.get("phases", ()), f"modes.{mode}.sources.phases"
+                ),
             )
         )
     return tuple(sources)
+
+
+def _phase_names(raw: Any, label: str) -> Tuple[str, ...]:
+    """Validate one source's phase restriction."""
+    if raw in (None, "", [], ()):
+        return ()
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        raise ValueError(f"{label} must be a list of phase names")
+    names = []
+    for value in raw:
+        name = str(value).strip()
+        if not name:
+            raise ValueError(f"{label} must not hold an empty phase name")
+        if name not in names:
+            names.append(name)
+    return tuple(names)
 
 
 def _overrides(raw: Any) -> Dict[str, str]:

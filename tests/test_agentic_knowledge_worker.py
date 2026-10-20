@@ -185,6 +185,25 @@ def test_metadata_filter_keys_are_byte_identical_to_the_reader_s():
     assert "jane@example.com" not in json.dumps(stored)
 
 
+def test_the_phase_survives_the_masker_like_the_other_filter_keys():
+    """
+    The read path filters on ``phase`` with ``eq``; the worker masks everything
+    that is not an identity key, so the phase has to be one.
+    """
+    event = dataclasses.replace(
+        knowledge_event(kind="recipe"),
+        metadata={
+            "thread_id": MASKABLE["thread_id"],
+            "phase": "test",
+            "contact": "jane@example.com",
+        },
+    )
+    _processed, _redis, sse = run_event(event)
+    stored = sse.indexed[0][1][0]["options"]
+    assert stored["phase"] == "test"
+    assert "jane@example.com" not in json.dumps(stored)
+
+
 def test_the_header_and_the_metadata_agree_on_the_identity():
     """A reader that lost the metadata still reads the header off the text."""
     event = dataclasses.replace(

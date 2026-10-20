@@ -91,7 +91,14 @@ class _FakeStore:
         """Start with an empty index."""
         self.documents: List[Dict[str, Any]] = []
 
-    def index(self, kind: str, collection: str, text: str, mined_at: str) -> None:
+    def index(
+        self,
+        kind: str,
+        collection: str,
+        text: str,
+        mined_at: str,
+        phase: str = "",
+    ) -> None:
         """Add one document to the index."""
         self.documents.append(
             {
@@ -99,6 +106,7 @@ class _FakeStore:
                 "category": kind,
                 "text": text,
                 "mined_at": mined_at,
+                "phase": phase,
             }
         )
 
@@ -113,6 +121,8 @@ class _FakeStore:
                 continue
             categories = request.categories or ()
             if categories and document["category"] not in categories:
+                continue
+            if request.phases and document["phase"] not in request.phases:
                 continue
             score = _overlap(query, _tokens(document["text"]))
             if score < _MIN_OVERLAP:
@@ -204,6 +214,7 @@ class ReplayEngine:
                             self.config.collection(turn.scope, event.kind),
                             event.text,
                             str(raw.get("id", index)),
+                            phase=str(event.metadata.get("phase", "")),
                         )
                         mined[str(raw.get("id", index))] = event.signature_hash
                 self._score(variants, raw, context, retrieved, store, index)

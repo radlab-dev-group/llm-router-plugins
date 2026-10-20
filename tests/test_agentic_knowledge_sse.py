@@ -204,3 +204,35 @@ def test_a_flattened_entry_reaches_the_caller_as_a_hit():
     assert result.hits[0].relative_path == "recipe:20261016:abc"
     assert result.hits[0].text == "the fix"
     assert result.hits[0].score_normalized == 0.92
+
+
+# ------------------------------------------------------------------ phase --
+def test_a_phase_restriction_is_one_metadata_filter_per_phase():
+    """
+    The engine unions several ``metadata_filters``, and here that is the
+    feature: N filters read as "the phase is one of these N".
+    """
+    options = _options(
+        SearchRequest(collection="c", query="q", phases=("test", "implement")),
+        0.35,
+    )
+    assert options["metadata_filters"] == [
+        {"operator": "eq", "field": {"phase": "test"}},
+        {"operator": "eq", "field": {"phase": "implement"}},
+    ]
+
+
+def test_a_thread_filter_wins_over_the_phases():
+    """
+    Two metadata filters would be unioned, so an archived window filtered by
+    both would come back as every thread of the repository.
+    """
+    options = _options(
+        SearchRequest(
+            collection="c", query="q", thread_id="thread-1", phases=("test",)
+        ),
+        0.35,
+    )
+    assert options["metadata_filters"] == [
+        {"operator": "eq", "field": {"thread_id": "thread-1"}}
+    ]

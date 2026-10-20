@@ -169,3 +169,16 @@ def test_an_old_name_whose_fingerprint_holds_a_separator_still_parses():
     assert meta.kind == KIND_RECIPE
     assert meta.date == DAY
     assert is_knowledge_document(legacy)
+
+
+def test_the_phase_survives_the_header():
+    """The phase is filterable metadata, so the header has to give it back."""
+    text = build_document_text(KIND_RECIPE, "body", date=DAY, phase="test")
+    assert 'phase="test"' in text.splitlines()[0]
+    assert parse_document_text(text)[0].phase == "test"
+
+
+def test_a_header_without_a_phase_parses_to_none_of_one():
+    text = build_document_text(KIND_RECIPE, "body", date=DAY)
+    assert "phase" not in text.splitlines()[0]
+    assert parse_document_text(text)[0].phase == ""

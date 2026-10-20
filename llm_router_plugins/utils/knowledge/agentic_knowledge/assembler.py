@@ -108,6 +108,9 @@ class KnowledgeHit:
         Files the document names.
     signature : str
         Failure it is about, when it has one.
+    phase : str
+        Work the episode was doing when it was learned; ``""`` when the
+        document predates the attribute.
     """
 
     category: str = ""
@@ -118,6 +121,7 @@ class KnowledgeHit:
     created_at: Optional[float] = None
     paths: Tuple[str, ...] = ()
     signature: str = ""
+    phase: str = ""
 
 
 @dataclass(frozen=True)
@@ -295,6 +299,7 @@ class ContextAssembler:
                 created_at=_timestamp(meta.date),
                 paths=meta.paths,
                 signature=meta.signature,
+                phase=meta.phase,
             ),
             meta=meta,
             vote=vote,
@@ -404,7 +409,7 @@ def _entry(candidate: _Candidate, limit: Optional[int] = None) -> str:
     alternative is injecting no recipe at all.
     """
     hit = candidate.hit
-    citation = [hit.category]
+    citation = [hit.category, f"in {hit.phase}" if hit.phase else ""]
     if hit.created_at:
         citation.append(
             datetime.datetime.fromtimestamp(hit.created_at, tz=datetime.timezone.utc)

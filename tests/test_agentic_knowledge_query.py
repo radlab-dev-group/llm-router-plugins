@@ -95,3 +95,81 @@ def test_a_category_listed_twice_still_restricts_the_archive_to_the_thread():
     assert len(requests) == 1
     assert requests[0].categories == ("session_archive",)
     assert requests[0].thread_id == "thread-1"
+
+def test_a_source_phase_restriction_reaches_the_request():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        ModePolicy,
+        SourcePolicy,
+    )
+
+    policy = ModePolicy(
+        name="implement",
+        sources=(SourcePolicy(category="recipe", weight=1.0, phases=("test",)),),
+    )
+    requests = builder().build(turn_for(), policy)
+    assert requests
+    assert requests[0].phases == ("test",)
+
+
+def test_a_source_that_reads_every_phase_widens_the_request():
+    """
+    Two sources share one search; if either wants every phase, the other's
+    restriction would drop half of what the mode asked to read.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        ModePolicy,
+        SourcePolicy,
+    )
+
+    policy = ModePolicy(
+        name="implement",
+        sources=(
+            SourcePolicy(category="recipe", weight=1.0, phases=("test",)),
+            SourcePolicy(category="deadend", weight=0.9),
+        ),
+    )
+    requests = builder().build(turn_for(), policy)
+    assert len(requests) == 1
+    assert requests[0].categories == ("recipe", "deadend")
+    assert requests[0].phases == ()
+
+
+def test_restricting_sources_of_one_collection_union_their_phases():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        ModePolicy,
+        SourcePolicy,
+    )
+
+    policy = ModePolicy(
+        name="implement",
+        sources=(
+            SourcePolicy(category="recipe", weight=1.0, phases=("test",)),
+            SourcePolicy(
+                category="deadend", weight=0.9, phases=("debug", "test")
+            ),
+        ),
+    )
+    requests = builder().build(turn_for(), policy)
+    assert requests[0].phases == ("test", "debug")
+
+
+def test_an_archive_request_never_carries_phases():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        ModePolicy,
+        SourcePolicy,
+    )
+
+    policy = ModePolicy(
+        name="debug",
+        sources=(
+            SourcePolicy(category="recipe", weight=1.0, phases=("test",)),
+            SourcePolicy(
+                category="session_archive", weight=0.6, phases=("test",)
+            ),
+        ),
+    )
+    requests = builder().build(turn_for(mode="debug"), policy)
+    by_kind = {r.categories[0]: r for r in requests if r.categories}
+    assert by_kind["recipe"].phases == ("test",)
+    assert by_kind["session_archive"].phases == ()
+    assert by_kind["session_archive"].thread_id == "thread-1"

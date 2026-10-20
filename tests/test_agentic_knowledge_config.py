@@ -207,3 +207,32 @@ def test_mode_and_source_policies_are_frozen():
     policy = ModePolicy(name="debug", sources=(SourcePolicy("recipe", 1.0, 3),))
     with pytest.raises(Exception):
         policy.max_chars = 1  # type: ignore[misc]
+
+
+def test_a_source_can_restrict_its_phases():
+    config = AgenticKnowledgeConfig.from_json(
+        '{"modes": {"debug": {"sources": '
+        '[{"category": "recipe", "phases": ["test", "debug"]}]}}}'
+    )
+    source = config.modes["debug"].sources[0]
+    assert source.phases == ("test", "debug")
+
+
+def test_a_source_without_phases_reads_every_phase():
+    config = AgenticKnowledgeConfig.from_json(
+        '{"modes": {"debug": {"sources": [{"category": "recipe"}]}}}'
+    )
+    assert config.modes["debug"].sources[0].phases == ()
+
+
+def test_phases_must_be_a_list_of_names():
+    with pytest.raises(ValueError):
+        AgenticKnowledgeConfig.from_json(
+            '{"modes": {"debug": {"sources": '
+            '[{"category": "recipe", "phases": "test"}]}}}'
+        )
+    with pytest.raises(ValueError):
+        AgenticKnowledgeConfig.from_json(
+            '{"modes": {"debug": {"sources": '
+            '[{"category": "recipe", "phases": [""]}]}}}'
+        )
