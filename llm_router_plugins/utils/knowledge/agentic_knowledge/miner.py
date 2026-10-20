@@ -56,6 +56,7 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.phase import (
     EVIDENCE_PATCH,
     EVIDENCE_TEST_FAILURE,
     PhaseEvidence,
+    patch_envelopes,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.state import fingerprint
 
@@ -70,6 +71,12 @@ _WINDOW_CHUNK_RE = re.compile(r"\n(?=\[[a-z_]+\]\n)")
 #: that were left out, which is exactly the test that failed.
 _EXCLUSION_RE = re.compile(
     r"(?:^|\s)(?:-k\b|--deselect|--ignore(?:-path)?|--collect-only|--co\b|-m\b)(?:\s|$)"
+)
+
+#: How pytest is launched as a module: the ``-m`` of an invocation does
+#: not narrow anything, and must not be read as the ``-m`` that selects markers.
+_MODULE_LAUNCHER_RE = re.compile(
+    r"^\s*\S*python\d*(?:\.\d*)?\s+-m\s+(?=pytest\b|unittest\b)"
 )
 
 #: Source or test file a command line names.
@@ -514,7 +521,13 @@ class EpisodeMiner:
         )
 
     def _patch_text(self, turn: AgentTurn, patches: Sequence[PhaseEvidence]) -> str:
-        """Quote the patches of an episode, capped."""
+        """Quote the patches of an episode, capped.
+
+        The envelope is what a reader needs, and a CLI release decides how it
+        is carried — an ``apply_patch`` argument today, a here-document piped
+        through ``exec_command`` yesterday — so the arguments are decoded first
+        and quoted raw only when they hold no envelope at all.
+        """
         arguments = _call_arguments(turn)
         chunks = []
         total = 0
@@ -522,8 +535,14 @@ class EpisodeMiner:
             text = arguments.get(item.call_id) or arguments.get(item.event_id) or ""
             if not text.strip():
                 continue
-            chunks.append(text.strip())
-            total += len(text)
+            bodies = patch_envelopes(text) or [text]
+            for body in bodies:
+                if not body.strip():
+                    continue
+                chunks.append(body.strip())
+                total += len(body)
+                if total >= self._max_patch_chars:
+                    break
             if total >= self._max_patch_chars:
                 break
         joined = "\n".join(chunks)
@@ -642,7 +661,7 @@ def _verifies(failing: str, green: str) -> bool:
     right = _normalized_command(green)
     if not left or not right:
         return False
-    if _EXCLUSION_RE.search(right):
+    if _EXCLUSION_RE.search(_MODULE_LAUNCHER_RE.sub("", right)):
         return False
     if left == right:
         return True

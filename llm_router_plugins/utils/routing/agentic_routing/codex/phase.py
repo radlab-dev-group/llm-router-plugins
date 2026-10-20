@@ -63,6 +63,7 @@ __all__ = [
     "detect_phase_evidence",
     "detect_phase",
     "describe_activity",
+    "patch_envelopes",
 ]
 
 #: An announcement of the current action by the assistant.
@@ -106,6 +107,15 @@ _REDIRECT = re.compile(r"\d*(?:>>|>)[^\s;&|]*")
 
 #: A here-document introducer and its terminating word.
 _HERE_DOCUMENT = re.compile(r"<<<?-?\s*(['\"]?)(\w+)\1")
+
+#: The first and the last line of a Codex patch envelope.
+_PATCH_BEGIN = "*** Begin Patch"
+_PATCH_END = "*** End Patch"
+
+#: Argument keys of a tool call that can carry a patch envelope, in the order
+#: Codex sends them: an ``apply_patch`` call declares the patch, an
+#: ``exec_command`` wraps that same envelope in the command applying it.
+_PATCH_ARGUMENT_KEYS = ("patch", "input", "cmd", "command")
 
 #: Words that structure a shell script without naming an action.
 _SHELL_CONTROL_WORDS = frozenset(
@@ -745,6 +755,10 @@ def _patch_phase(text: str, rules: CodexPhaseConfig) -> Tuple[Optional[str], str
     """
     Return the phase of a Codex patch envelope, by the paths it touches.
 
+    The envelope is looked for rather than assumed: a current Codex CLI applies
+    a patch by piping an envelope to ``apply_patch`` inside ``exec_command``,
+    where the name of the tool says nothing and only the decoded arguments do.
+
     Parameters
     ----------
     text : str
@@ -758,17 +772,137 @@ def _patch_phase(text: str, rules: CodexPhaseConfig) -> Tuple[Optional[str], str
         ``(mode, reason)``, or ``(None, "")`` for anything that is not a
         well-formed envelope over safe relative paths.
     """
+    if _ambiguous_patch_arguments(text):
+        return None, ""
+    for envelope in patch_envelopes(text):
+        mode, reason = _envelope_phase(envelope, rules)
+        if mode is not None:
+            return mode, reason
+    return None, ""
+
+
+def _ambiguous_patch_arguments(text: str) -> bool:
+    """Whether one call declares two different patches for the same work."""
     try:
         arguments = json.loads(text)
     except (ValueError, TypeError):
-        arguments = None
-    if isinstance(arguments, dict):
-        patches = [arguments[key] for key in ("patch", "input") if key in arguments]
-        if not patches or any(not isinstance(patch, str) for patch in patches):
-            return None, ""
-        if len(set(patches)) != 1:
-            return None, ""
-        text = patches[0]
+        return False
+    if not isinstance(arguments, dict):
+        return False
+    declared = [
+        arguments[key]
+        for key in ("patch", "input")
+        if key in arguments and isinstance(arguments[key], str)
+    ]
+    return len(set(declared)) > 1
+
+
+def patch_envelopes(text: str) -> List[str]:
+    """
+    Return every patch envelope a tool call carries, decoded.
+
+    An envelope rides in three shapes: the ``patch``/``input`` argument of an
+    ``apply_patch`` call, the body of a here-document a shell command pipes to
+    ``apply_patch`` — what a current Codex CLI does — and, in older captures,
+    the arguments already unencoded.  Arguments arrive JSON-encoded, so the line
+    breaks of the envelope are ``\\n`` escapes and a line-anchored pattern over
+    the raw call reads nothing.
+
+    A here-document counts only when the command applies a patch: a file the
+    agent writes can quote an envelope, and quoting one patched nothing.
+
+    Parameters
+    ----------
+    text : str
+        The raw JSON arguments of the call, or the envelope itself.
+
+    Returns
+    -------
+    List[str]
+        The envelope texts, in the order the call carries them.
+    """
+    envelopes: List[str] = []
+    for candidate in _patch_argument_texts(text):
+        for body in _envelope_bodies(candidate):
+            for envelope in _envelope_spans(body):
+                if envelope not in envelopes:
+                    envelopes.append(envelope)
+    return envelopes
+
+
+def _patch_argument_texts(text: str) -> List[str]:
+    """Return the argument values of one call that can hold an envelope."""
+    try:
+        arguments = json.loads(text)
+    except (ValueError, TypeError):
+        return [text]
+    if isinstance(arguments, str):
+        return [arguments]
+    if not isinstance(arguments, dict):
+        return [text]
+    texts: List[str] = []
+    for key in _PATCH_ARGUMENT_KEYS:
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip() and value not in texts:
+            texts.append(value)
+    return texts or [text]
+
+
+def _envelope_bodies(candidate: str) -> List[str]:
+    """Return the texts of one argument in which an envelope can sit."""
+    if "<<" not in candidate or candidate.lstrip().startswith(_PATCH_BEGIN):
+        return [candidate]
+    shell, body = _without_here_document(candidate)
+    if not body:
+        return [candidate]
+    if "apply_patch" not in shell and not body.lstrip().startswith(_PATCH_BEGIN):
+        return []
+    return [body]
+
+
+def _envelope_spans(text: str) -> List[str]:
+    """Cut every ``Begin Patch`` … ``End Patch`` block out of *text*."""
+    if _PATCH_BEGIN not in text:
+        return []
+    lines = text.splitlines()
+    spans: List[str] = []
+    index = 0
+    while index < len(lines):
+        if lines[index] != _PATCH_BEGIN:
+            index += 1
+            continue
+        closing = next(
+            (
+                stop
+                for stop in range(index + 1, len(lines))
+                if lines[stop] == _PATCH_END
+            ),
+            None,
+        )
+        if closing is None:
+            break
+        spans.append("\n".join(lines[index : closing + 1]))
+        index = closing + 1
+    return spans
+
+
+def _envelope_phase(text: str, rules: CodexPhaseConfig) -> Tuple[Optional[str], str]:
+    """
+    Return the phase of one complete envelope, validated line by line.
+
+    Parameters
+    ----------
+    text : str
+        The envelope, from its first to its last marker line.
+    rules : CodexPhaseConfig
+        Validated patch and test-path rules.
+
+    Returns
+    -------
+    Tuple[Optional[str], str]
+        ``(mode, reason)``, or ``(None, "")`` for anything that is not a
+        well-formed envelope over safe relative paths.
+    """
     lines = text.strip().splitlines()
     if not lines or lines[0] != "*** Begin Patch" or lines[-1] != "*** End Patch":
         return None, ""
@@ -898,18 +1032,30 @@ def collect_phase_evidence(
                 )
         elif item.kind == "function_call":
             if item.name in rules.command_tools:
-                signal = _command_signal(item.text, rules)
-                if signal is None:
-                    scripted = _here_document_phase(item.text, rules)
-                    signal = (
-                        (scripted[0], scripted[1], STRENGTH_STRONG)
-                        if scripted[0] is not None
-                        else None
-                    )
-                if signal is None:
-                    continue
-                mode, reason, strength = signal
-                kind = EVIDENCE_COMMAND
+                # A command that pipes an envelope to ``apply_patch`` patches,
+                # whatever the tools of this CLI release are called: the
+                # envelope outranks the command line, which cannot see it.
+                mode, reason = (
+                    _patch_phase(item.text, rules)
+                    if _PATCH_BEGIN in item.text
+                    else (None, "")
+                )
+                if mode is not None:
+                    strength = STRENGTH_STRONG
+                    kind = EVIDENCE_PATCH
+                else:
+                    signal = _command_signal(item.text, rules)
+                    if signal is None:
+                        scripted = _here_document_phase(item.text, rules)
+                        signal = (
+                            (scripted[0], scripted[1], STRENGTH_STRONG)
+                            if scripted[0] is not None
+                            else None
+                        )
+                    if signal is None:
+                        continue
+                    mode, reason, strength = signal
+                    kind = EVIDENCE_COMMAND
             elif item.name in rules.patch_tools:
                 mode, reason = _patch_phase(item.text, rules)
                 strength = STRENGTH_STRONG

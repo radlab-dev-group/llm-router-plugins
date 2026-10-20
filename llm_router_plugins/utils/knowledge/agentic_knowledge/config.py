@@ -22,7 +22,7 @@ JSON structure::
 
     {
       "adapters": ["codex", "claude_code"],
-      "collection_prefix": "agentic-kb",
+      "collection_prefix": "agentic_kb",
       "scope": {"strategy": "repo_basename", "overrides": {}, "default": ""},
       "read": {"enabled": true, "timeout_seconds": 1.5, "min_similarity": 0.35,
                "cache_ttl_seconds": 3600, "max_lookups_per_generation": 20},

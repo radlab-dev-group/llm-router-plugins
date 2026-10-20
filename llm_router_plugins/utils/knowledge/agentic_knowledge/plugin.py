@@ -47,6 +47,9 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
 )
+from llm_router_plugins.utils.knowledge.agentic_knowledge.debug_capture import (
+    capture_payload as _capture_payload,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.escalation import (
     ACTION_ESCALATE,
     EscalationDecision,
@@ -179,6 +182,16 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._limiter = LookupLimiter(
             max_per_generation=config.max_lookups_per_generation
         )
+        if self._logger is not None:
+            # One line per process, at a level an operator actually reads.  The
+            # layer fails open everywhere, so without it a plugin that loaded
+            # and is not allowed to write looks exactly like one that never
+            # loaded, and an empty knowledge base has no other way to say which
+            # of the two it is.
+            self._logger.info(
+                "agentic knowledge wired: %s",
+                _wiring_summary(config, self._adapters),
+            )
 
     # ---------------------------------------------------------------- apply -
     def apply(self, payload: Any, **kwargs: Any) -> Any:
@@ -207,6 +220,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         adapter = self._matching_adapter(payload)
         if adapter is None:
             return payload
+        _capture_payload(payload, self._logger)
         try:
             turn = adapter.parse(payload)
         except Exception as exc:
@@ -218,6 +232,16 @@ class AgenticKnowledgePlugin(PluginInterface):
         if turn.request_class == _REQUEST_CLASS_AUX:
             return payload
 
+        self._debug(
+            "agentic knowledge request: adapter=%s class=%s scope=%s mode=%s"
+            " %s %s",
+            adapter.name,
+            turn.request_class or "-",
+            turn.scope or "-",
+            turn.mode or "-",
+            _payload_shape(payload),
+            _turn_shape(turn),
+        )
         mining = self._mine(turn)
         publish = self._publish(mining, config, turn)
 
@@ -422,10 +446,17 @@ class AgenticKnowledgePlugin(PluginInterface):
         if self._miner is None:
             return MiningResult()
         try:
-            return self._miner.mine(turn)
+            result = self._miner.mine(turn)
         except Exception as exc:
             self._warn("knowledge mining failed: %s", type(exc).__name__)
             return MiningResult()
+        self._debug(
+            "agentic knowledge mined: events=%d kinds=%s loop=%d",
+            len(result.events),
+            ",".join(sorted({str(event.kind) for event in result.events})) or "-",
+            result.loop_count,
+        )
+        return result
 
     def _publish(
         self, mining: Any, config: AgenticKnowledgeConfig, turn: AgentTurn
@@ -441,8 +472,20 @@ class AgenticKnowledgePlugin(PluginInterface):
         """
         events = getattr(mining, "events", ())
         if not events or not config.write_available or self._publisher is None:
+            if events:
+                self._debug(
+                    "agentic knowledge write skipped: %s",
+                    "write disabled"
+                    if not config.write_enabled
+                    else "no Redis configured",
+                )
             return PublishStatus()
         if not turn.scope:
+            self._debug(
+                "agentic knowledge write skipped: repository scope unknown"
+                " (%d event(s) dropped)",
+                len(events),
+            )
             return PublishStatus(STATUS_DISABLED, reason="no scope")
         try:
             return self._publisher.publish(events)
@@ -520,6 +563,11 @@ class AgenticKnowledgePlugin(PluginInterface):
         if self._logger is not None:
             self._logger.warning(message, *args)
 
+    def _debug(self, message: str, *args: Any) -> None:
+        """Report one request-path detail when debug logging is on."""
+        if self._logger is not None:
+            self._logger.debug(message, *args)
+
 
 def _status_of(statuses: set) -> str:
     """Collapse per-source search statuses into one retrieval status."""
@@ -528,6 +576,96 @@ def _status_of(statuses: set) -> str:
     if STATUS_UNAVAILABLE in statuses:
         return STATUS_UNAVAILABLE
     return "disabled"
+
+
+def _payload_shape(payload: Any) -> str:
+    """
+    Count the wire items of one request, naming no content.
+
+    The adapter works on a normalized view; when that view is empty the
+    question is what the request carried at all.  Item types answer it: they
+    show whether a tool call arrived as ``function_call``, as
+    ``custom_tool_call``, or under a type no parser here knows about.
+    """
+    items = payload.get("input") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        return "items=-"
+    shapes: Dict[str, int] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("type") or ("message" if item.get("role") else "?"))
+        name = item.get("name")
+        if name:
+            kind = f"{kind}:{name}"
+        shapes[kind] = shapes.get(kind, 0) + 1
+    return "items=" + (
+        ",".join(f"{kind}:{count}" for kind, count in sorted(shapes.items()))
+        or "0"
+    )
+
+
+def _turn_shape(turn: Any) -> str:
+    """
+    Describe what the adapter saw, naming no argument and no output text.
+
+    A recipe needs three things in *one* request: a failed test, a patch after
+    it, and a green run after the patch.  When nothing is ever mined, the
+    question is always which of those three the request did not carry — and
+    `activity` plus the per-tool counts answer that, because a Codex request
+    replays the whole turn and therefore should show every tool call of it.
+    """
+    calls: Dict[str, int] = {}
+    for item in getattr(turn, "activity", ()) or ():
+        if getattr(item, "kind", "") == "function_call":
+            name = getattr(item, "name", "") or "?"
+            calls[name] = calls.get(name, 0) + 1
+    tools = ",".join(
+        f"{name}:{count}" for name, count in sorted(calls.items())
+    ) or "-"
+    states = []
+    for evidence in list(getattr(turn, "evidence", ()) or ())[-8:]:
+        outcome = getattr(evidence, "succeeded", None)
+        states.append(
+            f"{getattr(evidence, 'kind', '?')}"
+            f":{getattr(evidence, 'mode', '') or '-'}"
+            f":{'ok' if outcome else 'fail' if outcome is False else '-'}"
+        )
+    return (
+        f"activity={len(getattr(turn, 'activity', ()) or ())}"
+        f" tools=[{tools}]"
+        f" evidence={len(states)}"
+        f"[{'+'.join(states) or '-'}]"
+    )
+
+
+def _wiring_summary(
+    config: AgenticKnowledgeConfig, adapters: Optional[Tuple[AgentAdapter, ...]]
+) -> str:
+    """
+    Describe one process's wiring in a line, holding no host and no secret.
+
+    Answers the two questions an empty knowledge base always raises: is this
+    layer alive at all, and is it allowed to write.  The phase rules are called
+    out by name because they decide whether anything is mined at all — with
+    them unread, every other switch can be on and the collections stay empty
+    forever, in silence.
+    """
+    rules_on = any(
+        getattr(adapter, "phase_rules", None) is not None
+        for adapter in adapters or ()
+    )
+    return (
+        f"adapters={[getattr(adapter, 'name', '?') for adapter in adapters or ()]}"
+        f", engine={'configured' if config.sse_host.strip() else 'NOT configured'}"
+        f", redis={'configured' if config.redis.configured else 'NOT configured'}"
+        f", read={config.read_available}"
+        f", write={config.write_available}"
+        f", archive={config.archive_available}"
+        f", escalation={config.escalation_available}"
+        f", phase_rules={'on' if rules_on else 'OFF (nothing will be mined)'}"
+        f", stream={config.stream_key}"
+    )
 
 
 # ------------------------------------------------------------------ wiring -
@@ -565,7 +703,8 @@ def _build_adapters(
                     strategy=config.scope_strategy,
                     overrides=config.scope_overrides,
                     default_scope=config.scope_default,
-                )
+                ),
+                logger=logger,
             )
         )
     if "claude_code" in config.served_adapters:
