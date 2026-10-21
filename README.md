@@ -309,9 +309,10 @@ published), which is also how a repository whose router runs on another machine 
 The engine may be reached by a pre-issued token or by a username/password login
 (`SSE_API_USERNAME`/`SSE_API_PASSWORD`; the client logs in on its first call).
 
-The worker is a separate process the operator starts — `run-agentic-kb-worker.sh` in the `llm-router`
-checkout takes its environment from the router's own run script. It creates a repository's collection on
-that repository's first event; a project that has produced nothing yet simply has an empty knowledge base.
+The worker is a separate process the operator starts —
+`scripts/plugins/agentic_knowledge/run-agentic-kb-worker.sh` in the `llm-router` checkout takes its
+environment from the router's own run script. It creates a repository's collection on that repository's
+first event; a project that has produced nothing yet simply has an empty knowledge base.
 
 Connection settings (SSE and Redis) come only from `LLM_ROUTER_KNOWLEDGE_AGENTIC_*`; the policy
 (adapters, per-mode sources, weights and budgets, escalation models, retention) is

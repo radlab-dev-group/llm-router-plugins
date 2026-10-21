@@ -55,9 +55,9 @@ release tagged as `v<version>`.
   feature — the socket closed first and the loop never actually blocked.  The
   worker now raises only its own socket timeout over its own block (plus a
   margin); an operator-set socket timeout that already covers it is kept.
-- **Added:** `run-agentic-kb-worker.sh` in the `llm-router` checkout starts the
-  indexing worker with the environment of the router's own run script — it reads
-  that script's assignments rather than executing it, so no second server starts.
+- **Added:** `scripts/plugins/agentic_knowledge/run-agentic-kb-worker.sh` in the `llm-router` checkout
+  starts the indexing worker with the environment of the router's own run script — it reads that
+  script's assignments rather than executing it, so no second server starts.
   A `--once` run now also logs how many events the batch drained, so a cron
   worker is not indistinguishable from one that never ran.
 - **Fix:** a search for a repository whose knowledge has not been indexed yet
@@ -200,11 +200,9 @@ release tagged as `v<version>`.
   of two commands and said nothing about which layer they belonged to. The commands themselves,
   `llm-router-agentic-kb-worker` and `llm-router-agentic-kb-docs`, are unchanged.
 - **The operator's knowledge scripts moved to the `llm-router` checkout, and the worker stopped
-  fishing for `sse_lib` in a sibling checkout.** The `run-agentic-kb-worker.sh` and
-  `run-agentic-kb-docs.sh` wrappers now live next to the `run-rest-api-gunicorn.sh` script they
-  read, because that is where their configuration lives and where an operator looks for a second
-  process to start; the default `ROUTER_SCRIPT` resolves next to the wrapper instead of up a
-  directory tree.
+  fishing for `sse_lib` in a sibling checkout.** The `run-agentic-kb-{worker,docs}.sh` wrappers now
+  live in `scripts/plugins/agentic_knowledge/` of that checkout, next to the plugin they operate,
+  with their configuration still in the `run-rest-api-gunicorn.sh` script they read.
   The `sse-lib` dependency of the `knowledge` extra is pinned to `>=0.1.0` — the first
   published release with `ignore_question_lang_detect` on `SSEClient.search` — and the
   wrappers no longer prepend a sibling `semantic-search-engine/sse_lib/src` to

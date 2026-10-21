@@ -84,13 +84,13 @@ Without a worker the layer only reads: nothing new is ever learned. The embedder
 worker creates a collection the first time a scope produces knowledge.
 
 The worker is a second process, started by the operator — the router never spawns it. The `llm-router` checkout
-wraps that for a deployment whose configuration lives in the router's own run script: `run-agentic-kb-worker.sh`
-reads that script's assignments (never executes it, so no second server starts), exports them, and runs the
-worker with the rest of its arguments.
+wraps that for a deployment whose configuration lives in the router's own run script:
+`scripts/plugins/agentic_knowledge/run-agentic-kb-worker.sh` reads that script's assignments (never executes
+it, so no second server starts), exports them, and runs the worker with the rest of its arguments.
 
 ```bash
 # from the llm-router checkout (sibling of this one)
-bash run-agentic-kb-worker.sh [ROUTER_SCRIPT] [--once | --no-retain | --log-level …]
+bash scripts/plugins/agentic_knowledge/run-agentic-kb-worker.sh [ROUTER_SCRIPT] [--once | --no-retain | --log-level …]
 ```
 
 Run it with `--once` from cron to drain a backlog, or without it as a daemon. `--once` logs what the batch did,
