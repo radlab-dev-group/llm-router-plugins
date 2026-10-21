@@ -396,6 +396,38 @@ The digest is refreshed by the scan that already runs (`docs.rescan_interval_sec
 map — the command writes it while it publishes. `docs.context_enabled: false` returns the layer to
 retrieval alone.
 
+### Linking knowledge to documentation
+
+A mined fix and a written rule about the same module are two halves of one
+answer, and neither search connects them: a recipe is filed under the failure it
+fixed, a page under the module it explains. The map the request already carries
+resolves the link — a recipe that names `src/export.py` is rendered with a
+pointer to `docs/export.md`, the page that shares the file's stem:
+
+```
+## Verified fixes in this repo
+- [recipe · 2026-10-16 · src/export.py] flush the queue before closing the writer. → docs/export.md
+```
+
+The pointer is resolved on the **reader** side, against the documentation map of
+the scope, so it works whether or not this turn's query retrieved the page — no
+extra search, no extra request. A documentation entry points at nothing (it is
+the pointed-at), and a mined entry whose files no page documents gets no tail:
+a citation is worth its characters only when it leads somewhere. The link
+follows the same rule the stem bonus does: a named page (`docs/export.md`)
+matches by file stem (`src/export.py`), a generic page (`README.md`,
+`AGENTS.md`) documents the directory it sits in and matches only inside it — a
+root `README.md` is not documentation of everything, and a page an entry
+already cites is not pointed at a second time. The tail is charged against
+`modes.<mode>.max_chars` like the rest of the line.
+
+Two deliberate limits. The link is **not** stored in the document's metadata:
+the engine does not return document metadata on a search hit, so a stored
+`related_docs` would be write-only — resolved where it is read instead of where
+nobody can read it. And a documentation page **never counts toward
+`best_recipe_score`**: a README is not a verified fix, and documentation must
+not push a mode past its escalation threshold.
+
 ### Knowledge-or-escalate
 
 `EscalationPolicy.decide(turn, context, policy, loop_count, signature_hash)` escalates only when **all** of these hold:

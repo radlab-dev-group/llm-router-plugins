@@ -18,6 +18,7 @@ from agentic_knowledge_support import knowledge_config, store_hit
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
     ContextAssembler,
+    KnowledgeHit,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     build_document_text,
@@ -34,11 +35,11 @@ def hit(
     return store_hit(category, name=name, text=text, score=score)
 
 
-def assemble(results, mode="debug", **assembler_kwargs):
+def assemble(results, mode="debug", doc_context=None, **assembler_kwargs):
     config = knowledge_config()
     policy = config.modes[mode]
     assembler = ContextAssembler(**assembler_kwargs)
-    return assembler.assemble(results, policy)
+    return assembler.assemble(results, policy, doc_context=doc_context)
 
 
 def results_for(*hits):
@@ -311,3 +312,245 @@ def test_the_kind_is_inferred_from_the_file_when_the_header_omits_it():
         mode="plan",
     )
     assert context.hits[0].doc_type == "changelog"
+
+
+# --------------------------------------------------- documentation links --
+def _mined(category, paths, text="the verified fix", name=None):
+    """One mined document, headered with the files it speaks about."""
+    body = build_document_text(
+        category,
+        text,
+        date=datetime.date.today(),
+        paths=paths,
+    )
+    return store_hit(category, name=name or f"{category}:20261016:beef", text=body)
+
+
+def _map(*paths):
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.doc_context import (
+        DocContext,
+    )
+
+    return DocContext(scope="webapp", text="", source_files=tuple(paths))
+
+
+def test_a_recipe_points_at_the_page_documenting_the_module_it_fixed():
+    """The recipe names `src/export.py`; the map holds `docs/export.md`."""
+    context = assemble(
+        (
+            (
+                SearchResult(
+                    STATUS_OK, hits=(_mined("recipe", ("src/export.py",)),)
+                ),
+                ("recipe",),
+            ),
+        ),
+        doc_context=_map("README.md", "docs/export.md"),
+    )
+    assert "the verified fix → docs/export.md" in context.rendered
+    assert "→ README.md" not in context.rendered
+
+
+def test_a_deadend_points_at_its_module_page_too():
+    context = assemble(
+        (
+            (
+                SearchResult(
+                    STATUS_OK,
+                    hits=(
+                        _mined(
+                            "deadend",
+                            ("src/queue.py",),
+                            text="the queue never drains",
+                        ),
+                    ),
+                ),
+                ("deadend",),
+            ),
+        ),
+        doc_context=_map("docs/queue.md"),
+    )
+    assert "the queue never drains → docs/queue.md" in context.rendered
+
+
+def test_a_documentation_entry_points_at_nothing():
+    """A page is the pointed-at, not the pointer."""
+    context = assemble(
+        _doc_results(_doc()),
+        doc_context=_map("docs/guide.md"),
+    )
+    assert "→" not in context.rendered
+
+
+def test_a_mined_entry_without_a_documented_path_gets_no_pointer():
+    """A citation is worth its characters only when it leads somewhere."""
+    context = assemble(
+        (
+            (
+                SearchResult(STATUS_OK, hits=(_mined("recipe", ("src/queue.py",)),)),
+                ("recipe",),
+            ),
+        ),
+        doc_context=_map("README.md"),
+    )
+    assert "→" not in context.rendered
+
+
+def test_a_pointer_needs_no_retrieval_of_the_page():
+    """The map is enough; the query that found the recipe never asked for docs."""
+    context = assemble(
+        (
+            (
+                SearchResult(
+                    STATUS_OK, hits=(_mined("recipe", ("src/export.py",)),)
+                ),
+                ("recipe",),
+            ),
+        ),
+        doc_context=_map("docs/export.md"),
+    )
+    assert "→ docs/export.md" in context.rendered
+
+
+def test_a_pointer_is_not_a_second_citation_of_the_same_file():
+    """An entry that already names the page does not point at it again."""
+    context = assemble(
+        (
+            (
+                SearchResult(
+                    STATUS_OK,
+                    hits=(
+                        _mined(
+                            "recipe",
+                            ("README.md",),
+                            text="the readme lied about install",
+                        ),
+                    ),
+                ),
+                ("recipe",),
+            ),
+        ),
+        doc_context=_map("README.md"),
+    )
+    assert "README.md]" in context.rendered
+    assert "→" not in context.rendered
+
+
+def test_a_readme_points_at_the_directory_it_documents():
+    """`pkg/README.md` is the page about the code in `pkg/`."""
+    context = assemble(
+        (
+            (
+                SearchResult(
+                    STATUS_OK,
+                    hits=(
+                        _mined(
+                            "recipe",
+                            ("llm_router_plugins/maskers/fast_masker/masker.py",),
+                            text="mask the nrb before logging",
+                        ),
+                    ),
+                ),
+                ("recipe",),
+            ),
+        ),
+        doc_context=_map(
+            "README.md", "llm_router_plugins/maskers/fast_masker/README.md"
+        ),
+    )
+    assert (
+        "mask the nrb before logging → llm_router_plugins/maskers/fast_masker/README.md"
+        in context.rendered
+    )
+
+
+def test_the_root_readme_is_not_documentation_of_everything():
+    """A shared stem with a generic name is not a link; the directory is."""
+    context = assemble(
+        (
+            (
+                SearchResult(
+                    STATUS_OK,
+                    hits=(_mined("recipe", ("src/export.py",), text="the fix"),),
+                ),
+                ("recipe",),
+            ),
+        ),
+        doc_context=_map("README.md", "other/README.md"),
+    )
+    assert "→" not in context.rendered
+
+
+def test_two_readmes_of_the_same_stem_do_not_cross_link():
+    """A fix about the root README is not a fix about a component's README."""
+    context = assemble(
+        (
+            (
+                SearchResult(
+                    STATUS_OK,
+                    hits=(
+                        _mined(
+                            "deadend",
+                            ("docs/README.md",),
+                            text="the install section lied",
+                        ),
+                    ),
+                ),
+                ("deadend",),
+            ),
+        ),
+        doc_context=_map("llm_router_plugins/maskers/fast_masker/README.md"),
+    )
+    assert "→" not in context.rendered
+
+
+def test_a_ceiling_that_covers_the_pointer_keeps_the_line_under_it():
+    """
+    The tail is part of the line, so the ceiling has to leave room for it.
+
+    When nothing else fits, the best recipe is cut to the room left.  Cutting
+    the quote to a ceiling that ignored the pointer would render a line longer
+    than the mode's budget, the one number the operator reasons about.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
+        _Candidate,
+        _entry,
+    )
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+        DocumentMeta,
+    )
+
+    body = "a long verified fix " * 40
+    hit = KnowledgeHit(
+        category="recipe",
+        document_name="recipe:20261016:beef",
+        text=body,
+        score=0.9,
+        weight=0.9,
+        paths=("src/export.py",),
+    )
+    candidate = _Candidate(hit=hit, meta=DocumentMeta())
+    pointer = " → docs/export.md"
+    head_len = len(_entry(candidate)) - len(body)
+    ceiling = head_len + len(body) - 10
+    line = _entry(candidate, limit=ceiling, doc_files=("docs/export.md",))
+    assert len(line) <= ceiling
+    assert line.endswith(pointer)
+
+
+def test_a_pointer_never_pushes_the_block_over_the_budget():
+    context = assemble(
+        (
+            (
+                SearchResult(
+                    STATUS_OK,
+                    hits=(_mined("recipe", ("src/export.py",), text="x" * 400),),
+                ),
+                ("recipe",),
+            ),
+        ),
+        doc_context=_map("docs/export.md"),
+        signature_hash="h",
+    )
+    policy = knowledge_config().modes["debug"]
+    assert context.chars <= policy.max_chars

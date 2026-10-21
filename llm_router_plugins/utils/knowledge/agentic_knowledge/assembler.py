@@ -104,6 +104,26 @@ _SECTIONS: Tuple[Tuple[str, str], ...] = (
 #: is read before the one paragraph a query happened to match.
 DOC_CONTEXT_TITLE = "## Documentation in this repository"
 
+#: Documentation names that describe the directory they sit in rather than a
+#: module: a repository holds many `README.md` files and they share one stem,
+#: so a stem match between a `README.md` and anything else says nothing.  What
+#: links one is the directory it documents.
+_GENERIC_DOCUMENT_NAMES = frozenset(
+    {
+        "agents",
+        "changelog",
+        "contributing",
+        "faq",
+        "index",
+        "license",
+        "notes",
+        "readme",
+        "releasing",
+        "security",
+        "todo",
+    }
+)
+
 
 @dataclass(frozen=True)
 class KnowledgeHit:
@@ -280,10 +300,19 @@ class ContextAssembler:
         # "already tried" list would push the block past the mode's budget,
         # which is the one number the operator can reason about.
         extra = _fit_extra(extra, policy.max_chars - _block_overhead() - reserved)
+        # A mined fix and a written rule about the same module are two halves
+        # of one answer, and neither search connects them: the recipe names
+        # `src/export.py`, the page is `docs/export.md`.  The documentation map
+        # the request already carries resolves the link, so an entry points at
+        # the page whether or not the query happened to retrieve it.
+        doc_files = tuple(doc_context.source_files) if doc_context else ()
         chosen = self._budget(
-            candidates, policy.max_chars, _extra_cost(extra) + reserved
+            candidates,
+            policy.max_chars,
+            _extra_cost(extra) + reserved,
+            doc_files,
         )
-        rendered = self._render(chosen, extra, digest)
+        rendered = self._render(chosen, extra, digest, doc_files)
         hits = tuple(candidate.hit for candidate in chosen)
         return KnowledgeContext(
             hits=hits,
@@ -431,14 +460,17 @@ class ContextAssembler:
         """
         if not self.touched_paths:
             return 0.0
-        documented = _stems_of(_documentation_paths(meta))
-        if not documented:
+        touched = tuple(str(path) for path in self.touched_paths if str(path))
+        if not touched:
             return 0.0
-        touching = _stems_of(self.touched_paths)
-        shared = documented.intersection(touching)
+        shared = sum(
+            1
+            for document in _documentation_paths(meta)
+            if _documents_path(document, touched)
+        )
         if not shared:
             return 0.0
-        return min(_MAX_DOC_BONUS, len(shared) * DOC_STEM_BONUS)
+        return min(_MAX_DOC_BONUS, shared * DOC_STEM_BONUS)
 
     # ------------------------------------------------------------- budget ---
     def _budget(
@@ -446,6 +478,7 @@ class ContextAssembler:
         candidates: Sequence[_Candidate],
         max_chars: int,
         reserved: int = 0,
+        doc_files: Sequence[str] = (),
     ) -> List[_Candidate]:
         """
         Apply per-source caps and the mode's character budget.
@@ -464,7 +497,7 @@ class ContextAssembler:
             kind = candidate.hit.category
             if used.get(kind, 0) >= candidate.source_max:
                 continue
-            cost = len(_entry(candidate)) + 1
+            cost = len(_entry(candidate, doc_files=doc_files)) + 1
             if kind not in opened:
                 cost += len(_section_title(kind)) + 1
             if spent + cost > max_chars:
@@ -483,13 +516,16 @@ class ContextAssembler:
         chosen: Sequence[_Candidate],
         extra_lines: Sequence[str],
         doc_context: str = "",
+        doc_files: Sequence[str] = (),
     ) -> str:
         """Render the block, sections in the fixed order."""
         if not chosen and not extra_lines and not doc_context:
             return ""
         grouped: Dict[int, List[str]] = {}
         for candidate in chosen:
-            grouped.setdefault(candidate.section, []).append(_entry(candidate))
+            grouped.setdefault(candidate.section, []).append(
+                _entry(candidate, doc_files=doc_files)
+            )
         if extra_lines:
             deadend_section = _section_index(KIND_DEADEND)
             grouped.setdefault(deadend_section, []).extend(
@@ -507,14 +543,21 @@ class ContextAssembler:
         return "\n".join(parts)
 
 
-def _entry(candidate: _Candidate, limit: Optional[int] = None) -> str:
+def _entry(
+    candidate: _Candidate,
+    limit: Optional[int] = None,
+    doc_files: Sequence[str] = (),
+) -> str:
     """
     Render one hit as one bullet of its section.
 
     ``limit`` cuts the quoted text so the rendered line is at most that long;
     it defaults to the ceiling the candidate was given when it was selected,
     and is used only when the block has room for nothing else and the
-    alternative is injecting no recipe at all.
+    alternative is injecting no recipe at all.  ``doc_files`` is the scope's
+    documentation map: a mined entry names the page that documents the module
+    it changed, which turns "here is the fix" into "here is the fix, and here
+    is what this repository says a module like this must do".
     """
     hit = candidate.hit
     if hit.category == KIND_DOC:
@@ -535,13 +578,66 @@ def _entry(candidate: _Candidate, limit: Optional[int] = None) -> str:
     text = hit.text.replace("\n", " ").strip()
     if len(text) > _QUOTE_CHARS:
         text = text[:_QUOTE_CHARS].rstrip() + "…"
+    pointer = _documentation_pointer(hit, doc_files)
     ceiling = candidate.render_limit if limit is None else limit
-    if 0 < ceiling < len(head) + len(text):
-        room = ceiling - len(head) - 1
+    if 0 < ceiling < len(head) + len(text) + len(pointer):
+        room = ceiling - len(head) - len(pointer) - 1
         if room < _MIN_QUOTE_CHARS:
             return ""
         text = text[:room].rstrip() + "…"
-    return head + text
+    return head + text + pointer
+
+
+def _documentation_pointer(hit: KnowledgeHit, doc_files: Sequence[str]) -> str:
+    """
+    Return the ` → docs/export.md` tail one mined entry deserves, or ``""``.
+
+    A verified fix says what worked; the repository's own page about that
+    module says what it has to keep doing.  Nothing in the retrieval connects
+    the two — a recipe is filed under a failure, a page under a module — so
+    the shared file stem is resolved here, against the documentation map the
+    request already carries rather than against another search.
+
+    Documentation entries point at nothing (they are the pointed-at), and a
+    path with no documentation about it gets no pointer: a citation is worth
+    its characters only when it leads somewhere.
+    """
+    if hit.category == KIND_DOC or not hit.paths or not doc_files:
+        return ""
+    paths = tuple(str(path) for path in hit.paths if str(path))
+    if not paths:
+        return ""
+    for path in doc_files:
+        if path in paths:
+            # A citation is not a pointer: the entry already says where the
+            # thing is, so pointing back at it spends characters on nothing.
+            continue
+        if _documents_path(path, paths):
+            return f" → {path}"
+    return ""
+
+
+def _documents_path(document: str, paths: Sequence[str]) -> bool:
+    """
+    Return whether *document* is the page about one of *paths*.
+
+    Two conventions connect a page to code.  A named page is named after the
+    module it explains — `docs/export.md` for `src/export.py` — which a shared
+    file stem catches, neither string containing the other.  A generic page
+    (`README.md`, `AGENTS.md`) documents the directory it sits in, and shares
+    its stem with every other one in the repository, so it matches only inside
+    its own directory; the root `README.md` would otherwise be documentation of
+    everything, and a pointer to it would be noise on every entry.
+    """
+    text = str(document).replace("\\", "/")
+    name = text.rsplit("/", 1)[-1]
+    stem = (name.split(".", 1)[0] if "." in name else name).strip().lower()
+    directory = text.rsplit("/", 1)[0] + "/" if "/" in text else ""
+    if stem and stem not in _GENERIC_DOCUMENT_NAMES:
+        return stem in _stems_of(paths)
+    if not directory or directory == "/":
+        return False
+    return any(str(path).replace("\\", "/").startswith(directory) for path in paths)
 
 
 def _documentation_citation(hit: KnowledgeHit) -> str:

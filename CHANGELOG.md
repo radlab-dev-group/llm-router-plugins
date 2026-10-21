@@ -8,7 +8,7 @@ release tagged as `v<version>`.
 
 | Version | Changelog |
 | ------- | --------- |
-| Unreleased | **Added:** `agentic_knowledge` indexes the repository's own documentation — a heading-aware scan of its `*.md` files published as `doc` documents, republished on content change, superseded documents retired through a `docs_prune` control message (never on a truncated scan), plus the `llm-router-agentic-kb-docs` command and the `docs` policy section. Documentation now lives in `<prefix>_<scope>_docs`, is read per work mode through `doc_types`, is searched on the turn's subject rather than its failure signature, and a guide about a file the turn edits outranks one that is not. On top of retrieval a session carries a **standing documentation map** — structural, stable per repository, budgeted first. |
+| Unreleased | **Added:** `agentic_knowledge` indexes the repository's own documentation — a heading-aware scan of its `*.md` files published as `doc` documents, republished on content change, superseded documents retired through a `docs_prune` control message (never on a truncated scan), plus the `llm-router-agentic-kb-docs` command and the `docs` policy section. Documentation now lives in `<prefix>_<scope>_docs`, is read per work mode through `doc_types`, is searched on the turn's subject rather than its failure signature, and a guide about a file the turn edits outranks one that is not. On top of retrieval a session carries a **standing documentation map** — structural, stable per repository, budgeted first — and every mined fix or dead end points at the page that documents the module it touched. |
 | 0.1.5 | **Added:** `agentic_knowledge` — a knowledge layer that runs behind the Codex router: per-work-mode retrieval of verified fixes, dead ends and the pre-compaction archive from the Semantic Search Engine, a masked learn-from-traffic write path through a Redis Stream and an indexing worker, and optional knowledge-or-escalate model selection. Adapters for Codex (full) and Claude Code (read-only), plus offline counterfactual evaluation. **Fix:** the `agentic_knowledge` collection names are reduced to the engine's character set at configuration time, so a repository scope that would produce a hyphen can no longer make every indexing attempt fail with a 500 at collection creation; the retention pass still sweeps the legacy `prefix-<scope>-sessions` archives; the repository of a request is read from the leading messages, so a compaction (which re-sends the whole window) is filed under its own project instead of into a scope-less prefix, and a request with no known repository publishes nothing; a search of a repository that has not been indexed yet is an empty answer, not a failed search **Added:** engine login for a Semantic Search Engine that authenticates by username and password rather than by a pre-issued token (`SSE_API_USERNAME`/`SSE_API_PASSWORD`); every mined episode now carries the work **phase** its evidence names (`test`, `implement`, …) in its header and in `metadata_json.phase`, and a retrieval source can be restricted in its policy to phases (`"phases": ["test"]`) or to routing modes (`"modes": ["debug"]`) — the filter is engine-side, unions across names, intersects the source's categories, never touches the archived window whose `thread_id` owns the single metadata slot, and a policy cannot mix the two dimensions in one request. |
 | 0.1.4 | **Fix:** the Codex routing record follows the phase that was actually routed with instead of the last signal it could rebuild, so an interleaved command no longer freezes the record and repeats a conflict on every request of the turn (captured-session replay: 11 conflicts -> 0). **Added:** `RememberResult` carries why a memory write was skipped; the log names the real cause instead of an undifferentiated `version conflict`. |
 | 0.1.3 | **Added:** an accepted semantic decision can be carried across one command generation (`MEMORY_CARRY_DECISIONS`). **Changed:** semantic rankings are read against their own scale; the phase layer separates work states from shell noise; CLI-injected context is kept out of the intent text. |
@@ -75,6 +75,22 @@ release tagged as `v<version>`.
   **documents a file the turn is touching** (`docs/export.md` for an edited `src/export.py`) — a link no retrieval leg
   sees — drops a document whose declared kind the mode does not read, and cites what it quotes by file and heading
   (`[doc · guide · docs/export.md › Export helpers]`).
+- **A mined entry points at the page that documents the module it changed.** A
+  verified fix says what worked; the repository's own page about that module
+  says what it has to keep doing, and neither search connects the two: a recipe
+  is filed under a failure, a page under a module. The link is resolved on the
+  reader side against the documentation map the request already carries: a named
+  page matches by file stem (`src/export.py` → `docs/export.md`), a generic page
+  (`README.md`, `AGENTS.md`) by the directory it documents, and never a second
+  time for a path the entry already cites — so a recipe or dead end renders with
+  a ` → docs/export.md` tail whether or not the query retrieved the page. The
+  same rule now drives the documentation ranking bonus, which previously matched
+  generic stems too: a root `README.md` is not documentation of everything. Two deliberate limits: the link
+  is not written into the document's metadata, because the engine never returns
+  document metadata on a search hit — a field nothing could read would be
+  write-only — and a documentation page never counts toward
+  `best_recipe_score`, because a README is not a verified fix and must not
+  push a mode past its escalation threshold.
 
 ### Changed
 - The knowledge generation cache entry grew a schema version (`2`): a hit now keeps `source`, `doc_type` and `heading`,

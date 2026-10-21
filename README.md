@@ -299,7 +299,9 @@ contributing and security — and a guide that documents a file the turn is edit
 does not. On top of retrieval the session carries a **standing map** of that documentation — which
 files exist and what they cover, structural only (paths, kinds, headings), stable per repository and
 budgeted before anything is retrieved — so an agent stops spending commands rediscovering what a
-project has written down. A file is republished when its content changes and the document it
+project has written down, and a mined fix or dead end points at the page that documents the module
+it touched (`src/export.py` → `docs/export.md`), so a recipe arrives with the rule it has to keep.
+A file is republished when its content changes and the document it
 superseded is retired; a scan that ran out of its ceilings publishes no retirement at all.
 `llm-router-agentic-kb-docs` does the same scan on demand (`--dry-run` to see what would be
 published), which is also how a repository whose router runs on another machine gets documentation.
