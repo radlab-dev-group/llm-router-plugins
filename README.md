@@ -150,6 +150,9 @@ Four routing plugins are available for model selection. The two semantic plugins
 CLI agent by request class and work mode. The Claude Code plugin (`agentic_routing_claude_code`) decides by model name
 alone, mapping the model IDs Claude Code asks for onto the models this router serves.
 
+Sitting behind them, the **agentic knowledge layer** (2.7.5) is not a classifier: it injects repository
+knowledge into an already-routed request and can escalate its model when the agent is looping with no known fix.
+
 ### 2.7.1 Simple Semantic Routing (Heuristic)
 
 The **Simple Semantic Routing plugin** (`simple_semantic_routing`, `utils/routing/simple_semantic/`) activates on
@@ -270,6 +273,43 @@ names, an embedded or bare wildcard, one exact name claimed twice) raises at sta
 **Full documentation** — the normalization and match layers, installation, router and CLI wiring, tier configuration,
 linting, gotchas, a verification recipe and a troubleshooting table — lives in the
 [Claude Code Model Swap README](llm_router_plugins/utils/routing/agentic_routing/claude_code/README.md).
+
+### 2.7.5 Agentic knowledge layer (`agentic_knowledge`)
+
+The **Agentic knowledge layer** (`agentic_knowledge`, `utils/knowledge/agentic_knowledge/`) stands
+*behind* the Codex routing plugin and enriches a request with what the repository has already
+learned, **without the agent cooperating**. It reads the routing decision (`routing`,
+`agent_mode`, `model`), searches the **Semantic Search Engine** for verified fixes, dead ends and
+the pre-compaction archive of the current scope, and injects the result as a separate, removable
+context block. It also learns from the traffic: the miner turns a `test_failure → patch → test
+pass` episode into a `recipe` and a repeated failure into a `deadend`, publishes them to a Redis
+Stream, and an indexing worker masks them with `FastMasker` before indexing; the window a
+`compaction` request is about to summarize is archived whole. Every mined episode also carries the
+work **phase** its evidence names (`test`, `implement`, …), and a retrieval source can be
+restricted to phases in its policy, so a mode can read only what was learned while doing its kind
+of work. The retrieval result is a routing signal: an agent looping on one error signature with no
+known fix is moved to a configured, stronger model (*knowledge-or-escalate*, **off by default**).
+
+The engine may be reached by a pre-issued token or by a username/password login
+(`SSE_API_USERNAME`/`SSE_API_PASSWORD`; the client logs in on its first call).
+
+The worker is a separate process the operator starts — `scripts/run-agentic-kb-worker.sh` (and the personal
+`scripts/run-agentic-kb-worker-pk.sh`) take its environment from the router's own run script. It creates a
+repository's collection on that repository's first event; a project that has produced nothing yet simply has an
+empty knowledge base.
+
+Connection settings (SSE and Redis) come only from `LLM_ROUTER_KNOWLEDGE_AGENTIC_*`; the policy
+(adapters, per-mode sources, weights and budgets, escalation models, retention) is
+[agentic_knowledge.json](llm_router_plugins/resources/knowledge/agentic_knowledge.json). No SSE
+host means no reads, no Redis means no writes and a per-process cache instead of the shared one, and every failure is
+**fail-open** — the request passes through untouched. Codex is served fully (reads and writes);
+Claude Code is served in a basic, read-only form: scope, latest user text, injection into
+`system`.
+
+**Full documentation** — the read and write paths, per-mode policies, the generation cache,
+knowledge-or-escalate, configuration and environment tables, the worker, privacy and retention,
+stateless mode, offline evaluation and limitations — lives in the [Agentic knowledge layer
+README](llm_router_plugins/utils/knowledge/agentic_knowledge/README.md).
 
 ---
 

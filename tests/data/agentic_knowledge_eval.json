@@ -1,0 +1,68 @@
+{
+  "description": "Recorded coding-agent sessions for counterfactual replay of the agentic knowledge layer. Failures, patches and outcomes are synthetic and anonymized; 'saved_by' names the earlier turn whose recipe should be retrieved, 'is_loop' marks a turn the agent was spinning in.",
+  "sessions": [
+    {
+      "id": "export-fix",
+      "scope": "exportproj",
+      "turns": [
+        {
+          "id": "export-fix-1",
+          "mode": "debug",
+          "text": "the export test fails on an empty list",
+          "failure": "FAILED tests/test_export.py::test_empty - AssertionError: expected [] got None in to_rows()",
+          "patch": "*** Begin Patch\n*** Update File: src/export.py\n@@\n-    return None\n+    return []\n*** End Patch",
+          "test_command": "pytest tests/test_export.py",
+          "test_passed": true,
+          "is_loop": false
+        },
+        {
+          "id": "export-fix-2",
+          "mode": "debug",
+          "text": "same assertion error again on another call site",
+          "failure": "FAILED tests/test_export.py::test_empty - AssertionError: expected [] got None in to_rows()",
+          "saved_by": "export-fix-1",
+          "is_loop": false
+        }
+      ]
+    },
+    {
+      "id": "loop-no-recipe",
+      "scope": "loopproj",
+      "turns": [
+        {
+          "id": "loop-no-recipe-1",
+          "mode": "debug",
+          "text": "connection refused again",
+          "failure": "FAILED tests/test_api.py::test_fetch - ConnectionRefusedError: connection refused 127.0.0.1:8080",
+          "repeat": 3,
+          "is_loop": true
+        }
+      ]
+    },
+    {
+      "id": "loop-with-recipe",
+      "scope": "recipeproj",
+      "turns": [
+        {
+          "id": "loop-with-recipe-1",
+          "mode": "debug",
+          "text": "key error in the cache",
+          "failure": "FAILED tests/test_cache.py::test_get - KeyError: 'session'",
+          "patch": "*** Begin Patch\n*** Update File: src/cache.py\n@@\n-    return data[key]\n+    return data.get(key)\n*** End Patch",
+          "test_command": "pytest tests/test_cache.py",
+          "test_passed": true,
+          "is_loop": false
+        },
+        {
+          "id": "loop-with-recipe-2",
+          "mode": "debug",
+          "text": "still getting the same key error on another path",
+          "failure": "FAILED tests/test_cache.py::test_get - KeyError: 'session'",
+          "repeat": 3,
+          "saved_by": "loop-with-recipe-1",
+          "is_loop": true
+        }
+      ]
+    }
+  ]
+}
