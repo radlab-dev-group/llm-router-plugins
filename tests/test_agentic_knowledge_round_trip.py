@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from llm_router_plugins.cli.plugins.utils.knowledge.worker import (
+from llm_router_plugins.cli.plugins.utils.agentic_knowledge.worker import (
     KnowledgeIndexWorker,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (

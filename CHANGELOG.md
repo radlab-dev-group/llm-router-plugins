@@ -119,7 +119,7 @@ release tagged as `v<version>`.
   only events mined *before* the request under evaluation, and reports `recipe_hit_rate`, `turns_potentially_saved`,
   `missed_saves`, loop-detection precision/recall, `escalations` and `injected_chars_per_turn` for the `no_kb`, `read`
   and `read_escalate` variants; `scripts/agentic-kb-eval.sh` runs it.
-- `knowledge` pip extra (`sse-lib`, `redis>=5`) and `llm_router_plugins/resources/knowledge/agentic_knowledge.json`,
+- `agentic-knowledge` pip extra (`sse-lib`, `redis>=5`) and `llm_router_plugins/resources/knowledge/agentic_knowledge.json`,
   the reviewable policy — connection settings come exclusively from `LLM_ROUTER_KNOWLEDGE_AGENTIC_*`.
 - `agentic_knowledge` indexes **the repository's own documentation**. `docs_ingestor.py` scans the directory a request
   declared for its `*.md` files, splits each one at its headings (a section keeps its heading path, cut at
@@ -193,6 +193,12 @@ release tagged as `v<version>`.
   reason for a conflict (`state` still compares equal to the outcome string).
 
 ### Changed
+- **The knowledge extra and its CLI package are named after the plugin.** `pip install
+  radlab-llm-router-plugins[knowledge]` is now `…[agentic-knowledge]`, so an operator installing
+  the extra sees the same name the pipeline does, and the console commands are built from
+  `llm_router_plugins.cli.plugins.utils.agentic_knowledge` — `utils.knowledge` named a directory
+  of two commands and said nothing about which layer they belonged to. The commands themselves,
+  `llm-router-agentic-kb-worker` and `llm-router-agentic-kb-docs`, are unchanged.
 - **The operator's knowledge scripts moved to the `llm-router` checkout, and the worker stopped
   fishing for `sse_lib` in a sibling checkout.** The `run-agentic-kb-worker.sh` and
   `run-agentic-kb-docs.sh` wrappers now live next to the `run-rest-api-gunicorn.sh` script they

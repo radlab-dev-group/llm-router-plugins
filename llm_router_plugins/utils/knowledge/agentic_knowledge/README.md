@@ -43,7 +43,7 @@ same fail-hard rule the Codex router uses.
 ### 1. Install
 
 ```bash
-pip install -e ".[knowledge]"                       # sse-lib>=0.1.0 + redis>=5
+pip install -e ".[agentic-knowledge]"               # sse-lib>=0.1.0 + redis>=5
 ```
 
 `sse_lib` depends only on `requests`. Without it, and without a configured host, the plugin loads and does nothing.

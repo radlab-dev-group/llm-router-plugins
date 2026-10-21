@@ -27,7 +27,7 @@ from agentic_knowledge_support import (
     stream_message,
 )
 
-from llm_router_plugins.cli.plugins.utils.knowledge.worker import (
+from llm_router_plugins.cli.plugins.utils.agentic_knowledge.worker import (
     KnowledgeIndexWorker,
     _engine_client,
     _entries,
@@ -35,7 +35,9 @@ from llm_router_plugins.cli.plugins.utils.knowledge.worker import (
     _require_settings,
     _verify_model_names,
 )
-from llm_router_plugins.cli.plugins.utils.knowledge import worker as worker_cli
+from llm_router_plugins.cli.plugins.utils.agentic_knowledge import (
+    worker as worker_cli,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     KIND_SESSION_ARCHIVE,
     parse_document_text,

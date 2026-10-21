@@ -29,7 +29,7 @@ from agentic_knowledge_support import (  # noqa: E402
     knowledge_config,
 )
 
-from llm_router_plugins.cli.plugins.utils.knowledge.worker import (  # noqa: E402
+from llm_router_plugins.cli.plugins.utils.agentic_knowledge.worker import (  # noqa: E402,E501
     KnowledgeIndexWorker,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge import (  # noqa: E402
@@ -621,14 +621,14 @@ def test_a_failing_documentation_scan_still_answers_the_request(
 
 # ------------------------------------------------------------------ cli ----
 def test_the_documentation_command_lists_a_scan_without_publishing(tmp_path):
-    from llm_router_plugins.cli.plugins.utils.knowledge.docs import main
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge.docs import main
 
     code = main(["--path", str(demo_repo(tmp_path)), "--dry-run", "--json"])
     assert code == 0
 
 
 def test_the_documentation_command_needs_the_stream(tmp_path, monkeypatch):
-    from llm_router_plugins.cli.plugins.utils.knowledge.docs import main
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge.docs import main
 
     monkeypatch.delenv("LLM_ROUTER_KNOWLEDGE_AGENTIC_REDIS_HOST", raising=False)
     with pytest.raises(SystemExit) as exit_info:
