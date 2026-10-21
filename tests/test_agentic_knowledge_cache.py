@@ -113,3 +113,100 @@ def test_decode_still_reads_a_good_entry():
 
     decoded = _decode(_encode(entry()))
     assert decoded is not None and decoded.mode == "debug"
+
+
+def _doc_hit_hit(text="the fix"):
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
+        KnowledgeHit,
+    )
+
+    return KnowledgeHit(
+        category="doc",
+        document_name="doc:20261021:aa",
+        text=text,
+        score=0.8,
+        weight=0.64,
+        source="docs/guide.md",
+        doc_type="guide",
+        heading="Deploy",
+    )
+
+
+def test_the_documentation_fields_of_a_hit_survive_the_cache():
+    """
+    The citation of a documentation section is its file and heading.
+
+    A cache that silently dropped them would render the same block — the
+    rendered text carries them — but report a hit without a source, and the
+    annotation would say the quote came from nowhere.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
+        KnowledgeContext,
+    )
+
+    cache = InMemoryContextCache()
+    context = KnowledgeContext(hits=(_doc_hit_hit(),), rendered="a block", chars=7)
+    entry = CachedContext(
+        context=context,
+        evidence_fingerprint="f1",
+        mode="implement",
+        escalated=False,
+        escalated_model="",
+    )
+    cache.put("repo", "gen", entry)
+    fetched = cache.get("repo", "gen")
+    assert fetched.context.hits[0].source == "docs/guide.md"
+    assert fetched.context.hits[0].doc_type == "guide"
+    assert fetched.context.hits[0].heading == "Deploy"
+
+
+def test_the_standing_digest_survives_the_cache():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
+        KnowledgeContext,
+    )
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.doc_context import (
+        DocContext,
+    )
+
+    cache = InMemoryContextCache()
+    digest = DocContext(
+        scope="repo",
+        text="- README.md (readme): Demo",
+        source_files=("README.md",),
+        fingerprint="deadbeef",
+    )
+    context = KnowledgeContext(rendered="a block", chars=7, doc_context=digest)
+    entry = CachedContext(
+        context=context,
+        evidence_fingerprint="f1",
+        mode="implement",
+        escalated=False,
+        escalated_model="",
+    )
+    cache.put("repo", "gen", entry)
+    fetched = cache.get("repo", "gen")
+    assert fetched.context.doc_context is not None
+    assert fetched.context.doc_context.text == digest.text
+    assert fetched.context.doc_context.fingerprint == digest.fingerprint
+
+
+def test_an_entry_without_a_digest_decodes_without_one():
+    import json
+
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
+        _decode,
+    )
+
+    decoded = _decode(
+        json.dumps(
+            {
+                "schema": 2,
+                "rendered": "x",
+                "chars": 1,
+                "hits": [],
+                "mode": "implement",
+            }
+        )
+    )
+    assert decoded is not None
+    assert decoded.context.doc_context is None

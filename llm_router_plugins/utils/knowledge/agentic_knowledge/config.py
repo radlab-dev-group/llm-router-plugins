@@ -200,6 +200,13 @@ _DEFAULT_DOC_RESCAN_INTERVAL_SECONDS = 21_600
 #: not hold its listing in Redis forever.
 _DEFAULT_DOC_STATE_TTL_SECONDS = 7_776_000
 
+#: Budget of the stable documentation digest the session carries.  It is always
+#: present, so it must be short enough to pay for itself on every request of a
+#: long session; the deep chunks are what a matching query buys.
+_DEFAULT_DOC_CONTEXT_ENABLED = True
+_DEFAULT_DOC_CONTEXT_CHARS = 700
+_DEFAULT_DOC_CONTEXT_TTL_SECONDS = 86_400
+
 _INDEX_TYPES = ("HNSW", "IVF_FLAT")
 
 
@@ -376,6 +383,14 @@ class AgenticKnowledgeConfig:
     docs_max_section_chars: int = _DEFAULT_DOC_SECTION_CHARS
     docs_rescan_interval_seconds: int = _DEFAULT_DOC_RESCAN_INTERVAL_SECONDS
     docs_state_ttl_seconds: int = _DEFAULT_DOC_STATE_TTL_SECONDS
+    #: Whether the session carries a stable digest of the repository's own
+    #: documentation, injected on every request of the session.
+    doc_context_enabled: bool = _DEFAULT_DOC_CONTEXT_ENABLED
+    #: Most characters the digest may occupy; the README's head and the
+    #: repository's top-level headings, trimmed to this.
+    doc_context_max_chars: int = _DEFAULT_DOC_CONTEXT_CHARS
+    #: How long a session's digest survives; a session, not a generation.
+    doc_context_ttl_seconds: int = _DEFAULT_DOC_CONTEXT_TTL_SECONDS
 
     escalation_enabled: bool = False
     loop_threshold: int = _DEFAULT_LOOP_THRESHOLD
@@ -572,6 +587,18 @@ class AgenticKnowledgeConfig:
                 docs.get("state_ttl_seconds", _DEFAULT_DOC_STATE_TTL_SECONDS),
                 "docs.state_ttl_seconds",
             ),
+            doc_context_enabled=_boolean(
+                docs.get("context_enabled", _DEFAULT_DOC_CONTEXT_ENABLED),
+                "docs.context_enabled",
+            ),
+            doc_context_max_chars=_positive(
+                docs.get("context_max_chars", _DEFAULT_DOC_CONTEXT_CHARS),
+                "docs.context_max_chars",
+            ),
+            doc_context_ttl_seconds=_positive(
+                docs.get("context_ttl_seconds", _DEFAULT_DOC_CONTEXT_TTL_SECONDS),
+                "docs.context_ttl_seconds",
+            ),
             escalation_enabled=_boolean(
                 escalation.get("enabled", False), "escalation.enabled"
             ),
@@ -665,6 +692,13 @@ class AgenticKnowledgeConfig:
                 _non_negative,
             ),
             ("DOCS_STATE_TTL_SECONDS", "docs_state_ttl_seconds", _positive),
+            ("DOCS_CONTEXT_ENABLED", "doc_context_enabled", _boolean),
+            ("DOCS_CONTEXT_MAX_CHARS", "doc_context_max_chars", _positive),
+            (
+                "DOCS_CONTEXT_TTL_SECONDS",
+                "doc_context_ttl_seconds",
+                _positive,
+            ),
             ("LOOP_THRESHOLD", "loop_threshold", _positive),
             ("STRONG_RECIPE_SCORE", "strong_recipe_score", _fraction),
         )
@@ -749,6 +783,10 @@ class AgenticKnowledgeConfig:
             )
         if not any(str(pattern).strip() for pattern in self.docs_patterns):
             raise ValueError("docs.patterns must name at least one file pattern")
+        if self.doc_context_max_chars < 120:
+            raise ValueError(
+                "docs.context_max_chars must be at least 120 characters"
+            )
         for policy in self.modes.values():
             if policy.max_chars < 200:
                 raise ValueError(

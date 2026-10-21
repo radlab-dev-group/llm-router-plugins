@@ -150,6 +150,7 @@ knowledge to use, and none is mined from it, so it carries no annotation.
 | `redisclient.py`   | `RedisClientHandle`: lazy, fork-aware Redis client shared by cache and pub   |
 | `miner.py`         | `EpisodeMiner`: recipe / deadend / loop / compaction → `KnowledgeEvent`      |
 | `docs_ingestor.py` | scans the repository's markdown into `doc` documents and keeps them current  |
+| `doc_context.py`   | the standing map of that documentation a session carries, and where it lives |
 | `events.py`        | `KnowledgeEventPublisher`: `SET NX` dedup + `XADD`                           |
 | `escalation.py`    | `EscalationPolicy.decide`                                                    |
 | `sse.py`           | `KnowledgeStore`: thin fail-open façade over `sse_lib`                       |
@@ -360,6 +361,41 @@ about the code, filed under the module and the concept, so it is searched with t
 paths and their stems.  The failure signature never rides on a documentation search, and the citation says where the
 quoted section came from: `[doc · guide · docs/export.md › Export helpers]`.
 
+### Standing documentation context (`doc_context`)
+
+Retrieval answers a question. A **digest** answers the question the agent has before it has one:
+what this project is, which documentation it keeps, and what the pages cover. It is injected on
+every request a mode reads documentation in, whether or not this turn's query matched anything, so
+a long session stops re-learning the same shape of a repository command after command.
+
+```
+## Documentation in this repository
+This repository documents itself; the map below is what it has written down, and any of it can be
+asked for in full.
+- README.md (readme): Demo Service; Install; Deploy
+- docs/guide.md (guide): Guide; Export helpers; Rollback
+```
+
+| Property       | What it means                                                                                          |
+|----------------|----------------------------------------------------------------------------------------------------------|
+| Structural     | **paths, kinds and headings — no prose.** The write path masks a document before indexing it; a digest of README sentences built on the request path would carry them unmasked to a model. A heading is what the layer already files unmasked, and it is enough to aim a question. |
+| Stable         | Kept **per repository**, not per request or generation. It changes when the documentation's outline changes; rewording a paragraph moves its fingerprint, not its text, so the prompt under the provider's cache does not move either. |
+| Budgeted first | Charged against `modes.<mode>.max_chars` **before** anything is retrieved; a digest that will not fit the mode is not injected at all rather than squeezing the block. |
+| Cheap          | Built from the listing the scan already made, and read from Redis (`<key_prefix>:docs:context:<scope>`, TTL `docs.context_ttl_seconds`) by every other request of the session — one `GET`, no filesystem walk per command. |
+
+Two levels, by design: the **map** (always present, `docs.context_max_chars`) and the **deep
+chunks** (what the query matches, in `<prefix>_<scope>_docs`). The annotation reports which was
+injected:
+
+```jsonc
+"doc_context": {"level": "digest", "chars": 187, "source_files": ["README.md", "docs/guide.md"]}
+```
+
+The digest is refreshed by the scan that already runs (`docs.rescan_interval_seconds`) and by
+`llm-router-agentic-kb-docs`, so a repository whose router runs on another machine still gets its
+map — the command writes it while it publishes. `docs.context_enabled: false` returns the layer to
+retrieval alone.
+
 ### Knowledge-or-escalate
 
 `EscalationPolicy.decide(turn, context, policy, loop_count, signature_hash)` escalates only when **all** of these hold:
@@ -393,7 +429,11 @@ flaky test looks exactly like a loop. The "already tried" list comes from the cu
   "escalation": {"action": "escalate", "reason": "loop_without_recipe",
                   "from": "auto_codex", "to": "qwen/Qwen3.8-27B"},
   "write": {"published": 1, "deduplicated": 0, "errors": 0, "status": "ok"},  // ok | partial | unavailable | disabled
-  "docs": {"status": "ok", "files": 12, "published": 1, "pruned": 1}
+  "docs": {"status": "ok", "files": 12, "published": 1, "pruned": 1},
+  "doc_context": {"level": "digest", "chars": 187,
+                   "source_files": ["README.md", "docs/guide.md"]}
+                    // the standing documentation map injected for the session;
+                    // absent when docs.context_enabled is off or nothing is scanned
                     // absent when documentation is off or no repository is known;
                     // status ok | skipped | disabled | unavailable, `reason` when it
                     // did not run, `truncated: true` when a ceiling cut the scan
@@ -430,7 +470,9 @@ means the feature is unavailable.
             "excluded_dirs": ["node_modules", "dist", "build", "vendor"],
             "max_files": 200, "max_file_bytes": 200000,
             "max_total_bytes": 2000000, "max_section_chars": 1200,
-            "rescan_interval_seconds": 21600, "state_ttl_seconds": 7776000}
+            "rescan_interval_seconds": 21600, "state_ttl_seconds": 7776000,
+            "context_enabled": true, "context_max_chars": 700,
+            "context_ttl_seconds": 86400}
 }
 ```
 
@@ -486,6 +528,9 @@ All use the prefix `LLM_ROUTER_KNOWLEDGE_AGENTIC_`. Booleans accept `1/0`, `true
 | `…_DOCS_MAX_SECTION_CHARS`            | `1200`           | one documentation section, roughly one engine chunk       |
 | `…_DOCS_RESCAN_INTERVAL_SECONDS`      | `21600`          | per-process interval between scans of one repository      |
 | `…_DOCS_STATE_TTL_SECONDS`            | `7776000`        | lifetime of a scope's scan state (90 days)                |
+| `…_DOCS_CONTEXT_ENABLED`               | `true`           | the session carries the standing documentation map         |
+| `…_DOCS_CONTEXT_MAX_CHARS`             | `700`            | ceiling of the map injected into a request                 |
+| `…_DOCS_CONTEXT_TTL_SECONDS`           | `86400`          | how long a scope's map survives without a refresh          |
 | `…_LOOP_THRESHOLD`                    | `3`              | repetitions of one signature that make a loop            |
 | `…_STRONG_RECIPE_SCORE`               | `0.75`           | a recipe this good keeps the routed model                |
 | `…_REDIS_HOST`                        | **empty**        | **empty ⇒ no writes, no cache**                          |
@@ -623,6 +668,10 @@ leak-free.
   everything again, leaving the previous copies of each file in the collection until they are deleted by hand. The
   listing names the collection it was written for, so changing `collection_prefix` — or moving the documentation into
   `<prefix>_<scope>_docs` — republishes it once where it now belongs and leaves the old collection alone.
+- **The standing context is a map, not a summary.** It says which documentation exists and what
+  the pages are titled; it does not know what they argue. A repository whose README is one long
+  sentence and whose pages are titled `Notes` gets a map that says little — the fix is better
+  headings, which helps the retrieval leg too.
 - **A `doc_types` list excludes what it does not name.** A guide filed as `note` because its file says nothing else is
   read only by a mode that lists `note` (or lists nothing); a mode that names kinds reads exactly those. When a
   repository's prose stops appearing, read the mode's `doc_types` before suspecting the retrieval.

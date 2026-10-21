@@ -299,9 +299,12 @@ class AgenticKnowledgePlugin(PluginInterface):
                 deadends=cached.context.deadends,
                 cache="hit",
                 status=cached.context.status,
+                doc_context=cached.context.doc_context,
             )
         else:
-            context = self._assemble(turn, config, policy, mining)
+            context = self._assemble(
+                turn, config, policy, mining, self._doc_context(turn, docs)
+            )
 
         if not context.empty:
             payload = adapter.inject(payload, context.rendered)
@@ -366,10 +369,13 @@ class AgenticKnowledgePlugin(PluginInterface):
         config: AgenticKnowledgeConfig,
         policy: Any,
         mining: Any,
+        doc_context: Any = None,
     ) -> KnowledgeContext:
         """Search the sources and assemble the block; fail-open to an empty one."""
         if policy is None:
-            return KnowledgeContext(cache="disabled", status="disabled")
+            return KnowledgeContext(
+                cache="disabled", status="disabled", doc_context=doc_context
+            )
         if not turn.scope:
             return KnowledgeContext(cache="miss", status="disabled")
         generation = turn.cache_generation
@@ -399,7 +405,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             touched_paths=turn.touched_paths,
             local_deadends=mining.tried,
         )
-        context = assembler.assemble(results, policy)
+        context = assembler.assemble(results, policy, doc_context=doc_context)
         return KnowledgeContext(
             hits=context.hits,
             rendered=context.rendered,
@@ -408,6 +414,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             deadends=context.deadends,
             cache="miss",
             status=status,
+            doc_context=context.doc_context,
         )
 
     # ---------------------------------------------------------- cache path -
@@ -578,6 +585,13 @@ class AgenticKnowledgePlugin(PluginInterface):
             }
         if docs is not None:
             knowledge["docs"] = docs.as_dict()
+        if context is not None and getattr(context, "doc_context", None):
+            digest = context.doc_context
+            knowledge["doc_context"] = {
+                "level": "digest",
+                "chars": digest.chars,
+                "source_files": list(digest.source_files)[:8],
+            }
         routing["knowledge"] = knowledge
 
     def _index_docs(
@@ -607,6 +621,31 @@ class AgenticKnowledgePlugin(PluginInterface):
         except Exception as exc:
             self._warn("knowledge docs scan failed: %s", type(exc).__name__)
             return ScanOutcome(status=STATUS_UNAVAILABLE, reason="scan")
+
+    def _doc_context(self, turn: AgentTurn, docs: Optional[ScanOutcome]) -> Any:
+        """
+        Return the standing documentation digest for this request.
+
+        The scan that just ran carries the digest it refreshed; every other
+        request of the session reads the same map from the store, so a long
+        session sees one stable digest of what the repository has written down
+        rather than re-walking it per command.  ``None`` — no standing context —
+        when documentation is off, no repository is known, or nothing has been
+        scanned yet.  Never raises: this is context, not a dependency.
+        """
+        if not self._config or not self._config.doc_context_enabled:
+            return None
+        if not self._config.docs_available or self._docs is None:
+            return None
+        if not turn.scope:
+            return None
+        if docs is not None and docs.context is not None:
+            return docs.context
+        try:
+            return self._docs.context(turn.scope)
+        except Exception as exc:
+            self._warn("knowledge doc context read failed: %s", type(exc).__name__)
+            return None
 
     def _warn(self, message: str, *args: Any) -> None:
         """Report one failure when a logger was given."""

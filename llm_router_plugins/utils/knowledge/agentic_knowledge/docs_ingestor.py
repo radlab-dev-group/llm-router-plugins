@@ -48,6 +48,11 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
     KnowledgeEvent,
 )
+from llm_router_plugins.utils.knowledge.agentic_knowledge.doc_context import (
+    DocContext,
+    DocContextStore,
+    build_doc_context,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     DEFAULT_DOC_EXCLUDED_DIRS,
     DEFAULT_DOC_PATTERNS,
@@ -87,6 +92,9 @@ __all__ = [
     "scan_repository",
     "split_sections",
 ]
+
+#: How the indexer knows it has no standing digest to serve yet.
+_NO_CONTEXT = None
 
 #: Stream message that asks the worker to forget documents this scope no longer
 #: has.  A control message rather than a document: it is never indexed, and a
@@ -207,6 +215,11 @@ class ScanReport:
     ----------
     records : Tuple[DocRecord, ...]
         Every section of every file that was read.
+    headings_by_file : Dict[str, Tuple[str, ...], ...]
+        The heading outline of each file, in document order, as it was written
+        — every heading, including the ones a section folded into its
+        neighbour.  Sections are what gets indexed; an outline is what a map
+        of the documentation is drawn from, and the two are not the same list.
     files : int
         Documentation files read.
     skipped : int
@@ -220,6 +233,7 @@ class ScanReport:
     """
 
     records: Tuple[DocRecord, ...] = ()
+    headings_by_file: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
     files: int = 0
     skipped: int = 0
     truncated: bool = False
@@ -250,6 +264,9 @@ class ScanOutcome:
         Files already indexed with this exact content.
     truncated : bool
         Whether a ceiling cut the scan short.
+    context : DocContext, optional
+        The standing digest the scan refreshed; ``None`` when documentation is
+        off or the scan produced nothing to map.
     """
 
     status: str = STATUS_DISABLED
@@ -259,6 +276,7 @@ class ScanOutcome:
     pruned: int = 0
     unchanged: int = 0
     truncated: bool = False
+    context: Optional[DocContext] = None
 
     def as_dict(self) -> Dict[str, Any]:
         """
@@ -279,6 +297,11 @@ class ScanOutcome:
             result["reason"] = self.reason
         if self.truncated:
             result["truncated"] = True
+        if self.context is not None and not self.context.empty:
+            result["context"] = {
+                "chars": self.context.chars,
+                "files": len(self.context.source_files),
+            }
         return result
 
 
@@ -516,6 +539,7 @@ def scan_repository(
     skip |= set(_ALWAYS_EXCLUDED)
 
     records: List[DocRecord] = []
+    outlines: Dict[str, Tuple[str, ...]] = {}
     files = 0
     skipped = 0
     total = 0
@@ -550,6 +574,11 @@ def scan_repository(
                 continue
             files += 1
             total += info.st_size
+            outlines[
+                posixpath.join(
+                    _relative(root, directory), name.replace(os.sep, "/")
+                ).lstrip("/")
+            ] = document_headings(text)
             records.extend(
                 _file_records(
                     posixpath.join(
@@ -566,10 +595,41 @@ def scan_repository(
             break
     return ScanReport(
         records=tuple(records),
+        headings_by_file=outlines,
         files=files,
         skipped=skipped,
         truncated=truncated,
     )
+
+
+def document_headings(text: str) -> Tuple[str, ...]:
+    """
+    Return the heading outline of one markdown document, in order.
+
+    Every heading, at every level, outside fenced code blocks — the document's
+    own table of contents.  This is deliberately not the list of section
+    headings the indexer stores: a section shorter than the floor is folded
+    into its predecessor and loses its title, which is right for retrieval and
+    wrong for a map, where the title is the whole point of the line.
+    """
+    titles: List[str] = []
+    fence = ""
+    for line in str(text or "").splitlines():
+        opening = _FENCE_RE.match(line)
+        if fence:
+            if line.strip().startswith(fence):
+                fence = ""
+            continue
+        if opening:
+            fence = opening.group(1)[:3]
+            continue
+        title = _HEADING_RE.match(line)
+        if title is None:
+            continue
+        heading = title.group(2).strip()
+        if heading:
+            titles.append(heading)
+    return tuple(titles)
 
 
 def _matches(name: str, patterns: Sequence[str]) -> bool:
@@ -960,6 +1020,9 @@ class DocsIndexer:
         Where events go; ``None`` means the write path is off.
     state : DocsScanState, optional
         Where the listing lives; built from the configuration when omitted.
+    context_store : DocContextStore, optional
+        Where the standing digest lives; built from the configuration when
+        omitted.
     logger : Any, optional
         Where progress is reported, without file names.
     clock : callable, optional
@@ -969,16 +1032,24 @@ class DocsIndexer:
     config: AgenticKnowledgeConfig
     publisher: Optional[KnowledgeEventPublisher] = None
     state: Optional[DocsScanState] = None
+    context_store: Optional[DocContextStore] = None
     logger: Any = None
     clock: Any = field(default=time.time, repr=False)
 
     def __post_init__(self) -> None:
-        """Build the state store when the caller did not pass one."""
+        """Build the state stores when the caller did not pass them."""
         if self.state is None:
             self.state = DocsScanState(
                 connection=self.config.redis,
                 key_prefix=self.config.key_prefix,
                 ttl_seconds=self.config.docs_state_ttl_seconds,
+                logger=self.logger,
+            )
+        if self.context_store is None:
+            self.context_store = DocContextStore(
+                connection=self.config.redis,
+                key_prefix=self.config.key_prefix,
+                ttl_seconds=self.config.doc_context_ttl_seconds,
                 logger=self.logger,
             )
         self._last_scan: Dict[str, float] = {}
@@ -1099,6 +1170,7 @@ class DocsIndexer:
             scope, _next_entries(entries, by_file, changed), collection
         ):
             self._warn("knowledge docs state not saved for %d file(s)", len(by_file))
+        context = self._refresh_context(scope, report, by_file)
         return ScanOutcome(
             status=STATUS_OK,
             files=len(by_file),
@@ -1106,7 +1178,63 @@ class DocsIndexer:
             pruned=pruned,
             unchanged=len(by_file) - len(changed),
             truncated=report.truncated,
+            context=context,
         )
+
+    def context(self, scope: str) -> Optional[DocContext]:
+        """
+        Return the standing digest of *scope*, read from the store.
+
+        This is what a request path calls when its own scan was on cooldown:
+        the digest is refreshed by whichever request happened to scan, and
+        every other request of the session reads the same map without walking
+        the repository again.  ``None`` when there is no digest or the store is
+        off; the caller injects no standing context, which is not an error.
+
+        Parameters
+        ----------
+        scope : str
+            Repository whose digest to read.
+
+        Returns
+        -------
+        DocContext or None
+            The digest, or ``None`` when there is none to read.
+        """
+        if not self.config.doc_context_enabled or self.context_store is None:
+            return None
+        return self.context_store.get(scope)
+
+    def _refresh_context(
+        self, scope: str, report: "ScanReport", by_file: Dict[str, Any]
+    ) -> Optional[DocContext]:
+        """
+        Rebuild and store one repository's standing digest.
+
+        The digest names the files and their headings and nothing else, so it
+        is a map, not a summary, and it can be rebuilt from the same listing the
+        scan already produced at no extra cost.  It is written whatever the
+        publish path did — a repository whose documents are unchanged still
+        wants a map — and only when the scan saw the files, never from a
+        cooldown or a failed read.
+
+        Returns ``None`` when documentation context is off or the store cannot
+        hold it; the scan itself is unaffected.
+        """
+        if not self.config.doc_context_enabled or self.context_store is None:
+            return None
+        if report.reason or not by_file:
+            return None
+        context = build_doc_context(
+            scope,
+            _context_files(report),
+            max_chars=self.config.doc_context_max_chars,
+            truncated=report.truncated,
+        )
+        if context.empty:
+            return None
+        self.context_store.put(context)
+        return context
 
     # ------------------------------------------------------------ internals -
     def _in_cooldown(self, scope: str, repo_root: str) -> bool:
@@ -1154,6 +1282,60 @@ class DocsIndexer:
         """Report one failure when a logger was given."""
         if self.logger is not None:
             self.logger.warning(message, *args)
+
+
+def _context_files(report: "ScanReport") -> List[Any]:
+    """
+    Return one entry per documentation file, for the standing digest.
+
+    A file's headings are the headings of its sections, in order, deduplicated;
+    the first is the file's own title.  The entry carries the file digest so the
+    digest's fingerprint moves only when the file's text does.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.doc_context import (
+        DocFile,
+    )
+
+    ordered: List[str] = []
+    doc_type: Dict[str, str] = {}
+    content_hash: Dict[str, str] = {}
+    for record in report.records:
+        path = record.source_file
+        if path not in doc_type:
+            ordered.append(path)
+            doc_type[path] = record.doc_type
+            content_hash[path] = record.content_hash
+    outlines = report.headings_by_file
+    return [
+        DocFile(
+            path=path,
+            doc_type=doc_type[path],
+            headings=tuple(outlines.get(path) or ())
+            or _headings_of(records_of(report, path)),
+            content_hash=content_hash[path],
+        )
+        for path in ordered
+    ]
+
+
+def records_of(report: "ScanReport", path: str) -> List[DocRecord]:
+    """The sections of one file, in the order the scan read them."""
+    return [record for record in report.records if record.source_file == path]
+
+
+def _headings_of(records: Sequence[DocRecord]) -> Tuple[str, ...]:
+    """
+    Fall back to the section headings when no outline was collected.
+
+    A caller that builds a :class:`ScanReport` from records alone — a test, a
+    tool, a future writer — still gets a map, drawn from the headings the
+    sections carry.
+    """
+    titles: List[str] = []
+    for record in records:
+        if record.heading and record.heading not in titles:
+            titles.append(record.heading)
+    return tuple(titles)
 
 
 def _group(records: Iterable[DocRecord]) -> Dict[str, List[DocRecord]]:

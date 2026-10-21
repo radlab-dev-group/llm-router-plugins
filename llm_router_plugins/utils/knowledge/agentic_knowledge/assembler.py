@@ -28,6 +28,10 @@ from dataclasses import replace as _replace_meta
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import ModePolicy
+from llm_router_plugins.utils.knowledge.agentic_knowledge.doc_context import (
+    DocContext,
+    render_doc_context,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     DOCUMENT_KINDS,
     KIND_DEADEND,
@@ -95,6 +99,11 @@ _SECTIONS: Tuple[Tuple[str, str], ...] = (
     (KIND_DOC, "## Conventions"),
 )
 
+#: Heading the standing documentation digest renders under.  Its own section,
+#: ahead of the retrieved ones: the map of what a repository has written down
+#: is read before the one paragraph a query happened to match.
+DOC_CONTEXT_TITLE = "## Documentation in this repository"
+
 
 @dataclass(frozen=True)
 class KnowledgeHit:
@@ -159,6 +168,9 @@ class KnowledgeContext:
         The block to inject; ``""`` when there is nothing to say.
     chars : int
         Length of :attr:`rendered`.
+    doc_context : DocContext, optional
+        The standing documentation digest that was injected, when any; the
+        annotation reads its level, size and source files from here.
     best_recipe_score : float
         Highest weighted score among the recipes; an escalation input.
     deadends : Tuple[KnowledgeHit, ...]
@@ -176,6 +188,7 @@ class KnowledgeContext:
     deadends: Tuple[KnowledgeHit, ...] = ()
     cache: str = "miss"
     status: str = "ok"
+    doc_context: Optional[DocContext] = None
 
     @property
     def empty(self) -> bool:
@@ -221,6 +234,7 @@ class ContextAssembler:
         policy: ModePolicy,
         *,
         extra_lines: Iterable[str] = (),
+        doc_context: Optional[DocContext] = None,
     ) -> KnowledgeContext:
         """
         Return the block to inject for one request.
@@ -234,6 +248,11 @@ class ContextAssembler:
         extra_lines : Iterable[str], optional
             Lines from this turn itself (what it already tried), placed in the
             dead-ends section without competing for retrieval.
+        doc_context : DocContext, optional
+            The repository's standing documentation digest.  Rendered first and
+            charged against the budget before anything is retrieved, so the
+            always-present map is what the mode pays for first and the deep
+            chunks spend what is left.
 
         Returns
         -------
@@ -248,13 +267,23 @@ class ContextAssembler:
                 if line and line.strip()
             ]
         )
+        # The digest is a fixed cost the operator opted into, so it is measured
+        # against the mode's budget before the variable parts: what is left is
+        # what retrieval may spend.  When even the digest will not fit, it is
+        # not injected at all rather than squeezing the block out from under it.
+        digest = render_doc_context(doc_context) if doc_context else ""
+        if digest and len(digest) + len(DOC_CONTEXT_TITLE) + 3 > policy.max_chars:
+            digest = ""
+        reserved = len(digest) + len(DOC_CONTEXT_TITLE) + 3 if digest else 0
         # The lines this turn supplies itself are rendered whatever else fits,
         # so they are charged against the budget first: without that a long
         # "already tried" list would push the block past the mode's budget,
         # which is the one number the operator can reason about.
-        extra = _fit_extra(extra, policy.max_chars - _block_overhead())
-        chosen = self._budget(candidates, policy.max_chars, _extra_cost(extra))
-        rendered = self._render(chosen, extra)
+        extra = _fit_extra(extra, policy.max_chars - _block_overhead() - reserved)
+        chosen = self._budget(
+            candidates, policy.max_chars, _extra_cost(extra) + reserved
+        )
+        rendered = self._render(chosen, extra, digest)
         hits = tuple(candidate.hit for candidate in chosen)
         return KnowledgeContext(
             hits=hits,
@@ -262,6 +291,7 @@ class ContextAssembler:
             chars=len(rendered),
             best_recipe_score=best_recipe_score(hits),
             deadends=deadends_of(hits),
+            doc_context=doc_context if digest else None,
         )
 
     # ------------------------------------------------------------ ranking ---
@@ -449,10 +479,13 @@ class ContextAssembler:
 
     # -------------------------------------------------------------- render --
     def _render(
-        self, chosen: Sequence[_Candidate], extra_lines: Sequence[str]
+        self,
+        chosen: Sequence[_Candidate],
+        extra_lines: Sequence[str],
+        doc_context: str = "",
     ) -> str:
         """Render the block, sections in the fixed order."""
-        if not chosen and not extra_lines:
+        if not chosen and not extra_lines and not doc_context:
             return ""
         grouped: Dict[int, List[str]] = {}
         for candidate in chosen:
@@ -463,6 +496,8 @@ class ContextAssembler:
                 _extra_line(line) for line in extra_lines
             )
         parts = [BLOCK_OPEN, _INTRO]
+        if doc_context:
+            parts.extend((DOC_CONTEXT_TITLE, doc_context))
         for index, (_, title) in enumerate(_SECTIONS):
             entries = grouped.get(index)
             if not entries:
