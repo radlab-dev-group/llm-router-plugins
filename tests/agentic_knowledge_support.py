@@ -111,9 +111,7 @@ def _heredoc_patch(call_id, event_id, paths=("src/a.py",), cwd="/repo"):
     The envelope rides as a here-document piped to ``apply_patch`` inside an
     ``exec_command``, so no call is named after the patch at all.
     """
-    command = (
-        f"cd {cwd} && apply_patch <<'PATCH'\n{patch_envelope(paths)}\nPATCH"
-    )
+    command = f"cd {cwd} && apply_patch <<'PATCH'\n{patch_envelope(paths)}\nPATCH"
     return _command(call_id, event_id, command)
 
 
@@ -236,9 +234,11 @@ class FakeStore:
         self.hits = tuple(hits)
         self.status = status
         self.requests = []
+        self.deadlines = []
 
-    def search(self, request):
+    def search(self, request, *, deadline=None):
         self.requests.append(request)
+        self.deadlines.append(deadline)
         return SearchResult(self.status, hits=self.hits)
 
 

@@ -287,7 +287,9 @@ def test_a_window_archived_from_a_replayed_history_keeps_its_repository():
     filler = {
         "type": "message",
         "role": "developer",
-        "content": [{"type": "input_text", "text": "You are a coding agent. " * 900}],
+        "content": [
+            {"type": "input_text", "text": "You are a coding agent. " * 900}
+        ],
     }
     payload["input"] = [filler, filler, filler, context] + payload["input"]
     plugin.apply(payload)
@@ -485,3 +487,51 @@ def test_the_store_passes_its_legs_into_the_search_options():
     )
     assert options["hybrid_search"] is False
     assert options["rerank_results"] is True
+
+
+# -------------------------------------------------------- the read budget ---
+def test_one_request_spends_one_budget_across_all_its_sources():
+    """
+    The deadline of every search of one request is the same one, set at the start.
+
+    A mode reads one source per collection and the sources are searched one
+    after another, so without a single shared deadline a request pays the
+    transport timeout once per source.  The plugin starts the budget before the
+    loop and hands every search the same deadline, which is what makes
+    ``read_timeout_seconds`` the number a request waits.
+    """
+    import time
+
+    config = knowledge_config()
+    store = FakeStore()
+    plugin = make_plugin(config, store=store)
+    plugin.apply(main_payload(mode="implement"))
+    deadlines = store.deadlines
+    assert deadlines, "the read path must search at least one source"
+    assert len({round(d, 3) for d in deadlines}) == 1
+    headroom = deadlines[0] - time.monotonic()
+    assert 0 < headroom <= config.read_timeout_seconds
+
+
+def test_the_budget_a_request_waits_is_at_least_one_call():
+    """
+    A budget smaller than one call would read nothing and pretend it was empty.
+
+    The operator wrote a budget that fits no call; the config refuses to let
+    the layer search nothing and report it as an empty knowledge base.
+    """
+    config = knowledge_config(read_timeout_seconds=0.2, sse_timeout_seconds=2.0)
+    assert config.read_timeout_seconds >= config.sse_timeout_seconds
+
+
+def test_the_language_switch_reaches_the_store_the_plugin_builds():
+    """The policy decides; the store the plugin wires carries it."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge import (
+        AgenticKnowledgePlugin,
+    )
+
+    for flag in (True, False):
+        config = knowledge_config(sse_ignore_language_detect=flag)
+        plugin = AgenticKnowledgePlugin(config=config)
+        plugin._wire(config)
+        assert plugin._store._ignore_language_detect is flag

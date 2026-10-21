@@ -20,6 +20,7 @@ plugin cannot serve comes back the very object it was given.
 """
 
 import logging
+import time
 
 from typing import Any, Dict, Optional, Tuple
 
@@ -68,6 +69,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.miner import EpisodeMi
 from llm_router_plugins.utils.knowledge.agentic_knowledge.query import QueryBuilder
 from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import ScopeResolver
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+    REASON_READ_BUDGET,
     KnowledgeStore,
     STATUS_DISABLED,
     STATUS_OK,
@@ -159,6 +161,7 @@ class AgenticKnowledgePlugin(PluginInterface):
                 min_similarity=config.min_similarity,
                 hybrid_search=config.hybrid_search,
                 rerank_results=config.rerank_results,
+                ignore_language_detect=config.sse_ignore_language_detect,
                 logger=self._logger,
             )
         if self._publisher is None:
@@ -386,9 +389,19 @@ class AgenticKnowledgePlugin(PluginInterface):
 
         results = []
         statuses = set()
+        # One budget for the whole read, not one per source: a mode asks one
+        # question per collection and they are asked one after another, so
+        # without a shared ceiling a request pays the transport timeout as
+        # many times as the mode has sources.  The store starts a search only
+        # while a whole call fits before this moment, which is what makes
+        # `read_timeout_seconds` the number a request actually waits.
+        deadline = time.monotonic() + self._config.read_timeout_seconds
+        skipped = 0
         for request in self._query_builder.build(turn, policy):
             try:
-                result = self._store.search(request)
+                result = self._store.search(request, deadline=deadline)
+                if result.reason == REASON_READ_BUDGET:
+                    skipped += 1
             except Exception as exc:
                 self._warn("knowledge search failed: %s", type(exc).__name__)
                 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
@@ -398,6 +411,16 @@ class AgenticKnowledgePlugin(PluginInterface):
                 result = _SR(STATUS_UNAVAILABLE, reason="search")
             statuses.add(result.status)
             results.append((result, request.categories))
+        if skipped:
+            # The reads the operator will otherwise conclude never happened.
+            self._warn(
+                "knowledge read budget of %.1fs spent: %d search(es) of %s not "
+                "started (raise READ_TIMEOUT_SECONDS or shorten the mode's "
+                "sources)",
+                self._config.read_timeout_seconds,
+                skipped,
+                turn.scope or "?",
+            )
         status = _status_of(statuses)
 
         assembler = ContextAssembler(

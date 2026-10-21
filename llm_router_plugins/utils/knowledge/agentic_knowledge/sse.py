@@ -27,15 +27,30 @@ rather than added to them, and with nothing in it that would quietly widen the
 set again.  Isolation between repositories does not come from a filter at all;
 it comes from there being one collection per repository, so a forgotten filter
 cannot leak another team's fixes into the prompt.
+
+A third detail is the one that broke the read path in production.  Unless told
+otherwise the engine detects the language *of the question* and uses it twice:
+as a metadata filter on the vector leg (``metadata["text_language"] == lang``)
+and as the name of the Postgres full-text configuration (``pl`` → ``polish``).
+A knowledge base is written in whatever the repository and its code are written
+in, and asked in whatever language the agent's operator types, so neither use
+fits: a Polish question against an English knowledge base filters the vector leg
+to nothing, and a PostgreSQL cluster without a ``polish`` text search
+configuration answers the full-text leg with a 500.  The engine offers
+``ignore_question_lang_detect`` precisely for a caller who knows better, and
+this module sends it by default (:meth:`KnowledgeStore.search`).
 """
 
+import inspect
 import logging
+import time
 
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 __all__ = [
     "KnowledgeStore",
+    "REASON_READ_BUDGET",
     "SCALE_COSINE",
     "SCALE_RRF",
     "SCALE_RERANKER",
@@ -55,6 +70,11 @@ STATUS_DISABLED = "disabled"
 
 #: The search was attempted and failed, or its library is not installed.
 STATUS_UNAVAILABLE = "unavailable"
+
+#: :attr:`SearchResult.reason` — the request's read budget had no room left for
+#: a whole call, so this search was not started.  Distinguished from a failure
+#: because the answer to it is a bigger budget, not a healthier engine.
+REASON_READ_BUDGET = "read budget"
 
 #: :attr:`SearchResult.score_scale` — cosine similarity of the vector leg.
 SCALE_COSINE = "cosine"
@@ -229,6 +249,14 @@ class KnowledgeStore:
         bound to the collection.  Off by default: it costs a model call per
         search, and it decides the scale every score comes back on — see
         :func:`_options`.
+    ignore_language_detect : bool
+        Tell the engine not to guess a language from the query (default
+        ``True``).  A detected language is applied twice on the way in — as a
+        metadata filter on the vector leg and as the name of the full-text
+        configuration — and both are wrong for a knowledge base, which is
+        indexed in the language of the code and asked in the language of the
+        operator.  ``False`` restores the engine's behaviour for a deployment
+        that indexes one language per collection and asks in that language.
     logger : logging.Logger, optional
         Where to report failures; never with payload content.
     client : Any, optional
@@ -249,6 +277,7 @@ class KnowledgeStore:
         client: Any = None,
         username: str = "",
         password: str = "",
+        ignore_language_detect: bool = True,
     ) -> None:
         """Bind the connection; build no client until the first search."""
         self._host = (host or "").strip()
@@ -264,6 +293,12 @@ class KnowledgeStore:
         self._min_similarity = float(min_similarity)
         self._hybrid_search = bool(hybrid_search)
         self._rerank_results = bool(rerank_results)
+        self._ignore_language_detect = bool(ignore_language_detect)
+        # Whether the client in use accepts the language switch, resolved once
+        # and only when it is needed: an older ``sse_lib`` has no such keyword,
+        # and passing it there would turn every search into a TypeError the
+        # layer can only report as an unavailable engine.
+        self._language_switch: Optional[bool] = None
         self._logger = logger
         self._client = client
         self._unavailable_reason = (
@@ -280,7 +315,9 @@ class KnowledgeStore:
         """Why the store cannot search, for a single log line."""
         return self._unavailable_reason
 
-    def search(self, request: SearchRequest) -> SearchResult:
+    def search(
+        self, request: SearchRequest, *, deadline: Optional[float] = None
+    ) -> SearchResult:
         """
         Run *request* against the engine.
 
@@ -288,6 +325,14 @@ class KnowledgeStore:
         ----------
         request : SearchRequest
             What to look for.
+        deadline : float, optional
+            Monotonic reading by which the read of this request has to be over.
+            A search is started only while a whole call still fits before it:
+            the transport timeout belongs to the client and cannot be shortened
+            per call, so the budget is spent by not starting a call that would
+            overrun it.  What the operator wrote is then the ceiling it looks
+            like — three searches of a mode do not each get to wait the
+            transport timeout on top of the one before them.
 
         Returns
         -------
@@ -298,6 +343,8 @@ class KnowledgeStore:
             return SearchResult(STATUS_DISABLED, reason=self._unavailable_reason)
         if not request.query.strip():
             return SearchResult(STATUS_OK)
+        if deadline is not None and deadline - time.monotonic() < self._timeout:
+            return SearchResult(STATUS_UNAVAILABLE, reason=REASON_READ_BUDGET)
         try:
             client = self._ensure_client()
         except Exception as exc:
@@ -314,6 +361,7 @@ class KnowledgeStore:
                     hybrid_search=self._hybrid_search,
                     rerank_results=self._rerank_results,
                 ),
+                **self._language_switch_arguments(client),
             )
         except Exception as exc:  # sse_lib.SSEError and anything transport-shaped
             if _collection_missing(exc):
@@ -378,6 +426,29 @@ class KnowledgeStore:
         )
         return self._client
 
+    def _language_switch_arguments(self, client: Any) -> Dict[str, bool]:
+        """
+        Return the keyword that keeps the engine from guessing a language.
+
+        Asked not to guess is the right default for a knowledge base: the
+        engine would filter the vector leg to chunks of the *question's*
+        language and ask PostgreSQL for a full-text configuration named after
+        it — a cluster without a ``polish`` configuration answers that with a
+        500, and an English knowledge base answers a Polish question with
+        nothing.  With the guess off the engine drops the filter and falls back
+        to the ``simple`` configuration, which exists everywhere.
+        """
+        if not self._ignore_language_detect:
+            return {}
+        if self._language_switch is None:
+            self._language_switch = _accepts_language_switch(client)
+            if not self._language_switch:
+                self._note(
+                    "engine client cannot disable language detection; queries "
+                    "will be filtered to the language of the question"
+                )
+        return {"ignore_question_lang_detect": True} if self._language_switch else {}
+
     def _warn(self, message: str, *args: Any) -> None:
         """Log a warning when a logger was given."""
         if self._logger is not None:
@@ -387,6 +458,30 @@ class KnowledgeStore:
         """Log at debug level when a logger was given."""
         if self._logger is not None:
             self._logger.debug(message, *args)
+
+
+def _accepts_language_switch(client: Any) -> bool:
+    """
+    Return whether *client*'s ``search`` takes the language switch.
+
+    Checked against the client rather than assumed, because the library is an
+    optional dependency: a deployment pinned to a release without the keyword
+    would otherwise meet a ``TypeError`` on every search and read it as an
+    engine that is down.  A client that takes anything (``**kwargs``) counts.
+    """
+    method = getattr(client, "search", None)
+    if not callable(method):
+        return False
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
+    if "ignore_question_lang_detect" in parameters:
+        return True
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
 
 
 def _collection_missing(exc: Exception) -> bool:

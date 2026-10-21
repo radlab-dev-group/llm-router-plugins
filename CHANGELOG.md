@@ -195,6 +195,27 @@ release tagged as `v<version>`.
   reason for a conflict (`state` still compares equal to the outcome string).
 
 ### Changed
+- **The read path stopped losing every search to its own timeout, and stopped asking the engine to
+  guess the query's language.** Two independent faults made the knowledge base invisible in
+  production, measured against a real engine on another host:
+  `sse_api.engine.controllers.search.semantic` detects the language of the *question* and applies it
+  twice — as a metadata filter on the vector leg (`text_language == <lang>`), and as the name of the
+  PostgreSQL full-text configuration (`pl` → `polish`).  A knowledge base is indexed in the language
+  of the code and asked in the language of the operator, so the first filter throws the answers away
+  and, on a cluster without a `polish` text search configuration, the second answers a Polish
+  question with `ProgrammingError: text search configuration "polish" does not exist` — an HTTP 500,
+  which this layer can only read as an unavailable engine.  The plugin now sends
+  `ignore_question_lang_detect` (`…_SSE_IGNORE_LANGUAGE_DETECT`, on by default; a client too old to
+  take the keyword is detected and asked without it), so the engine drops the filter and falls back
+  to the `simple` configuration.
+  Separately: one number used to be both the per-call transport timeout and the read budget, so a
+  mode reading three sources waited three times what the operator wrote, while the 1.5 s default was
+  below the 1.7 s median a hybrid search actually takes — five of five searches timed out.  They are
+  two numbers now: `…_SSE_API_TIMEOUT` (default `2.0`) ceilings one call, `…_READ_TIMEOUT_SECONDS`
+  (default `4.0`) ceilings the request, a search starts only while a whole call fits before that
+  deadline, and the budget is never allowed below one call.  A budget spent mid-request skips the
+  remaining sources and warns once, naming the scope and the number skipped.
+
 - The knowledge generation cache entry grew a schema version (`2`): a hit now keeps `source`, `doc_type` and `heading`,
   and an entry keeps the standing documentation digest it was built with, so a cache hit reports the same context the
   first request of the generation reported. Entries written under schema `1` are ignored rather than misread — one

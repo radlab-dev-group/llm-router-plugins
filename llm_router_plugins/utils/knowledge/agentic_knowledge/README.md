@@ -517,6 +517,35 @@ off — so `escalation.strong_recipe_score` is a threshold on that scale: a rera
 practice, which is why the reranker stays off by default: it costs a model call per search and a
 collection whose engine serves no reranker answers nothing with it on.
 
+### How one request reads the engine
+
+A mode asks **one question per collection** it reads — mined knowledge, the session archive, the
+repository's documentation — and the questions are asked one after another.  Two numbers bound what
+that costs, and they are not the same number:
+
+| Knob | Means |
+|------|-------|
+| `…_SSE_API_TIMEOUT` | what **one call** to the engine may take |
+| `…_READ_TIMEOUT_SECONDS` | what **one request** may spend on the engine in total |
+
+A search is started only while a whole call still fits before the budget runs out, so
+`…_READ_TIMEOUT_SECONDS` is the ceiling a request really waits rather than a per-call figure
+multiplied by the number of sources.  It is never allowed below the per-call timeout — a budget in
+which no call fits would read nothing and report an empty knowledge base.  When a budget is spent
+mid-request the remaining sources are skipped and one warning names the scope and how many were
+lost; raise the budget or shorten the mode's sources.  Measured against a real engine on another
+host, a hybrid search takes a median of ~1.7 s, which is why a 1.5 s per-call ceiling lost every
+search it made.
+
+The plugin also asks the engine **not to guess the language of the query**
+(`…_SSE_IGNORE_LANGUAGE_DETECT`, on by default).  The engine otherwise detects the language of the
+question and applies it twice: as a metadata filter on the vector leg (`text_language == <lang>`)
+and as the name of the PostgreSQL full-text configuration (`pl` → `polish`).  Neither fits a
+knowledge base, which is indexed in the language of the code and asked in the language of the
+operator — the first filters the answers away, and a cluster without that configuration answers the
+full-text leg with an HTTP 500 rather than with nothing.  With the guess off the engine drops the
+filter and uses `simple`, which exists everywhere.
+
 A mode accepts `max_chars`, `sources`, `escalation_model_name` and `cheap_model_name`. The last one is parsed and
 kept, but no policy in the code reads it yet — it is the model a strong recipe would recommend — so setting it
 changes nothing: routing stays as the router left it.
@@ -539,9 +568,10 @@ All use the prefix `LLM_ROUTER_KNOWLEDGE_AGENTIC_`. Booleans accept `1/0`, `true
 | `…_SSE_API_PREFIX`                    | **empty**        | empty ⇒ `sse_lib.endpoints.DEFAULT_API_PREFIX` (`api`); set it only when the engine is mounted elsewhere |
 | `…_SSE_API_TOKEN`                     | empty            | SSE token (never logged); when set, it wins over a login |
 | `…_SSE_API_USERNAME` / `…_SSE_API_PASSWORD` | empty      | engine login for an engine that authenticates by login rather than by a token; the client logs in on its first call; neither is ever logged |
-| `…_SSE_API_TIMEOUT`                   | `1.5`            | per-request ceiling, clamped to `0.1…10` s               |
+| `…_SSE_API_TIMEOUT`                   | `2.0`            | ceiling of one call to the engine, clamped to `0.1…10` s |
 | `…_SSE_VERIFY`                        | `true`           | TLS certificate verification                             |
-| `…_READ_TIMEOUT_SECONDS`              | `1.5`            | read-path timeout budget                                 |
+| `…_READ_TIMEOUT_SECONDS`              | `4.0`            | read budget: what one request may spend on the engine **in total**; never smaller than `…_SSE_API_TIMEOUT`, so one call always fits |
+| `…_SSE_IGNORE_LANGUAGE_DETECT`        | `true`           | ask the engine not to guess the language of the query (it would filter the vector leg to it and name the full-text configuration after it) |
 | `…_MIN_SIMILARITY`                    | `0.35`           | floor for a hit                                          |
 | `…_HYBRID_SEARCH`                     | `true`           | fuse the vector leg with the full-text leg               |
 | `…_RERANK_RESULTS`                    | **`false`**      | re-score the hits with the collection's cross-encoder    |

@@ -147,7 +147,16 @@ _DEFAULT_COLLECTION_PREFIX = _engine_collection_fragment(
 
 #: Ceiling of one read call, so a typo cannot stall a request.
 _MAX_SSE_TIMEOUT_SECONDS = 10.0
-_DEFAULT_READ_TIMEOUT_SECONDS = 1.5
+#: Ceiling of one call to the engine.  A hybrid search of a real collection
+#: measured a median of 1.7 s (engine and plugin on separate hosts), so a call
+#: allowed 1.5 s loses most of the searches it makes to its own timeout; 2 s is
+#: the shortest number that answers more often than it times out.
+_DEFAULT_SSE_TIMEOUT_SECONDS = 2.0
+#: Budget of the read path: what one request may spend on the engine in total.
+#: A mode asks the engine several questions (one per collection), and they are
+#: asked one after another, so the request's ceiling has to be a sum — two
+#: calls of :data:`_DEFAULT_SSE_TIMEOUT_SECONDS` is what the common mode does.
+_DEFAULT_READ_TIMEOUT_SECONDS = 4.0
 _DEFAULT_MIN_SIMILARITY = 0.35
 
 #: Both legs of the engine fused by Reciprocal Rank Fusion is what its
@@ -347,8 +356,13 @@ class AgenticKnowledgeConfig:
 
     read_enabled: bool = True
     #: Budget of the read path: how long the knowledge layer may spend on the
-    #: engine for one request.  It drives the engine client's own timeout, so
-    #: the number the operator wrote is the number a request waits.
+    #: engine for **one request in total**.  A mode asks one question per
+    #: collection and the questions are asked one after another, so this is a
+    #: sum and :attr:`sse_timeout_seconds` is the share one of them may take:
+    #: a search is not started unless a whole call still fits before the budget
+    #: runs out.  The number the operator wrote is therefore the ceiling a
+    #: request actually waits, not a per-call figure multiplied by the number
+    #: of sources the mode reads.
     read_timeout_seconds: float = _DEFAULT_READ_TIMEOUT_SECONDS
     min_similarity: float = _DEFAULT_MIN_SIMILARITY
     #: Fuse the vector leg with the engine's full-text leg.
@@ -407,8 +421,17 @@ class AgenticKnowledgeConfig:
     #: An empty password is no credential, and a token, when set, wins.
     sse_username: str = ""
     sse_password: str = ""
-    sse_timeout_seconds: float = _DEFAULT_READ_TIMEOUT_SECONDS
+    #: Ceiling of one call to the engine; always within the read budget.
+    sse_timeout_seconds: float = _DEFAULT_SSE_TIMEOUT_SECONDS
     sse_verify: bool = True
+    #: Ask the engine not to detect the language of the query.  The engine uses
+    #: what it detects twice: as a metadata filter on the vector leg, and as
+    #: the name of the PostgreSQL full-text configuration.  A knowledge base is
+    #: indexed in the language of the code and asked in the language of the
+    #: operator, so the first filters the answers away and the second asks the
+    #: cluster for a configuration it may not have — which is a 500, not an
+    #: empty result.
+    sse_ignore_language_detect: bool = True
 
     redis: RedisConnectionSettings = field(default_factory=RedisConnectionSettings)
     worker: WorkerSettings = field(default_factory=WorkerSettings)
@@ -660,16 +683,17 @@ class AgenticKnowledgeConfig:
                 continue
             setattr(self, target, cast(raw, f"{prefix}{name}"))
 
-        # Whether the operator pinned the transport timeout apart from the read
-        # budget; `SSE_API_TIMEOUT` is one name among many below, so the flag
-        # has to start false rather than appear with it.
-        sse_timeout_overridden = False
         # One annotated tuple rather than a literal one: the casts differ in
         # what they return, and unpacking a heterogeneous literal makes mypy
         # hold the first entry's type for the whole loop.
         casts: Tuple[Tuple[str, str, Callable[[Any, str], Any]], ...] = (
             ("SSE_API_TIMEOUT", "sse_timeout_seconds", _positive_float),
             ("READ_TIMEOUT_SECONDS", "read_timeout_seconds", _positive_float),
+            (
+                "SSE_IGNORE_LANGUAGE_DETECT",
+                "sse_ignore_language_detect",
+                _boolean,
+            ),
             ("MIN_SIMILARITY", "min_similarity", _fraction),
             ("HYBRID_SEARCH", "hybrid_search", _boolean),
             ("RERANK_RESULTS", "rerank_results", _boolean),
@@ -707,16 +731,13 @@ class AgenticKnowledgeConfig:
             if raw is None:
                 continue
             setattr(self, target, cast(raw, f"{prefix}{name}"))
-            if name == "SSE_API_TIMEOUT":
-                sse_timeout_overridden = True
 
-        # The read budget is what a request waits for the engine; the transport
-        # timeout is the same number unless the operator said otherwise.  Left
-        # as two fields because the worker indexes with a far longer timeout
-        # than the proxy searches with, and shares this one.
-        if not sse_timeout_overridden:
-            self.sse_timeout_seconds = self.read_timeout_seconds
-        # A request path may not wait forever, whatever the operator set.
+        # A request path may not wait forever, whatever the operator set, and
+        # the two numbers mean different things: the budget is what a request
+        # waits, the timeout what one of its calls may take.  They used to be
+        # one number, which made a mode that reads three sources wait three
+        # times what the operator wrote — or, at the old 1.5 s default, lose
+        # every search to a timeout the engine cannot beat.
         self.sse_timeout_seconds = min(
             max(self.sse_timeout_seconds, 0.1), _MAX_SSE_TIMEOUT_SECONDS
         )
@@ -769,6 +790,19 @@ class AgenticKnowledgeConfig:
             raise ValueError(f"Unknown adapters: {sorted(unknown)}")
         if self.min_similarity < 0.0 or self.min_similarity > 1.0:
             raise ValueError("min_similarity must be in [0, 1]")
+        # One call has to fit the request's read budget, or the layer would
+        # read nothing at all and report it as an empty knowledge base.  This
+        # invariant belongs to the resolved policy, not to the environment
+        # path that happens to set the numbers, so it is checked here.
+        self.sse_timeout_seconds = min(
+            max(self.sse_timeout_seconds, 0.1), _MAX_SSE_TIMEOUT_SECONDS
+        )
+        self.read_timeout_seconds = min(
+            max(self.read_timeout_seconds, 0.1), _MAX_SSE_TIMEOUT_SECONDS
+        )
+        self.read_timeout_seconds = max(
+            self.read_timeout_seconds, self.sse_timeout_seconds
+        )
         if not 0.0 < self.strong_recipe_score <= 1.0:
             raise ValueError("strong_recipe_score must be in (0, 1]")
         if self.docs_max_file_bytes < 1024:
