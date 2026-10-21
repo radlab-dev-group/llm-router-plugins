@@ -8,8 +8,7 @@ release tagged as `v<version>`.
 
 | Version | Changelog |
 | ------- | --------- |
-| 0.1.5 | **Added:** `agentic_knowledge` — a knowledge layer that runs behind the Codex router: per-work-mode retrieval of verified fixes, dead ends and the pre-compaction archive from the Semantic Search Engine, a masked learn-from-traffic write path through a Redis Stream and an indexing worker, and optional knowledge-or-escalate model selection. Adapters for Codex (full) and Claude Code (read-only), plus offline counterfactual evaluation. **Fix:** the `agentic_knowledge` collection names are reduced to the engine's character set at configuration time, so a repository scope that would produce a hyphen can no longer make every indexing attempt fail with a 500 at collection creation; the retention pass still sweeps the legacy `prefix-<scope>-sessions` archives; the repository of a request is read from the leading messages, so a compaction (which re-sends the whole window) is filed under its own project instead of into a scope-less prefix, and a request with no known repository publishes nothing; a search of a repository that has not been indexed yet is an empty answer, not a failed search **Added:** engine login for a Semantic Search Engine that authenticates by username and password rather than by a pre-issued token (`SSE_API_USERNAME`/`SSE_API_PASSWORD`); every mined episode now carries the work **phase** its evidence names (`test`, `implement`, …) in its header and in `metadata_json.phase`, and a retrieval source can be restricted in its policy to phases (`"phases": ["test"]`) or to routing modes (`"modes": ["debug"]`) — the filter is engine-side, unions across names, intersects the source's categories, never touches the archived window whose `thread_id` owns the single metadata slot, and a policy cannot mix the two dimensions in one request. **Added:** `agentic_knowledge` indexes the repository's own documentation — a heading-aware scan of its `*.md` files published as `doc` documents, republished on content change, superseded documents retired through a `docs_prune` control message (never on a truncated scan), plus the `llm-router-agentic-kb-docs` command and the `docs` policy section. Documentation now lives in `<prefix>_<scope>_docs`, is read per work mode through `doc_types`, is searched on the turn's subject rather than its failure signature, and a guide about a file the turn edits outranks one that is not. On top of retrieval a session carries a **standing documentation map** — structural, stable per repository, budgeted first — and every mined fix or dead end points at the page that documents the module it touched. |
-| 0.1.4 | **Fix:** the Codex routing record follows the phase that was actually routed with instead of the last signal it could rebuild, so an interleaved command no longer freezes the record and repeats a conflict on every request of the turn (captured-session replay: 11 conflicts -> 0). **Added:** `RememberResult` carries why a memory write was skipped; the log names the real cause instead of an undifferentiated `version conflict`. |
+| 0.1.4 | **Added:** `agentic_knowledge` — a knowledge layer that runs behind the Codex router: per-work-mode retrieval of verified fixes, dead ends and the pre-compaction archive from the Semantic Search Engine, a masked learn-from-traffic write path through a Redis Stream and an indexing worker, and optional knowledge-or-escalate model selection. Adapters for Codex (full) and Claude Code (read-only), plus offline counterfactual evaluation. **Fix:** the `agentic_knowledge` collection names are reduced to the engine's character set at configuration time, so a repository scope that would produce a hyphen can no longer make every indexing attempt fail with a 500 at collection creation; the retention pass still sweeps the legacy `prefix-<scope>-sessions` archives; the repository of a request is read from the leading messages, so a compaction (which re-sends the whole window) is filed under its own project instead of into a scope-less prefix, and a request with no known repository publishes nothing; a search of a repository that has not been indexed yet is an empty answer, not a failed search **Added:** engine login for a Semantic Search Engine that authenticates by username and password rather than by a pre-issued token (`SSE_API_USERNAME`/`SSE_API_PASSWORD`); every mined episode now carries the work **phase** its evidence names (`test`, `implement`, …) in its header and in `metadata_json.phase`, and a retrieval source can be restricted in its policy to phases (`"phases": ["test"]`) or to routing modes (`"modes": ["debug"]`) — the filter is engine-side, unions across names, intersects the source's categories, never touches the archived window whose `thread_id` owns the single metadata slot, and a policy cannot mix the two dimensions in one request. **Added:** `agentic_knowledge` indexes the repository's own documentation — a heading-aware scan of its `*.md` files published as `doc` documents, republished on content change, superseded documents retired through a `docs_prune` control message (never on a truncated scan), plus the `llm-router-agentic-kb-docs` command and the `docs` policy section. Documentation now lives in `<prefix>_<scope>_docs`, is read per work mode through `doc_types`, is searched on the turn's subject rather than its failure signature, and a guide about a file the turn edits outranks one that is not. On top of retrieval a session carries a **standing documentation map** — structural, stable per repository, budgeted first — and every mined fix or dead end points at the page that documents the module it touched. **Fix:** the Codex routing record follows the phase that was actually routed with instead of the last signal it could rebuild, so an interleaved command no longer freezes the record and repeats a conflict on every request of the turn (captured-session replay: 11 conflicts -> 0). **Added:** `RememberResult` carries why a memory write was skipped; the log names the real cause instead of an undifferentiated `version conflict`. |
 | 0.1.3 | **Added:** an accepted semantic decision can be carried across one command generation (`MEMORY_CARRY_DECISIONS`). **Changed:** semantic rankings are read against their own scale; the phase layer separates work states from shell noise; CLI-injected context is kept out of the intent text. |
 | 0.1.2 | **Added:** optional Redis-backed shared session memory with `MEMORY_MAX_RETRIES`; offline routing evaluation with calibration replay; a configurable `phase` layer reading assistant actions and tool activity; heuristic `negation_pattern` / `min_margin` / `weights`; `per_target_top_k` aggregation. **Changed:** mode definitions refined; semantic context built from the latest assistant utterance only. |
 | 0.1.1 | **Added:** `ClaudeCodeRoutingPlugin` (tier-to-model mapping); `lint_signals` start-up validation; `classify_max_chars` budget. **Changed:** `agentic_routing` consolidated into `CodexRoutingPlugin`; word-boundary heuristic matching; similarity threshold lowered to `0.51`; sliding-window encoding for over-length queries. |
@@ -19,7 +18,7 @@ release tagged as `v<version>`.
 | 0.0.2 | **Added:** PII masking plugin, dynamic pseudonym generation with de-anonymization in `FastMasker`, LangChain RAG plugin with CLI, `SojkaGuardPlugin`, lint/format/type/security configuration. **Changed:** `mask()` returns `(masked_text, mappings)`; `numpy` loaded only when LangChain RAG is enabled. |
 | 0.0.1 | **Added:** `fast_masker` plugin (IP, KRS, JWT, NRB, NIP, URL, SSN and other rules), packaging (`setup.py`) with the initial `.version`, License section in the README. |
 
-## [0.1.5] - 2026-10-21
+## [0.1.4] - 2026-10-21
 
 ### Added
 - `agentic_knowledge` — an **agentic knowledge layer** for coding agents
@@ -192,6 +191,21 @@ release tagged as `v<version>`.
   write-only — and a documentation page never counts toward
   `best_recipe_score`, because a README is not a verified fix and must not
   push a mode past its escalation threshold.
+- `RememberResult` — the outcome of `remember_decision` now carries a log-safe
+  reason for a conflict (`state` still compares equal to the outcome string).
+
+### Changed
+- The knowledge generation cache entry grew a schema version (`2`): a hit now keeps `source`, `doc_type` and `heading`,
+  and an entry keeps the standing documentation digest it was built with, so a cache hit reports the same context the
+  first request of the generation reported. Entries written under schema `1` are ignored rather than misread — one
+  rebuilt block per generation, then normal service.
+- A skipped Codex routing memory write is logged with the actual cause instead
+  of one undifferentiated `version conflict`:
+  - `expected version N, record is M` — a concurrent writer moved first;
+  - `incomparable history` / `stale history` / `reordered history` /
+    `context changed` — the continuity proof failed;
+  - `mode disagreement`, `generation changed`, `write` — the other refusal
+    paths.
 
 ### Fixed
 - `agentic_knowledge`: collection names are now reduced to the engine's
@@ -203,29 +217,6 @@ release tagged as `v<version>`.
   The prefix and the collection names are now one engine-safe spelling
   (`agentic_kb_<scope>` / `agentic_kb_<scope>_sessions`), and the retention
   pass still sweeps the legacy `agentic-kb-<scope>-sessions` archives.
-
-### Changed
-- The knowledge generation cache entry grew a schema version (`2`): a hit now keeps `source`, `doc_type` and `heading`,
-  and an entry keeps the standing documentation digest it was built with, so a cache hit reports the same context the
-  first request of the generation reported. Entries written under schema `1` are ignored rather than misread — one
-  rebuilt block per generation, then normal service.
-
-## [0.1.4] - 2026-10-13
-
-### Added
-- `RememberResult` — the outcome of `remember_decision` now carries a log-safe
-  reason for a conflict (`state` still compares equal to the outcome string).
-
-### Changed
-- A skipped Codex routing memory write is logged with the actual cause instead
-  of one undifferentiated `version conflict`:
-  - `expected version N, record is M` — a concurrent writer moved first;
-  - `incomparable history` / `stale history` / `reordered history` /
-    `context changed` — the continuity proof failed;
-  - `mode disagreement`, `generation changed`, `write` — the other refusal
-    paths.
-
-### Fixed
 - The Codex routing record now follows the phase the cascade actually routed
   with instead of the last signal it could rebuild from the history. The
   cascade names the phase dominating the recent window, so an edit interleaved
