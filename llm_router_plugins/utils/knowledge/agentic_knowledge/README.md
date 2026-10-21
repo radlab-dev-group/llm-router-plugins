@@ -179,11 +179,12 @@ the scope is unknown, and both reads and writes are skipped (`scope: ""` in the 
 |-------------------|----------------------------------|--------------------------------------------------------|
 | `recipe`          | `<prefix>_<scope>`               | `test_failure → patch → test pass`                      |
 | `deadend`         | `<prefix>_<scope>`               | a repeated failure, a dead end                          |
-| `doc`             | `<prefix>_<scope>`               | the repository's markdown — [Documentation](#documentation-doc) |
+| `doc`             | `<prefix>_<scope>_docs`          | the repository's markdown — [Documentation](#documentation-doc) |
 | `session_archive` | `<prefix>_<scope>_sessions`      | a request classified `compaction`                       |
 
 Default `<prefix>` is `agentic_kb`. A collection is `<prefix>_<scope>` (and
-`<prefix>_<scope>_sessions` for the archive); the engine's character set —
+`<prefix>_<scope>_sessions` for the archive, `<prefix>_<scope>_docs` for the
+repository's own documentation); the engine's character set —
 letters, digits, `_`, `.` — is enforced at configuration time, **on both the
 prefix and the scope**, because the scope is a checkout's directory name and
 the engine refuses a hyphen (a 500) in a collection name: `llm-router` becomes
@@ -230,13 +231,31 @@ carries either — its `thread_id` filter owns the slot — and one source witho
 restriction leaves the whole request unrestricted (sources of one collection are
 retrieved by one search).
 
+The `doc` source carries a third dimension of the same kind: **`doc_types`**,
+the documentation kinds it reads — `readme`, `guide`, `changelog`,
+`contributing`, `security`, `license`, `agent`, `note`.  One `eq` filter per
+kind, the engine unions them.  It is the `doc` source's own restriction, in its
+own collection and its own request, so it never collides with the phase and
+mode dimensions above; a `doc` source that also lists phases or modes is a
+configuration error, as is a `doc_types` list on any other source (a mined
+episode carries no `doc_type`, and the filter would read as empty).  The
+shipped policy is deliberate per work mode: `implement` reads `readme`, `guide`
+and `contributing`, `plan` adds `changelog` and `note`, and `review` reads
+`guide`, `contributing` and `security`.  `agent` (an `AGENTS.md`) is in no
+list: the agent already receives that file in its own context, and retrieving
+it again would only spend the mode's budget on words it has been given.
+
 ```jsonc
 {"category": "recipe", "weight": 1.0, "max_items": 3, "phases": ["test", "debug"]}
 {"category": "deadend", "weight": 0.9, "modes": ["debug"]}
+{"category": "doc", "weight": 0.8, "max_items": 3, "doc_types": ["guide", "contributing", "security"]}
 ```
 
 `ContextAssembler` normalizes SSE's `score_normalized`, multiplies by the source weight, adds a bonus when a document's
-error signature or paths match the current turn, deduplicates by document name, and cuts to the budget. Sections are
+error signature or paths match the current turn, and a further documentation bonus when a retrieved guide
+**documents a file the turn is touching** — `docs/export.md` for an edited `src/export.py` — a link no retrieval leg
+can see, deduplicates by document name, and cuts to the budget. A `doc` hit whose declared kind the mode does not read
+is dropped on the client, as the second voice of the engine's own `doc_type` filter. Sections are
 rendered in a fixed order inside constant markers:
 
 ```
@@ -313,7 +332,7 @@ llm-router-agentic-kb-docs --path /repo/webapp              # publish it to the 
 | Scan        | `docs.patterns` below `repo_root`, skipping `docs.excluded_dirs` and never `.git`, symlinks or deep trees |
 | Split       | each file at its headings; a section keeps its heading path (`Guide > Deploy`) and is cut at `max_section_chars` |
 | Publish     | one `doc` event per section, to the same stream the miner uses — the worker masks it like any other document |
-| Index       | by the worker, into `<prefix>_<scope>` with `category=doc` and `source_file`, `doc_type`, `heading` in its header |
+| Index       | by the worker, into `<prefix>_<scope>_docs` with `category=doc` and `source_file`, `doc_type`, `heading` in its header |
 
 A file is republished when its **content** changes, not when it is looked at: the digest of the whole file feeds every
 section's fingerprint and the scan state (Redis, one key per scope: `<key_prefix>:docs:<scope>`) compares digests, so
@@ -323,6 +342,10 @@ to retire the name it superseded, which is also what removes the documents of a 
 hit `max_files` or `max_total_bytes` publishes no prune at all**: pruning against a partial listing would delete the
 documentation the scan never reached, and the outcome says `truncated: true`.
 
+The documentation lives apart from mined knowledge, and the state says so: a listing records the collection it was
+written for, and a policy that moves the documentation to another collection finds no listing at all and republishes
+the repository where it now belongs, instead of believing files are indexed in a collection nobody searches.
+
 The scan runs on the request path and is bounded by `docs.rescan_interval_seconds` per process (a repository is looked
 at once per interval, not once per request) and by the byte and file ceilings. It reads the filesystem **as the router
 sees it**: where the router does not run next to the agents, `repo_root` is not a directory it can open, the scan
@@ -330,6 +353,12 @@ reports `skipped: no-such-directory`, and documentation is published with the co
 
 `docs.auto_index: false` keeps the category and the retrieval but takes the filesystem away from the request path: only
 `llm-router-agentic-kb-docs` (or the CLI's own `--dry-run`) publishes then.
+
+The documentation request is not the knowledge request.  Mined knowledge is asked with the mode's query — the failure
+signature in `debug`, the test command in `test` — because that is what a recipe is filed under; documentation is prose
+about the code, filed under the module and the concept, so it is searched with the user's own words plus the touched
+paths and their stems.  The failure signature never rides on a documentation search, and the citation says where the
+quoted section came from: `[doc · guide · docs/export.md › Export helpers]`.
 
 ### Knowledge-or-escalate
 
@@ -591,7 +620,12 @@ leak-free.
   documentation with `llm-router-agentic-kb-docs` from a machine that can see them.
 - **A lost scan state republishes a repository's documentation.** `<key_prefix>:docs:<scope>` is what keeps a scan from
   re-publishing unchanged files and what names the documents a change supersedes; flush it and the next scan publishes
-  everything again, leaving the previous copies of each file in the collection until they are deleted by hand.
+  everything again, leaving the previous copies of each file in the collection until they are deleted by hand. The
+  listing names the collection it was written for, so changing `collection_prefix` — or moving the documentation into
+  `<prefix>_<scope>_docs` — republishes it once where it now belongs and leaves the old collection alone.
+- **A `doc_types` list excludes what it does not name.** A guide filed as `note` because its file says nothing else is
+  read only by a mode that lists `note` (or lists nothing); a mode that names kinds reads exactly those. When a
+  repository's prose stops appearing, read the mode's `doc_types` before suspecting the retrieval.
   The reverse also holds: delete documents out of the engine by hand and the scan will not republish them — their
   content is unchanged and their fingerprints are deduplicated — so delete the scope's state key together with them.
 - **Coupling to the `codex` package.** The adapter imports its parser, phase and state modules explicitly; their

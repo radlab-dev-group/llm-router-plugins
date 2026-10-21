@@ -64,6 +64,17 @@ PATH_BONUS = 0.08
 #: Ceiling of the path bonus, so a big diff cannot outvote the failure.
 _MAX_PATH_BONUS = 0.24
 
+#: Bonus of a documentation file that documents a file this turn is touching —
+#: `src/export.py` edited, `docs/export.md` retrieved.  Neither name contains
+#: the other, so the shared stem is the only link between a module and its
+#: description, and it is worth more than a shared directory: documentation
+#: earns its place by being about the code in front of the agent.
+DOC_STEM_BONUS = 0.12
+
+#: Ceiling of the documentation affinity bonus, for a diff that touches half
+#: the modules a big design document describes.
+_MAX_DOC_BONUS = 0.24
+
 #: Most characters of a chunk quoted into the block.
 _QUOTE_CHARS = 420
 
@@ -111,6 +122,14 @@ class KnowledgeHit:
     phase : str
         Work the episode was doing when it was learned; ``""`` when the
         document predates the attribute.
+    source : str
+        File a documentation section came from, repository-relative; ``""``
+        for knowledge the miner produced.
+    doc_type : str
+        Kind of documentation file — ``readme``, ``guide``, ``changelog``;
+        ``""`` outside the documentation collection.
+    heading : str
+        Heading path the section sits under, for the citation.
     """
 
     category: str = ""
@@ -122,6 +141,9 @@ class KnowledgeHit:
     paths: Tuple[str, ...] = ()
     signature: str = ""
     phase: str = ""
+    source: str = ""
+    doc_type: str = ""
+    heading: str = ""
 
 
 @dataclass(frozen=True)
@@ -253,11 +275,18 @@ class ContextAssembler:
             source.category: float(source.weight) for source in policy.sources
         }
         caps = {source.category: int(source.max_items) for source in policy.sources}
+        types = {
+            source.category: tuple(source.doc_types)
+            for source in policy.sources
+            if source.doc_types
+        }
         order = {kind: index for index, (kind, _) in enumerate(_SECTIONS)}
         best: Dict[str, _Candidate] = {}
         for result, categories in results:
             for hit in result.hits:
-                candidate = self._candidate(hit, categories, weights, caps, order)
+                candidate = self._candidate(
+                    hit, categories, weights, caps, order, types
+                )
                 if candidate is None:
                     continue
                 key = candidate.hit.document_name or candidate.hit.text[:120]
@@ -277,18 +306,31 @@ class ContextAssembler:
         weights: Dict[str, float],
         caps: Dict[str, int],
         order: Dict[str, int],
+        types: Optional[Dict[str, Tuple[str, ...]]] = None,
     ) -> Optional[_Candidate]:
         """Turn one retrieved chunk into a candidate, or drop it."""
         meta, body = self._meta(hit)
         kind = meta.kind or _kind_from_categories(hit, categories)
         if kind not in DOCUMENT_KINDS:
             return None
+        declared = str(meta.doc_type or "").strip()
+        allowed = (types or {}).get(kind, ())
+        if allowed and declared and declared not in allowed:
+            # The engine already filters the documentation collection on
+            # doc_type; this is the same rule restated where it can also be
+            # seen — a chunk indexed before the attribute existed, or a page
+            # the reader found in a collection that predates the split.  A
+            # document that declares no type at all is not another type, and
+            # excluding documentation for a field it never wrote would lose a
+            # guide over a header format.
+            return None
+        doc_type = _document_type(meta) if kind == KIND_DOC else ""
         base = (
             hit.score_normalized if hit.score_normalized is not None else hit.score
         )
         base = float(base) if base is not None else 0.0
         weight = weights.get(kind, min(weights.values()) if weights else 1.0)
-        vote = base * weight + self._bonus(meta)
+        vote = base * weight + self._bonus(meta, kind)
         return _Candidate(
             hit=KnowledgeHit(
                 category=kind,
@@ -300,6 +342,9 @@ class ContextAssembler:
                 paths=meta.paths,
                 signature=meta.signature,
                 phase=meta.phase,
+                source=meta.source if kind == KIND_DOC else "",
+                doc_type=doc_type,
+                heading=meta.heading if kind == KIND_DOC else "",
             ),
             meta=meta,
             vote=vote,
@@ -308,7 +353,15 @@ class ContextAssembler:
         )
 
     def _meta(self, hit: StoreHit) -> Tuple[DocumentMeta, str]:
-        """Read the header, filling what it lacks from the document name."""
+        """
+        Read the header, filling what it lacks from the document name.
+
+        Only the fields a name can supply are filled from it.  `source` is not
+        one of them: it is the repository-relative file a documentation section
+        was cut from, and the engine's document name is no substitute — it would
+        turn `docs/guide.md` into `doc:20261016:9f2c` and cost the citation, and
+        the kind inference, the only path it has.
+        """
         meta, body = parse_document_text(hit.text)
         if not meta.kind or meta.date is None:
             from_name = parse_document_name(hit.document_name)
@@ -316,14 +369,11 @@ class ContextAssembler:
                 meta,
                 kind=meta.kind or from_name.kind,
                 date=meta.date or from_name.date,
-                source=hit.document_name,
             )
-        else:
-            meta = _replace_meta(meta, source=hit.document_name)
         return meta, body
 
-    def _bonus(self, meta: DocumentMeta) -> float:
-        """Reward the two facts the engine cannot rank."""
+    def _bonus(self, meta: DocumentMeta, kind: str = "") -> float:
+        """Reward the facts the engine cannot rank."""
         bonus = 0.0
         if self.signature_hash and meta.signature_hash == self.signature_hash:
             bonus += SIGNATURE_BONUS
@@ -335,7 +385,30 @@ class ContextAssembler:
                 if path in self.touched_paths or path.rsplit("/", 1)[-1] in touched
             )
             bonus += min(_MAX_PATH_BONUS, shared * PATH_BONUS)
+        if kind == KIND_DOC:
+            bonus += self._doc_bonus(meta)
         return bonus
+
+    def _doc_bonus(self, meta: DocumentMeta) -> float:
+        """
+        Reward documentation that documents a file this turn is touching.
+
+        A guide is named after the module it explains more often than it names
+        the module in its text: `docs/export.md` describes `src/export.py`, and
+        neither string contains the other, so no retrieval leg connects them.
+        The shared file stem does, and it is the difference between a page of
+        house style and the one page about the code the agent is editing.
+        """
+        if not self.touched_paths:
+            return 0.0
+        documented = _stems_of(_documentation_paths(meta))
+        if not documented:
+            return 0.0
+        touching = _stems_of(self.touched_paths)
+        shared = documented.intersection(touching)
+        if not shared:
+            return 0.0
+        return min(_MAX_DOC_BONUS, len(shared) * DOC_STEM_BONUS)
 
     # ------------------------------------------------------------- budget ---
     def _budget(
@@ -409,15 +482,20 @@ def _entry(candidate: _Candidate, limit: Optional[int] = None) -> str:
     alternative is injecting no recipe at all.
     """
     hit = candidate.hit
-    citation = [hit.category, f"in {hit.phase}" if hit.phase else ""]
-    if hit.created_at:
-        citation.append(
-            datetime.datetime.fromtimestamp(hit.created_at, tz=datetime.timezone.utc)
-            .date()
-            .isoformat()
-        )
-    if hit.paths:
-        citation.append(", ".join(hit.paths[:4]))
+    if hit.category == KIND_DOC:
+        citation = [KIND_DOC, hit.doc_type, _documentation_citation(hit)]
+    else:
+        citation = [hit.category, f"in {hit.phase}" if hit.phase else ""]
+        if hit.created_at:
+            citation.append(
+                datetime.datetime.fromtimestamp(
+                    hit.created_at, tz=datetime.timezone.utc
+                )
+                .date()
+                .isoformat()
+            )
+        if hit.paths:
+            citation.append(", ".join(hit.paths[:4]))
     head = f"- [{' · '.join(part for part in citation if part)}] "
     text = hit.text.replace("\n", " ").strip()
     if len(text) > _QUOTE_CHARS:
@@ -429,6 +507,23 @@ def _entry(candidate: _Candidate, limit: Optional[int] = None) -> str:
             return ""
         text = text[:room].rstrip() + "…"
     return head + text
+
+
+def _documentation_citation(hit: KnowledgeHit) -> str:
+    """
+    Render where a documentation section came from: `docs/deploy.md › Production`.
+
+    A mined recipe is cited by the files it fixed; a documentation section is
+    cited by the file it was cut from and the heading it sits under, which is
+    how an agent gets from a quoted paragraph back to the page it should read
+    in full.  With no file name left the section is useless to attribute, and
+    an empty part is dropped by the caller.
+    """
+    source = str(hit.source or "").strip()
+    if not source:
+        return ""
+    heading = str(hit.heading or "").strip()
+    return f"{source} › {heading}" if heading else source
 
 
 def _block_overhead() -> int:
@@ -545,6 +640,54 @@ def _kind_from_categories(hit: StoreHit, categories: Sequence[str]) -> str:
     if len(categories) == 1 and named:
         return named[0]
     return KIND_DOC
+
+
+def _documentation_paths(meta: DocumentMeta) -> Tuple[str, ...]:
+    """Return every path a documentation chunk is known to come from."""
+    paths = [str(meta.source or "")]
+    paths.extend(str(path) for path in meta.paths)
+    return tuple(path for path in paths if path)
+
+
+def _stems_of(paths: Sequence[str]) -> set[str]:
+    """
+    Return the file stems of *paths*, without their extensions.
+
+    `docs/export.md` and `src/export.py` share the stem `export`; `README` and
+    `readme` share one lowercased stem, because a file is named `README.md` and
+    written about as “the readme”.  A path with no directory and no suffix is
+    its own stem.
+    """
+    stems = set()
+    for path in paths:
+        name = str(path).replace("\\", "/").rsplit("/", 1)[-1]
+        stem = name.split(".", 1)[0] if "." in name else name
+        stem = stem.strip().lower()
+        if len(stem) > 1:
+            stems.add(stem)
+    return stems
+
+
+def _document_type(meta: DocumentMeta) -> str:
+    """
+    Return the kind of documentation a chunk came from, for its citation.
+
+    The header says it.  A chunk that predates the attribute still names its
+    file, and a file named `CHANGELOG.md` is a changelog whatever its header
+    forgot — so the classification is repeated from the path rather than the
+    citation losing the word.
+    """
+    declared = str(meta.doc_type or "").strip()
+    if declared:
+        return declared
+    path = str(meta.source or "") or (meta.paths[0] if meta.paths else "")
+    if not path:
+        return ""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
+        classify_document,
+    )
+
+    return classify_document(path)
 
 
 def _deduplicated(lines: Iterable[str]) -> Tuple[str, ...]:

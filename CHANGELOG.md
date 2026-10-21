@@ -8,7 +8,7 @@ release tagged as `v<version>`.
 
 | Version | Changelog |
 | ------- | --------- |
-| Unreleased | **Added:** `agentic_knowledge` indexes the repository's own documentation — a heading-aware scan of its `*.md` files published as `doc` documents, republished on content change, superseded documents retired through a `docs_prune` control message (never on a truncated scan), plus the `llm-router-agentic-kb-docs` command and the `docs` policy section. |
+| Unreleased | **Added:** `agentic_knowledge` indexes the repository's own documentation — a heading-aware scan of its `*.md` files published as `doc` documents, republished on content change, superseded documents retired through a `docs_prune` control message (never on a truncated scan), plus the `llm-router-agentic-kb-docs` command and the `docs` policy section. Documentation now lives in `<prefix>_<scope>_docs`, is read per work mode through `doc_types`, is searched on the turn's subject rather than its failure signature, and a guide about a file the turn edits outranks one that is not. |
 | 0.1.5 | **Added:** `agentic_knowledge` — a knowledge layer that runs behind the Codex router: per-work-mode retrieval of verified fixes, dead ends and the pre-compaction archive from the Semantic Search Engine, a masked learn-from-traffic write path through a Redis Stream and an indexing worker, and optional knowledge-or-escalate model selection. Adapters for Codex (full) and Claude Code (read-only), plus offline counterfactual evaluation. **Fix:** the `agentic_knowledge` collection names are reduced to the engine's character set at configuration time, so a repository scope that would produce a hyphen can no longer make every indexing attempt fail with a 500 at collection creation; the retention pass still sweeps the legacy `prefix-<scope>-sessions` archives; the repository of a request is read from the leading messages, so a compaction (which re-sends the whole window) is filed under its own project instead of into a scope-less prefix, and a request with no known repository publishes nothing; a search of a repository that has not been indexed yet is an empty answer, not a failed search **Added:** engine login for a Semantic Search Engine that authenticates by username and password rather than by a pre-issued token (`SSE_API_USERNAME`/`SSE_API_PASSWORD`); every mined episode now carries the work **phase** its evidence names (`test`, `implement`, …) in its header and in `metadata_json.phase`, and a retrieval source can be restricted in its policy to phases (`"phases": ["test"]`) or to routing modes (`"modes": ["debug"]`) — the filter is engine-side, unions across names, intersects the source's categories, never touches the archived window whose `thread_id` owns the single metadata slot, and a policy cannot mix the two dimensions in one request. |
 | 0.1.4 | **Fix:** the Codex routing record follows the phase that was actually routed with instead of the last signal it could rebuild, so an interleaved command no longer freezes the record and repeats a conflict on every request of the turn (captured-session replay: 11 conflicts -> 0). **Added:** `RememberResult` carries why a memory write was skipped; the log names the real cause instead of an undifferentiated `version conflict`. |
 | 0.1.3 | **Added:** an accepted semantic decision can be carried across one command generation (`MEMORY_CARRY_DECISIONS`). **Changed:** semantic rankings are read against their own scale; the phase layer separates work states from shell noise; CLI-injected context is kept out of the intent text. |
@@ -43,6 +43,23 @@ release tagged as `v<version>`.
   `max_total_bytes`, `max_section_chars`, `rescan_interval_seconds`, `state_ttl_seconds`) and the matching
   `LLM_ROUTER_KNOWLEDGE_AGENTIC_DOCS_*` environment overrides. `payload["routing"]["knowledge"]` carries a `docs`
   outcome (`status`, `files`, `published`, `pruned`, `reason`, `truncated`) — no paths and no document names.
+- Documentation is **its own collection**, `<prefix>_<scope>_docs`, apart from mined knowledge. One search request
+  carries one metadata dimension, so a mode can narrow a search by `doc_type` only when nothing else shares the request;
+  giving the documentation a collection of its own is what buys that, and it lets a repository's prose be re-indexed and
+  pruned as a set. The scan state records the collection a listing was written for, so a policy that moves the
+  documentation republishes it where it now belongs instead of believing a listing of files indexed where nobody reads.
+- **`SourcePolicy.doc_types`** — which documentation kinds a work mode reads (`readme`, `guide`, `changelog`,
+  `contributing`, `security`, `license`, `agent`, `note`), sent as engine-side `metadata_filters` on `doc_type`, one
+  `eq` per kind, unioned. It is the `doc` source's own dimension: a `doc` source restricting phases or modes, or
+  `doc_types` on any other source, is a configuration error. The shipped policy reads `readme`/`guide`/`contributing`
+  when implementing, adds `changelog` and `note` when planning, and `guide`/`contributing`/`security` when reviewing;
+  an `AGENTS.md` is in no list, because the agent already has that file in its context.
+- Documentation is **searched with a query of its own**: the user's words plus the touched paths and their stems, never
+  the failure signature. A recipe is filed under the error it fixed and a guide is filed under the module it explains;
+  asking the second with the first was retrieval noise. `ContextAssembler` adds a bonus when a retrieved document
+  **documents a file the turn is touching** (`docs/export.md` for an edited `src/export.py`) — a link no retrieval leg
+  sees — drops a document whose declared kind the mode does not read, and cites what it quotes by file and heading
+  (`[doc · guide · docs/export.md › Export helpers]`).
 
 ## [0.1.5] - 2026-10-17
 

@@ -220,6 +220,13 @@ class SourcePolicy:
         Work phases this source is read in; empty — the default — reads it in
         every phase.  A phase is the work the episode was doing (`test`,
         `implement`), the document kind is what it produced (`recipe`).
+    doc_types : Tuple[str, ...]
+        Documentation kinds this source reads; empty — the default — reads
+        every kind.  A second metadata dimension for the ``doc`` category,
+        which otherwise would have none: the engine unions several
+        ``metadata_filters`` with each other, so the list is the one that
+        is put in the slot.  Allowed on the ``doc`` source only, because
+        it is the only category whose documents carry a ``doc_type``.
     modes : Tuple[str, ...]
         Routing modes this source is read in; empty — the default — reads it in
         every mode.  Mutually exclusive with *phases* for sources retrieved by
@@ -233,6 +240,7 @@ class SourcePolicy:
     max_items: int = 3
     phases: Tuple[str, ...] = ()
     modes: Tuple[str, ...] = ()
+    doc_types: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -766,6 +774,25 @@ class AgenticKnowledgeConfig:
                         f"modes.{policy.name} source {source.category} "
                         f"weight must be in (0, 1], got {source.weight}"
                     )
+                if source.category == "doc" and (source.phases or source.modes):
+                    # The doc collection is searched with its own request
+                    # and its own doc_type filter; a phase or mode filter
+                    # would land on the mined-knowledge request the doc
+                    # source never rides on.
+                    raise ValueError(
+                        f"modes.{policy.name} source {source.category} is "
+                        "searched by doc_type and cannot restrict phases "
+                        "or modes"
+                    )
+                if source.doc_types and source.category != "doc":
+                    # doc_type is a field only the documentation header
+                    # writes; a mined recipe carries nothing to match it
+                    # against, so the filter would read as empty and the
+                    # source would silently return nothing.
+                    raise ValueError(
+                        f"modes.{policy.name} source {source.category} has "
+                        "doc_types but only the doc source carries them"
+                    )
                 if source.category == "session_archive" and (
                     source.phases or source.modes
                 ):
@@ -782,7 +809,7 @@ class AgenticKnowledgeConfig:
             shared = [
                 source
                 for source in policy.sources
-                if source.category != "session_archive"
+                if source.category not in ("session_archive", "doc")
             ]
             if any(source.phases for source in shared) and any(
                 source.modes for source in shared
@@ -846,7 +873,9 @@ class AgenticKnowledgeConfig:
         Return the collection one document kind lives in.
 
         Session archives are separated from mined knowledge because they age on
-        a different clock and outnumber everything else.
+        a different clock and outnumber everything else; the repository's own
+        documentation gets a third collection, for the same separation and so
+        a mode's ``doc_types`` restriction is one metadata request, not two.
 
         Parameters
         ----------
@@ -872,7 +901,15 @@ class AgenticKnowledgeConfig:
             if fragment
             else self.collection_prefix
         )
-        return f"{base}_sessions" if kind == "session_archive" else base
+        if kind == "session_archive":
+            return f"{base}_sessions"
+        if kind == "doc":
+            # Documentation lives apart from mined knowledge: it is written
+            # on a different clock (a human edits a README) and it is the
+            # only kind a mode restricts by doc_type, which is one metadata
+            # request the engine answers in one collection.
+            return f"{base}_docs"
+        return base
 
     @property
     def served_adapters(self) -> Tuple[str, ...]:
@@ -996,6 +1033,7 @@ def _sources(raw: Any, mode: str) -> Tuple[SourcePolicy, ...]:
             "max_items",
             "phases",
             "modes",
+            "doc_types",
         }
         if unknown:
             raise ValueError(f"Unknown modes.{mode}.sources keys: {sorted(unknown)}")
@@ -1011,6 +1049,10 @@ def _sources(raw: Any, mode: str) -> Tuple[SourcePolicy, ...]:
                 ),
                 modes=_phase_names(
                     entry.get("modes", ()), f"modes.{mode}.sources.modes"
+                ),
+                doc_types=_phase_names(
+                    entry.get("doc_types", ()),
+                    f"modes.{mode}.sources.doc_types",
                 ),
             )
         )

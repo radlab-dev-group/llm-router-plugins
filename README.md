@@ -292,11 +292,14 @@ known fix is moved to a configured, stronger model (*knowledge-or-escalate*, **o
 
 The repository's own documentation joins the same knowledge base: a scan reads the `*.md` files below
 the directory the request declared, splits them at their headings, and publishes them as `doc`
-documents — which `plan`, `implement` and `review` already ask for. A file is republished when its
-content changes and the document it superseded is retired; a scan that ran out of its ceilings
-publishes no retirement at all. `llm-router-agentic-kb-docs` does the same scan on demand
-(`--dry-run` to see what would be published), which is also how a repository whose router runs on
-another machine gets documentation.
+documents in a collection of their own (`<prefix>_<scope>_docs`), searched on the turn's subject
+rather than on its failure signature. Each work mode reads the kinds it wants — `implement` the
+readme, guides and contributing, `plan` those plus the changelog and notes, `review` the guides,
+contributing and security — and a guide that documents a file the turn is editing outranks one that
+does not. A file is republished when its content changes and the document it superseded is retired; a
+scan that ran out of its ceilings publishes no retirement at all. `llm-router-agentic-kb-docs` does
+the same scan on demand (`--dry-run` to see what would be published), which is also how a repository
+whose router runs on another machine gets documentation.
 
 The engine may be reached by a pre-issued token or by a username/password login
 (`SSE_API_USERNAME`/`SSE_API_PASSWORD`; the client logs in on its first call).

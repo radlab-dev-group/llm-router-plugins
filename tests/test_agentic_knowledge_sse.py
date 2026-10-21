@@ -290,6 +290,45 @@ def test_a_thread_filter_wins_over_the_phases():
     ]
 
 
+def test_a_doc_type_restriction_is_one_metadata_filter_per_kind():
+    """Documentation narrows on its own dimension, one ``eq`` per kind."""
+    options = _options(
+        SearchRequest(
+            collection="c", query="q", doc_types=("guide", "contributing")
+        ),
+        0.35,
+    )
+    assert options["metadata_filters"] == [
+        {"operator": "eq", "field": {"doc_type": "guide"}},
+        {"operator": "eq", "field": {"doc_type": "contributing"}},
+    ]
+
+
+def test_a_thread_filter_wins_over_doc_types():
+    """One request, one dimension — the narrower owner of the slot wins."""
+    options = _options(
+        SearchRequest(
+            collection="c", query="q", thread_id="thread-1", doc_types=("guide",)
+        ),
+        0.35,
+    )
+    assert options["metadata_filters"] == [
+        {"operator": "eq", "field": {"thread_id": "thread-1"}}
+    ]
+
+
+def test_modes_outrank_doc_types():
+    options = _options(
+        SearchRequest(
+            collection="c", query="q", modes=("debug",), doc_types=("guide",)
+        ),
+        0.35,
+    )
+    assert options["metadata_filters"] == [
+        {"operator": "eq", "field": {"mode": "debug"}}
+    ]
+
+
 def test_the_retrieval_options_are_the_ones_configured():
     """The legs and the reranker are the policy's, not the client's opinion."""
     options = _options(
@@ -309,7 +348,7 @@ def test_a_search_goes_out_with_the_store_default_legs():
     assert (
         store.search(SearchRequest(collection="c", query="q")).score_scale == "rrf"
     )
-    (_collection, _query, options), = client.calls
+    ((_collection, _query, options),) = client.calls
     assert options["hybrid_search"] is True
     assert options["rerank_results"] is False
 
@@ -318,6 +357,6 @@ def test_a_store_switches_every_search_it_makes():
     client = _Client(_Reply([], score_scale="reranker"))
     store = KnowledgeStore(client=client, hybrid_search=False, rerank_results=True)
     store.search(SearchRequest(collection="c", query="q"))
-    (_collection, _query, options), = client.calls
+    ((_collection, _query, options),) = client.calls
     assert options["hybrid_search"] is False
     assert options["rerank_results"] is True

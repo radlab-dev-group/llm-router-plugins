@@ -542,7 +542,10 @@ def test_a_doc_event_is_indexed_into_the_scopes_collection():
     worker.index_event(event)
 
     collection, documents = sse.indexed[0]
-    assert collection == "agentic_kb_webapp"
+    # Documentation is indexed apart from mined knowledge: it is written on a
+    # human's clock, re-indexed as a set, and read with its own metadata
+    # restriction, so it lives in a collection of its own.
+    assert collection == "agentic_kb_webapp_docs"
     assert documents[0]["category"] == "doc"
     assert documents[0]["filepath"].startswith("doc:")
     assert 'src="docs/guide.md"' in documents[0]["pages"][0]["page_content"]
@@ -551,7 +554,7 @@ def test_a_doc_event_is_indexed_into_the_scopes_collection():
 def test_a_prune_event_deletes_the_documents_the_engine_holds():
     sse = FakeSSE(
         names={
-            "agentic_kb_webapp": [
+            "agentic_kb_webapp_docs": [
                 "doc:20261010:old1.input_text",
                 "doc:20261010:new.input_text",
             ]
@@ -562,12 +565,14 @@ def test_a_prune_event_deletes_the_documents_the_engine_holds():
     )
     worker.index_event(_prune("doc:20261010:old1"))
 
-    assert sse.deleted == [("agentic_kb_webapp", ["doc:20261010:old1.input_text"])]
+    assert sse.deleted == [
+        ("agentic_kb_webapp_docs", ["doc:20261010:old1.input_text"])
+    ]
     assert not sse.indexed
 
 
 def test_a_prune_event_deletes_nothing_the_engine_does_not_have():
-    sse = FakeSSE(names={"agentic_kb_webapp": ["recipe:20261010:keep.input_text"]})
+    sse = FakeSSE(names={"agentic_kb_webapp_docs": ["doc:20261010:keep.input_text"]})
     worker = KnowledgeIndexWorker(
         config=knowledge_config(), redis_client=FakeRedis(), sse_client=sse
     )
@@ -701,3 +706,128 @@ def test_a_version_control_directory_is_skipped_even_when_configured_in(tmp_path
     assert not any(
         record.source_file.startswith(".git") for record in report.records
     )
+
+
+# ------------------------------------------------ collection-bound state --
+def test_a_listing_written_for_another_collection_is_not_a_listing():
+    """
+    Moving the documentation to another collection republishes it.
+
+    The scan state says which files are already indexed — and a listing of the
+    collection nobody reads would tell the next scan that a repository has its
+    documentation, in a place where no search looks.  So a listing names its
+    collection, and one that names another is no listing at all.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
+        DocsScanState,
+    )
+
+    state = DocsScanState(key_prefix="agentic-kb", client=FakeRedis())
+    entries = {"README.md": {"h": "abc", "n": ["doc:1:a"]}}
+    assert state.save("demo", entries, "agentic_kb_demo")
+    assert state.load("demo", "agentic_kb_demo") == entries
+    assert state.load("demo", "agentic_kb_demo_docs") == {}
+
+
+def test_a_listing_without_a_collection_is_read_by_the_first_one():
+    """A listing predating the field is trusted once, then rewritten."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
+        DocsScanState,
+    )
+
+    redis = FakeRedis()
+    state = DocsScanState(key_prefix="agentic-kb", client=redis)
+    redis.kv[state.key("demo")] = '{"v": 1, "files": {"README.md": {"h": "abc"}}}'
+    assert state.load("demo", "agentic_kb_demo_docs") == {}
+
+
+def test_a_collection_move_republishes_the_documentation(tmp_path):
+    root = demo_repo(tmp_path)
+    state = scanning_state()
+    before = knowledge_config(collection_prefix="kbfirst")
+    outcome = indexer(config=before, publisher=FakePublisher(), state=state).index(
+        "demo", root, force=True
+    )
+    assert outcome.published == 3
+
+    publisher = FakePublisher()
+    after = knowledge_config(collection_prefix="kbsecond")
+    moved = indexer(config=after, publisher=publisher, state=state).index(
+        "demo", root, force=True
+    )
+    assert moved.published == 3
+    assert moved.unchanged == 0
+
+    same = indexer(config=after, publisher=FakePublisher(), state=state).index(
+        "demo", root, force=True
+    )
+    assert same.published == 0
+    assert same.unchanged == 3
+
+
+# --------------------------------------------------------- read per mode --
+def test_documentation_is_searched_in_its_own_collection():
+    """One request for the repository's prose, and it names its kinds."""
+    store = FakeStore()
+    plugin = AgenticKnowledgePlugin(
+        config=knowledge_config(),
+        store=store,
+        publisher=FakePublisher(),
+        cache=InMemoryContextCache(),
+    )
+    plugin.apply(codex_payload(base_items(cwd="/repo/webapp"), mode="implement"))
+
+    documented = [
+        request for request in store.requests if request.categories == ("doc",)
+    ]
+    assert len(documented) == 1
+    assert documented[0].collection == "agentic_kb_webapp_docs"
+    assert documented[0].doc_types == ("readme", "guide", "contributing")
+    mined = [request for request in store.requests if request.categories != ("doc",)]
+    assert all(request.collection != "agentic_kb_webapp_docs" for request in mined)
+
+
+def test_a_mode_without_documentation_asks_the_docs_collection_for_nothing():
+    store = FakeStore()
+    plugin = AgenticKnowledgePlugin(
+        config=knowledge_config(),
+        store=store,
+        publisher=FakePublisher(),
+        cache=InMemoryContextCache(),
+    )
+    plugin.apply(codex_payload(base_items(cwd="/repo/webapp"), mode="debug"))
+    assert all(
+        request.collection != "agentic_kb_webapp_docs" for request in store.requests
+    )
+
+
+def test_the_documentation_search_is_not_the_failure_query():
+    """The prose is asked about the work, not about the stack trace."""
+    from agentic_knowledge_support import (
+        _command,
+        _command_output,
+        _heredoc_patch,
+        _user,
+    )
+
+    store = FakeStore()
+    plugin = AgenticKnowledgePlugin(
+        config=knowledge_config(),
+        store=store,
+        publisher=FakePublisher(),
+        cache=InMemoryContextCache(),
+    )
+    items = base_items(cwd="/repo/webapp") + [
+        _user("rename the export helper"),
+        _heredoc_patch("c1", "e1", paths=("src/export.py",)),
+        _command("c2", "e2", "pytest tests/test_export.py"),
+        _command_output("c2", "e2", "AssertionError: boom"),
+    ]
+    plugin.apply(codex_payload(items, mode="implement"))
+
+    documented = [
+        request for request in store.requests if request.categories == ("doc",)
+    ]
+    assert documented
+    assert "rename the export helper" in documented[0].query
+    assert "AssertionError" not in documented[0].query

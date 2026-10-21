@@ -166,6 +166,7 @@ def test_a_forced_recipe_never_breaks_the_character_budget():
     context = ContextAssembler().assemble(results, policy)
     assert context.chars <= policy.max_chars
 
+
 def test_a_citation_names_the_phase_the_episode_was_mined_in():
     text = build_document_text("recipe", "the fix body", phase="test")
     result = SearchResult(STATUS_OK, hits=(store_hit(text=text),))
@@ -181,3 +182,132 @@ def test_a_document_without_a_phase_cites_without_one():
     context = assemble([(result, ("recipe",))])
     assert "in test" not in context.rendered
     assert context.hits[0].phase == ""
+
+
+# --------------------------------------------------------- documentation --
+def _doc(
+    source="docs/guide.md",
+    doc_type="guide",
+    heading="Deploy",
+    text="Run `make run`.",
+    score=0.7,
+    declared=True,
+):
+    """One documentation hit, with the header the ingestor writes."""
+    kwargs = {}
+    if declared:
+        kwargs = {"source": source, "doc_type": doc_type, "heading": heading}
+    body = build_document_text(
+        "doc",
+        text,
+        date=datetime.date.today(),
+        paths=(source,),
+        **kwargs,
+    )
+    from agentic_knowledge_support import StoreHit
+
+    return StoreHit(
+        collection="agentic_kb_webapp_docs",
+        document_name=f"doc:20261016:{abs(hash(source)) % 9999:04d}",
+        text=body,
+        score=score,
+        score_normalized=score,
+    )
+
+
+def _doc_results(*hits):
+    return ((SearchResult(STATUS_OK, hits=tuple(hits)), ("doc",)),)
+
+
+def test_a_document_of_a_kind_the_mode_does_not_read_is_dropped():
+    """`implement` reads guides and rules; the changelog is not one of them."""
+    context = assemble(
+        _doc_results(
+            _doc(source="CHANGELOG.md", doc_type="changelog", heading=""),
+        ),
+        mode="implement",
+    )
+    assert context.hits == ()
+    assert context.rendered == ""
+
+
+def test_a_document_of_a_kind_the_mode_reads_is_kept():
+    context = assemble(_doc_results(_doc()), mode="implement")
+    assert [hit.category for hit in context.hits] == ["doc"]
+
+
+def test_a_document_that_declares_no_kind_is_not_dropped():
+    """
+    A restriction excludes other kinds, not a missing one.
+
+    A page indexed before the attribute existed is not a changelog; dropping
+    documentation over a header format would lose a guide to a field it never
+    wrote, which is the silent direction nobody debugs.
+    """
+    context = assemble(
+        _doc_results(_doc(source="docs/guide.md", declared=False)),
+        mode="implement",
+    )
+    assert len(context.hits) == 1
+
+
+def test_a_document_about_a_file_the_turn_touches_outranks_one_that_does_not():
+    """`docs/export.md` describes `src/export.py`; the shared stem is the link."""
+    context = assemble(
+        _doc_results(
+            _doc(source="docs/other.md", heading="Other", score=0.71),
+            _doc(source="docs/export.md", heading="Export", score=0.70),
+        ),
+        mode="implement",
+        touched_paths=("src/export.py",),
+    )
+    assert [hit.source for hit in context.hits] == [
+        "docs/export.md",
+        "docs/other.md",
+    ]
+
+
+def test_the_documentation_bonus_does_not_move_mined_knowledge():
+    """The stem bonus is about documentation; a recipe cites files directly."""
+    recipe = hit(text="the fix")
+    context = assemble(
+        ((SearchResult(STATUS_OK, hits=(recipe,)), ("recipe",)),),
+        mode="debug",
+        touched_paths=("src/a.py",),
+    )
+    assert context.hits[0].category == "recipe"
+    assert context.hits[0].doc_type == ""
+
+
+def test_a_documentation_entry_is_cited_by_file_and_heading():
+    context = assemble(_doc_results(_doc()), mode="implement")
+    assert "docs/guide.md › Deploy" in context.rendered
+    assert "[doc · guide ·" in context.rendered
+
+
+def test_a_documentation_entry_without_a_heading_cites_only_the_file():
+    context = assemble(
+        _doc_results(_doc(source="README.md", doc_type="readme", heading="")),
+        mode="plan",
+    )
+    assert "[doc · readme · README.md]" in context.rendered
+    assert "›" not in context.rendered
+
+
+def test_a_documentation_hit_carries_what_the_citation_needs():
+    context = assemble(_doc_results(_doc()), mode="implement")
+    cited = context.hits[0]
+    assert cited.source == "docs/guide.md"
+    assert cited.doc_type == "guide"
+    assert cited.heading == "Deploy"
+
+
+def test_the_kind_is_inferred_from_the_file_when_the_header_omits_it():
+    """`CHANGELOG.md` is a changelog whatever its header forgot."""
+    context = assemble(
+        _doc_results(
+            _doc(source="CHANGELOG.md", doc_type="", heading="", declared=False)
+        ),
+        mode="plan",
+    )
+    assert context.hits[0].doc_type == "changelog"

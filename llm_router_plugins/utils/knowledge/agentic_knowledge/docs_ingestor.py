@@ -114,6 +114,10 @@ _MAX_SCAN_DEPTH = 12
 #: A section below this size after splitting is dropped rather than indexed.
 _MIN_CHUNK_CHARS = 20
 
+#: Layout version of a scope's scan state, and the shape of its payload.
+#: Version ``2`` added the ``collection`` the listing was written for.
+_STATE_VERSION = 2
+
 #: Never descended into, whatever the policy says.  A version control directory
 #: is not documentation and a scan of one reads history the knowledge base has
 #: no business holding; an operator's ``docs.excluded_dirs`` is a list added to
@@ -798,6 +802,13 @@ class DocsScanState:
     it republishes a repository's documentation once, and a stale entry only
     delays a replacement until the digest comparison notices.
 
+    A listing also names the **collection** it was written for.  A policy that
+    moves the documentation to another collection — as it moved to
+    ``<prefix>_<scope>_docs`` — must not find a listing that claims every file
+    is already indexed, because it is indexed in a collection nobody reads: an
+    entry naming a different collection is no entry at all, and the next scan
+    republishes the repository where it now belongs.
+
     Parameters
     ----------
     connection : RedisConnectionSettings
@@ -835,16 +846,27 @@ class DocsScanState:
         """Return the Redis key of one scope's listing."""
         return f"{self._key_prefix}:docs:{scope}"
 
-    def load(self, scope: str) -> Dict[str, Dict[str, Any]]:
+    def load(self, scope: str, collection: str = "") -> Dict[str, Dict[str, Any]]:
         """
         Return the listing of *scope*; empty when there is none to read.
+
+        Parameters
+        ----------
+        scope : str
+            Repository the listing belongs to.
+        collection : str, optional
+            The collection the caller is indexing into.  A listing written for
+            another one is treated as absent: it describes documents that are
+            no longer read from, and trusting it would leave a repository with
+            no documentation in the place the reader looks.
 
         Returns
         -------
         Dict[str, Dict[str, Any]]
-            ``file → entry``; empty on a miss, a malformed value, or a Redis
-            that did not answer — each of which only means every file will look
-            new, which is the safe direction.
+            ``file → entry``; empty on a miss, a malformed value, a listing
+            written for a different collection, or a Redis that did not answer
+            — each of which only means every file will look new, which is the
+            safe direction.
         """
         client = self._handle.get()
         if client is None:
@@ -860,7 +882,11 @@ class DocsScanState:
             payload = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
         except (TypeError, ValueError):
             return {}
-        files = payload.get("files") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return {}
+        if collection and str(payload.get("collection") or "") != collection:
+            return {}
+        files = payload.get("files")
         if not isinstance(files, dict):
             return {}
         return {
@@ -869,7 +895,12 @@ class DocsScanState:
             if isinstance(entry, dict)
         }
 
-    def save(self, scope: str, entries: Dict[str, Dict[str, Any]]) -> bool:
+    def save(
+        self,
+        scope: str,
+        entries: Dict[str, Dict[str, Any]],
+        collection: str = "",
+    ) -> bool:
         """
         Write the listing of *scope*.
 
@@ -879,6 +910,9 @@ class DocsScanState:
             Repository the listing belongs to.
         entries : Dict[str, Dict[str, Any]]
             ``file → entry`` for every file the repository now has.
+        collection : str, optional
+            The collection these documents were indexed into; recorded so a
+            later policy that moves them notices.
 
         Returns
         -------
@@ -889,7 +923,10 @@ class DocsScanState:
         client = self._handle.get()
         if client is None:
             return False
-        payload = json.dumps({"v": 1, "files": entries}, ensure_ascii=False)
+        payload = json.dumps(
+            {"v": _STATE_VERSION, "collection": collection, "files": entries},
+            ensure_ascii=False,
+        )
         try:
             client.set(self.key(scope), payload, ex=self._ttl)
         except Exception as exc:
@@ -1024,7 +1061,11 @@ class DocsIndexer:
                 truncated=report.truncated,
             )
 
-        entries = self.state.load(scope)
+        # The collection is part of the listing's identity: a policy that
+        # moves the documentation elsewhere has to republish rather than
+        # believe a listing of a collection nobody reads.
+        collection = self.config.collection(scope, KIND_DOC)
+        entries = self.state.load(scope, collection)
         by_file = _group(report.records)
         changed = _changed_files(entries, by_file)
         stale = _superseded_names(entries, by_file, changed)
@@ -1054,7 +1095,9 @@ class DocsIndexer:
                 scope, stale, agent=agent, generation=generation
             )
 
-        if not self.state.save(scope, _next_entries(entries, by_file, changed)):
+        if not self.state.save(
+            scope, _next_entries(entries, by_file, changed), collection
+        ):
             self._warn("knowledge docs state not saved for %d file(s)", len(by_file))
         return ScanOutcome(
             status=STATUS_OK,

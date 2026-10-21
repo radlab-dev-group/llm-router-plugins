@@ -52,6 +52,85 @@ def test_collection_names_separate_the_session_archive():
     )
 
 
+def test_collection_names_separate_the_documentation():
+    """Documentation lives apart from mined knowledge.
+
+    One search request carries one metadata dimension, so a mode that reads
+    only the guides of a repository can restrict by doc_type in one request
+    only when nothing else shares the request; giving the documentation its own
+    collection is what buys that, and it re-indexes as a set besides.
+    """
+    config = knowledge_config()
+    assert config.collection("webapp", "doc") == "agentic_kb_webapp_docs"
+    assert config.collection("", "doc") == "agentic_kb_docs"
+    assert config.collection("web-app", "doc") == "agentic_kb_web_app_docs"
+
+
+def test_a_doc_source_can_list_the_kinds_it_reads():
+    config = AgenticKnowledgeConfig.from_json(
+        '{"modes": {"implement": {"sources": '
+        '[{"category": "doc", "doc_types": ["guide", "readme"]}]}}}'
+    )
+    source = config.modes["implement"].sources[0]
+    assert source.doc_types == ("guide", "readme")
+
+
+def test_a_source_without_doc_types_reads_every_kind():
+    config = AgenticKnowledgeConfig.from_json(
+        '{"modes": {"implement": {"sources": [{"category": "doc"}]}}}'
+    )
+    assert config.modes["implement"].sources[0].doc_types == ()
+
+
+def test_only_the_doc_source_may_list_doc_types():
+    """A mined episode carries no doc_type; the filter would read as empty."""
+    with pytest.raises(ValueError, match="doc_types"):
+        AgenticKnowledgeConfig.from_json(
+            '{"modes": {"debug": {"sources": '
+            '[{"category": "recipe", "doc_types": ["guide"]}]}}}'
+        )
+
+
+def test_the_doc_source_cannot_restrict_phases_or_modes():
+    """Documentation is searched by kind, in its own request."""
+    with pytest.raises(ValueError, match="doc"):
+        AgenticKnowledgeConfig.from_json(
+            '{"modes": {"plan": {"sources": '
+            '[{"category": "doc", "phases": ["test"]}]}}}'
+        )
+    with pytest.raises(ValueError, match="doc"):
+        AgenticKnowledgeConfig.from_json(
+            '{"modes": {"plan": {"sources": '
+            '[{"category": "doc", "modes": ["debug"]}]}}}'
+        )
+
+
+def test_documentation_does_not_share_the_phase_dimension():
+    """The doc source is its own request, so it cannot collide with phases."""
+    config = AgenticKnowledgeConfig.from_json(
+        '{"modes": {"debug": {"sources": '
+        '[{"category": "recipe", "phases": ["test"]}, '
+        '{"category": "doc", "doc_types": ["guide"]}]}}}'
+    )
+    assert len(config.modes["debug"].sources) == 2
+
+
+def test_the_bundled_modes_restrict_documentation_per_work():
+    """What each work reads of the documentation is a decision, not a default."""
+    config = AgenticKnowledgeConfig.from_file()
+    types = {
+        mode: tuple(source.doc_types)
+        for mode, policy in config.modes.items()
+        for source in policy.sources
+        if source.category == "doc"
+    }
+    assert types["implement"] == ("readme", "guide", "contributing")
+    assert "changelog" not in types["implement"]
+    assert "changelog" in types["plan"]
+    assert types["review"] == ("guide", "contributing", "security")
+    assert all("license" not in value for value in types.values())
+
+
 def test_read_is_available_only_with_an_engine():
     config = knowledge_config()
     assert config.read_available

@@ -104,6 +104,12 @@ class SearchRequest:
         for the request that produced the episode.  Same single metadata slot
         as *phases*, and it wins over them: one request expresses one metadata
         dimension, never a conjunction of two.
+    doc_types : Tuple[str, ...]
+        Documentation kinds to restrict the search to — ``readme``, ``guide``,
+        ``changelog``.  The third occupant of the same metadata slot, and the
+        one the ``doc`` collection is searched with; it is read only when the
+        request carries neither a *thread_id* nor *modes*, which is how a
+        documentation search is shaped.
     """
 
     collection: str
@@ -113,6 +119,7 @@ class SearchRequest:
     thread_id: str = ""
     phases: Tuple[str, ...] = ()
     modes: Tuple[str, ...] = ()
+    doc_types: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -457,7 +464,8 @@ def _options(
     # archived window instead of narrowing it.
     # One metadata dimension per request: the engine unions several
     # ``metadata_filters`` with each other, so a second dimension would widen
-    # the result instead of narrowing it.  Priority: thread, mode, phase.
+    # the result instead of narrowing it.  Priority: thread, mode, phase,
+    # doc_type.
     if request.thread_id:
         options["metadata_filters"] = [
             {"operator": "eq", "field": {"thread_id": request.thread_id}}
@@ -470,8 +478,15 @@ def _options(
         # One filter per phase: the engine unions several ``metadata_filters``
         # with each other, which here is exactly "the phase is one of these".
         options["metadata_filters"] = [
-            {"operator": "eq", "field": {"phase": phase}}
-            for phase in request.phases
+            {"operator": "eq", "field": {"phase": phase}} for phase in request.phases
+        ]
+    elif request.doc_types:
+        # Same trick for the documentation's own dimension: one ``eq`` per
+        # kind, unioned by the engine into "this document is one of the kinds
+        # the mode agreed to read".
+        options["metadata_filters"] = [
+            {"operator": "eq", "field": {"doc_type": doc_type}}
+            for doc_type in request.doc_types
         ]
     return options
 
