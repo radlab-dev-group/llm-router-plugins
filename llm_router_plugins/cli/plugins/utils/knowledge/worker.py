@@ -55,10 +55,15 @@ from typing import Any, Dict, List, Optional, Tuple
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
     KnowledgeEvent,
 )
+from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
+    CONTROL_DOCS_PRUNE,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+    ENGINE_NAME_SUFFIX,
+    KIND_DOC,
     KIND_SESSION_ARCHIVE,
     build_document_text,
     document_body,
@@ -391,6 +396,12 @@ class KnowledgeIndexWorker:
         -------
         None
         """
+        if event.kind == CONTROL_DOCS_PRUNE:
+            # A control message, not a document: it asks for documents to be
+            # retired.  An older worker indexes it as an empty document, which
+            # is why its text is empty and why it carries no signature.
+            self.prune_documents(event)
+            return
         self._scopes.add(event.scope)
         text = self._prepare(event)
         document = self._document(text, event)
@@ -434,6 +445,9 @@ class KnowledgeIndexWorker:
             agent=event.agent,
             mode=event.mode,
             test_command=self._mask(str(metadata.get("test_command") or "")),
+            source=str(metadata.get("source_file") or ""),
+            doc_type=str(metadata.get("doc_type") or ""),
+            heading=str(metadata.get("heading") or ""),
         )
 
     # ---------------------------------------------------------- collections -
@@ -568,6 +582,66 @@ class KnowledgeIndexWorker:
         return masked
 
     # ------------------------------------------------------------ retention -
+    def prune_documents(self, event: KnowledgeEvent) -> int:
+        """
+        Retire the documentation documents a scope no longer has.
+
+        The proxy names the documents it superseded; the engine knows them under
+        a name with its own suffix, so the request is resolved against the
+        collection's listing before anything is deleted.  Asking for a document
+        the engine does not have is not an error — it is what happens when a
+        prune is replayed after the document was already deleted.
+
+        Parameters
+        ----------
+        event : KnowledgeEvent
+            A :data:`CONTROL_DOCS_PRUNE` event naming documents to forget.
+
+        Returns
+        -------
+        int
+            Documents deleted.
+        """
+        names = {
+            str(name)
+            for name in (event.metadata or {}).get("names") or ()
+            if str(name)
+        }
+        if not names or not event.scope:
+            return 0
+        collection = self._config.collection(event.scope, KIND_DOC)
+        wanted = {name for name in names} | {
+            f"{name}{ENGINE_NAME_SUFFIX}" for name in names
+        }
+        client = self._sse_client()
+        try:
+            details = client.list_document_details(collection)
+        except Exception as exc:
+            # A collection that does not exist yet has nothing to retire; any
+            # other failure is reported and retried by the next scan.
+            self._log(
+                "warning",
+                "knowledge docs prune could not list %s: %s",
+                collection,
+                type(exc).__name__,
+            )
+            return 0
+        stale = [
+            str(ref.name)
+            for ref in details or ()
+            if getattr(ref, "name", None) and str(ref.name) in wanted
+        ]
+        if not stale:
+            return 0
+        client.delete_documents(collection, documents=stale)
+        self._log(
+            "info",
+            "knowledge docs retired %d superseded document(s) in %s",
+            len(stale),
+            collection,
+        )
+        return len(stale)
+
     def _maybe_retain(self) -> None:
         """Run a retention pass if the interval has elapsed."""
         interval = int(self._config.worker.retention_interval_seconds)
@@ -638,11 +712,9 @@ class KnowledgeIndexWorker:
                 for entry in lister() or ():
                     name = getattr(entry, "name", "") or str(entry)
                     if (
-                        name.startswith(f"{prefix}_")
-                        and name.endswith("_sessions")
+                        name.startswith(f"{prefix}_") and name.endswith("_sessions")
                     ) or (
-                        name.startswith(f"{prefix}-")
-                        and name.endswith("-sessions")
+                        name.startswith(f"{prefix}-") and name.endswith("-sessions")
                     ):
                         found.add(name)
             except Exception as exc:  # a listing failure narrows, never crashes
@@ -1106,9 +1178,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             processed = worker.run_once(block_ms=0)
         except Exception as exc:
-            logger.error(
-                "knowledge worker batch failed: %s", type(exc).__name__
-            )
+            logger.error("knowledge worker batch failed: %s", type(exc).__name__)
             return 1
         # A drained batch is the only evidence a cron-driven worker leaves
         # behind; silence and "it worked" would be indistinguishable.

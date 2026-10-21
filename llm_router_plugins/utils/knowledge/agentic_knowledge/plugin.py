@@ -50,6 +50,10 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
 from llm_router_plugins.utils.knowledge.agentic_knowledge.debug_capture import (
     capture_payload as _capture_payload,
 )
+from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
+    DocsIndexer,
+    ScanOutcome,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.escalation import (
     ACTION_ESCALATE,
     EscalationDecision,
@@ -129,6 +133,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._query_builder: Optional[QueryBuilder] = None
         self._escalation: Optional[EscalationPolicy] = None
         self._limiter: Optional[LookupLimiter] = None
+        self._docs: Optional[DocsIndexer] = None
         self._wire(self._config)
 
     # -------------------------------------------------------------- wiring -
@@ -183,6 +188,12 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._escalation = EscalationPolicy(config)
         self._limiter = LookupLimiter(
             max_per_generation=config.max_lookups_per_generation
+        )
+        # Built whether or not documentation is enabled: the indexer is the one
+        # that says why it did nothing, and a plugin whose documentation path
+        # quietly never existed is the failure this layer keeps avoiding.
+        self._docs = DocsIndexer(
+            config=config, publisher=self._publisher, logger=self._logger
         )
         if self._logger is not None:
             # One line per process, at a level an operator actually reads.  The
@@ -246,14 +257,17 @@ class AgenticKnowledgePlugin(PluginInterface):
         )
         mining = self._mine(turn)
         publish = self._publish(mining, config, turn)
+        docs = self._index_docs(turn, config)
 
         if turn.request_class == _REQUEST_CLASS_COMPACTION:
             # A window about to be summarized is written, never read from.
             self._annotate(
-                payload, adapter, turn, None, EscalationDecision(), publish
+                payload, adapter, turn, None, EscalationDecision(), publish, docs
             )
             return payload
-        return self._serve_read(adapter, turn, payload, config, mining, publish)
+        return self._serve_read(
+            adapter, turn, payload, config, mining, publish, docs
+        )
 
     # ----------------------------------------------------------- read path -
     def _serve_read(
@@ -264,6 +278,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         config: AgenticKnowledgeConfig,
         mining: Any,
         publish: PublishStatus,
+        docs: Optional[ScanOutcome] = None,
     ) -> Any:
         """Search, inject, decide escalation, and annotate — in one pass."""
         read_on = config.read_available
@@ -342,7 +357,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             # switching reads back on resumes instead of finding an empty block
             # it would treat as fresh.
             self._remember_context(turn, context, target)
-        self._annotate(payload, adapter, turn, context, decision, publish)
+        self._annotate(payload, adapter, turn, context, decision, publish, docs)
         return payload
 
     def _assemble(
@@ -477,9 +492,11 @@ class AgenticKnowledgePlugin(PluginInterface):
             if events:
                 self._debug(
                     "agentic knowledge write skipped: %s",
-                    "write disabled"
-                    if not config.write_enabled
-                    else "no Redis configured",
+                    (
+                        "write disabled"
+                        if not config.write_enabled
+                        else "no Redis configured"
+                    ),
                 )
             return PublishStatus()
         if not turn.scope:
@@ -524,6 +541,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         context: Optional[KnowledgeContext],
         decision: EscalationDecision,
         publish: Optional[PublishStatus],
+        docs: Optional[ScanOutcome] = None,
     ) -> None:
         """Write the knowledge layer's decision into ``payload["routing"]``."""
         routing = payload.get("routing")
@@ -558,7 +576,37 @@ class AgenticKnowledgePlugin(PluginInterface):
                 "errors": publish.errors,
                 "status": publish.status,
             }
+        if docs is not None:
+            knowledge["docs"] = docs.as_dict()
         routing["knowledge"] = knowledge
+
+    def _index_docs(
+        self, turn: AgentTurn, config: AgenticKnowledgeConfig
+    ) -> Optional[ScanOutcome]:
+        """
+        Offer the repository's documentation to the knowledge base.
+
+        Returns ``None`` — no annotation at all — when documentation is not part
+        of this deployment, or when the request named no repository: reading a
+        filesystem is only worth doing when its result has a collection to live
+        in.  The indexer itself is cooldown-bound and never raises; this is the
+        belt for the case where it does.
+        """
+        if not config.docs_available or self._docs is None:
+            return None
+        if not turn.scope or not turn.repo_root:
+            return None
+        try:
+            return self._docs.index(
+                turn.scope,
+                turn.repo_root,
+                agent=turn.agent,
+                model=turn.model,
+                generation=turn.cache_generation,
+            )
+        except Exception as exc:
+            self._warn("knowledge docs scan failed: %s", type(exc).__name__)
+            return ScanOutcome(status=STATUS_UNAVAILABLE, reason="scan")
 
     def _warn(self, message: str, *args: Any) -> None:
         """Report one failure when a logger was given."""
@@ -602,8 +650,7 @@ def _payload_shape(payload: Any) -> str:
             kind = f"{kind}:{name}"
         shapes[kind] = shapes.get(kind, 0) + 1
     return "items=" + (
-        ",".join(f"{kind}:{count}" for kind, count in sorted(shapes.items()))
-        or "0"
+        ",".join(f"{kind}:{count}" for kind, count in sorted(shapes.items())) or "0"
     )
 
 
@@ -622,9 +669,9 @@ def _turn_shape(turn: Any) -> str:
         if getattr(item, "kind", "") == "function_call":
             name = getattr(item, "name", "") or "?"
             calls[name] = calls.get(name, 0) + 1
-    tools = ",".join(
-        f"{name}:{count}" for name, count in sorted(calls.items())
-    ) or "-"
+    tools = (
+        ",".join(f"{name}:{count}" for name, count in sorted(calls.items())) or "-"
+    )
     states = []
     for evidence in list(getattr(turn, "evidence", ()) or ())[-8:]:
         outcome = getattr(evidence, "succeeded", None)
@@ -671,6 +718,8 @@ def _wiring_summary(
         f"/rerank:{_on_off(config.rerank_results)}"
         f", write={config.write_available}"
         f", archive={config.archive_available}"
+        f", docs={_on_off(config.docs_enabled)}"
+        f"/{'auto' if config.docs_auto_index else 'manual'}"
         f", escalation={config.escalation_available}"
         f", phase_rules={'on' if rules_on else 'OFF (nothing will be mined)'}"
         f", stream={config.stream_key}"

@@ -1,5 +1,5 @@
 {
-  "description": "Agentic knowledge layer — reads verified fixes, dead ends and the pre-compaction archive from the Semantic Search Engine and injects them into coding-agent requests, while mining new knowledge out of the traffic. A source may list the work phases it is read in (\"phases\": [\"test\"]) — an empty list reads every phase. Connection settings (SSE, Redis) come from the LLM_ROUTER_KNOWLEDGE_AGENTIC_* environment only; this file holds policy.",
+  "description": "Agentic knowledge layer — reads verified fixes, dead ends, the pre-compaction archive and this repository's own documentation from the Semantic Search Engine and injects them into coding-agent requests, while mining new knowledge out of the traffic. A source may list the work phases it is read in (\"phases\": [\"test\"]) — an empty list reads every phase. The \"docs\" section decides whether a repository's markdown is scanned and published (by a request, or only by llm-router-agentic-kb-docs). Connection settings (SSE, Redis) come from the LLM_ROUTER_KNOWLEDGE_AGENTIC_* environment only; this file holds policy.",
   "adapters": ["codex", "claude_code"],
   "collection_prefix": "agentic_kb",
   "scope": {
@@ -84,5 +84,38 @@
     "enabled": false,
     "loop_threshold": 3,
     "strong_recipe_score": 0.75
+  },
+  "docs": {
+    "enabled": true,
+    "auto_index": true,
+    "patterns": ["*.md", "*.markdown", "*.mdx"],
+    "excluded_dirs": [
+      "node_modules",
+      "bower_components",
+      "dist",
+      "build",
+      "target",
+      "vendor",
+      "site-packages",
+      "__pycache__",
+      ".venv",
+      "venv",
+      "env",
+      ".tox",
+      ".mypy_cache",
+      ".pytest_cache",
+      ".ruff_cache",
+      "coverage",
+      "htmlcov",
+      "site",
+      ".idea",
+      ".vscode"
+    ],
+    "max_files": 200,
+    "max_file_bytes": 200000,
+    "max_total_bytes": 2000000,
+    "max_section_chars": 1200,
+    "rescan_interval_seconds": 21600,
+    "state_ttl_seconds": 7776000
   }
 }

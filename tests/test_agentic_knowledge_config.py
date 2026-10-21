@@ -160,7 +160,10 @@ def test_a_hyphenated_repo_scope_gets_an_engine_safe_collection(monkeypatch):
     have a collection created, so nothing would ever be indexed.
     """
     config = AgenticKnowledgeConfig.from_file()
-    assert config.collection("llm-router-plugins", "recipe") == "agentic_kb_llm_router_plugins"
+    assert (
+        config.collection("llm-router-plugins", "recipe")
+        == "agentic_kb_llm_router_plugins"
+    )
     assert (
         config.collection("kb-probe", "session_archive")
         == "agentic_kb_kb_probe_sessions"
@@ -174,15 +177,17 @@ def test_a_hyphenated_repo_scope_gets_an_engine_safe_collection(monkeypatch):
 def test_two_scopes_differing_only_by_punctuation_share_a_collection():
     """A hyphen and an underscore name the same repository, for a name."""
     config = AgenticKnowledgeConfig.from_file()
-    assert config.collection("my-repo", "recipe") == config.collection("my_repo", "recipe")
+    assert config.collection("my-repo", "recipe") == config.collection(
+        "my_repo", "recipe"
+    )
 
 
 def test_the_default_collection_prefix_is_engine_safe():
     config = AgenticKnowledgeConfig.from_file()
     for character in config.collection_prefix:
-        assert character.isalnum() or character in "._", (
-            f"the engine would refuse the default prefix {character!r}"
-        )
+        assert (
+            character.isalnum() or character in "._"
+        ), f"the engine would refuse the default prefix {character!r}"
     assert not config.collection_prefix[0].isdigit()
 
 
@@ -202,8 +207,12 @@ def test_engine_credentials_come_from_the_environment(monkeypatch):
 
 
 def test_engine_credentials_default_to_empty(monkeypatch):
-    monkeypatch.delenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_API_USERNAME", raising=False)
-    monkeypatch.delenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_API_PASSWORD", raising=False)
+    monkeypatch.delenv(
+        f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_API_USERNAME", raising=False
+    )
+    monkeypatch.delenv(
+        f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_API_PASSWORD", raising=False
+    )
     config = AgenticKnowledgeConfig.from_file()
     config.override_from_env()
     assert config.sse_username == ""
@@ -345,7 +354,6 @@ def test_the_bundled_policy_can_ask_for_a_reranker():
         del os.environ[f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}CONFIG"]
 
 
-
 def test_a_malformed_retrieval_switch_is_an_error(monkeypatch):
     monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}RERANK_RESULTS", "sometimes")
     config = AgenticKnowledgeConfig.from_file()
@@ -381,3 +389,63 @@ def test_an_overlap_that_eats_the_chunk_is_an_error(monkeypatch):
     config = AgenticKnowledgeConfig.from_file()
     with pytest.raises(ValueError, match="SSE_CHUNK_OVERLAP"):
         config.override_from_env()
+
+
+# ------------------------------------------------------------- documentation -
+def test_documentation_is_on_by_default_with_bounded_scans():
+    config = AgenticKnowledgeConfig.from_file()
+    assert config.docs_enabled is True
+    assert config.docs_auto_index is True
+    assert config.docs_patterns == ("*.md", "*.markdown", "*.mdx")
+    assert "node_modules" in config.docs_excluded_dirs
+    assert config.docs_max_files > 0
+    assert config.docs_max_file_bytes >= 1024
+    assert config.docs_max_total_bytes >= config.docs_max_file_bytes
+    assert config.docs_max_section_chars >= 200
+    assert config.docs_rescan_interval_seconds > 0
+    assert config.docs_state_ttl_seconds > 0
+
+
+def test_the_docs_section_of_the_policy_is_loaded():
+    config = AgenticKnowledgeConfig.from_json(
+        '{"docs": {"enabled": false, "auto_index": false, "max_files": 5}}'
+    )
+    assert config.docs_enabled is False
+    assert config.docs_auto_index is False
+    assert config.docs_max_files == 5
+
+
+def test_documentation_settings_come_from_the_environment(monkeypatch):
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}DOCS_ENABLED", "false")
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}DOCS_AUTO_INDEX", "false")
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}DOCS_MAX_FILES", "7")
+    monkeypatch.setenv(
+        f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}DOCS_RESCAN_INTERVAL_SECONDS", "0"
+    )
+    config = AgenticKnowledgeConfig.from_file()
+    config.override_from_env()
+    assert config.docs_enabled is False
+    assert config.docs_auto_index is False
+    assert config.docs_max_files == 7
+    assert config.docs_rescan_interval_seconds == 0
+
+
+def test_documentation_needs_the_write_path_to_be_available():
+    config = knowledge_config()
+    assert config.docs_available is True
+    config.write_enabled = False
+    assert config.docs_available is False
+    config.write_enabled = True
+    config.docs_enabled = False
+    assert config.docs_available is False
+
+
+def test_a_ceiling_below_its_floor_is_a_configuration_error():
+    with pytest.raises(ValueError, match="docs.max_file_bytes"):
+        AgenticKnowledgeConfig.from_json('{"docs": {"max_file_bytes": 8}}')
+    with pytest.raises(ValueError, match="docs.max_total_bytes"):
+        AgenticKnowledgeConfig.from_json(
+            '{"docs": {"max_file_bytes": 4096, "max_total_bytes": 1024}}'
+        )
+    with pytest.raises(ValueError, match="docs.max_section_chars"):
+        AgenticKnowledgeConfig.from_json('{"docs": {"max_section_chars": 10}}')

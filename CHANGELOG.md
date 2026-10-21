@@ -8,6 +8,7 @@ release tagged as `v<version>`.
 
 | Version | Changelog |
 | ------- | --------- |
+| Unreleased | **Added:** `agentic_knowledge` indexes the repository's own documentation — a heading-aware scan of its `*.md` files published as `doc` documents, republished on content change, superseded documents retired through a `docs_prune` control message (never on a truncated scan), plus the `llm-router-agentic-kb-docs` command and the `docs` policy section. |
 | 0.1.5 | **Added:** `agentic_knowledge` — a knowledge layer that runs behind the Codex router: per-work-mode retrieval of verified fixes, dead ends and the pre-compaction archive from the Semantic Search Engine, a masked learn-from-traffic write path through a Redis Stream and an indexing worker, and optional knowledge-or-escalate model selection. Adapters for Codex (full) and Claude Code (read-only), plus offline counterfactual evaluation. **Fix:** the `agentic_knowledge` collection names are reduced to the engine's character set at configuration time, so a repository scope that would produce a hyphen can no longer make every indexing attempt fail with a 500 at collection creation; the retention pass still sweeps the legacy `prefix-<scope>-sessions` archives; the repository of a request is read from the leading messages, so a compaction (which re-sends the whole window) is filed under its own project instead of into a scope-less prefix, and a request with no known repository publishes nothing; a search of a repository that has not been indexed yet is an empty answer, not a failed search **Added:** engine login for a Semantic Search Engine that authenticates by username and password rather than by a pre-issued token (`SSE_API_USERNAME`/`SSE_API_PASSWORD`); every mined episode now carries the work **phase** its evidence names (`test`, `implement`, …) in its header and in `metadata_json.phase`, and a retrieval source can be restricted in its policy to phases (`"phases": ["test"]`) or to routing modes (`"modes": ["debug"]`) — the filter is engine-side, unions across names, intersects the source's categories, never touches the archived window whose `thread_id` owns the single metadata slot, and a policy cannot mix the two dimensions in one request. |
 | 0.1.4 | **Fix:** the Codex routing record follows the phase that was actually routed with instead of the last signal it could rebuild, so an interleaved command no longer freezes the record and repeats a conflict on every request of the turn (captured-session replay: 11 conflicts -> 0). **Added:** `RememberResult` carries why a memory write was skipped; the log names the real cause instead of an undifferentiated `version conflict`. |
 | 0.1.3 | **Added:** an accepted semantic decision can be carried across one command generation (`MEMORY_CARRY_DECISIONS`). **Changed:** semantic rankings are read against their own scale; the phase layer separates work states from shell noise; CLI-injected context is kept out of the intent text. |
@@ -18,6 +19,30 @@ release tagged as `v<version>`.
 | 0.0.5 | **Added:** `TimeRule`, an IBAN masking test suite, spaced car-plate formats. **Changed:** multi-format IBAN anchors, `_iban_mod97` moved to `validators`, PEP 8 import cleanup and no `__init__.py` re-exports. |
 | 0.0.2 | **Added:** PII masking plugin, dynamic pseudonym generation with de-anonymization in `FastMasker`, LangChain RAG plugin with CLI, `SojkaGuardPlugin`, lint/format/type/security configuration. **Changed:** `mask()` returns `(masked_text, mappings)`; `numpy` loaded only when LangChain RAG is enabled. |
 | 0.0.1 | **Added:** `fast_masker` plugin (IP, KRS, JWT, NRB, NIP, URL, SSN and other rules), packaging (`setup.py`) with the initial `.version`, License section in the README. |
+
+## [Unreleased]
+
+### Added
+- `agentic_knowledge` indexes **the repository's own documentation**. `docs_ingestor.py` scans the directory a request
+  declared for its `*.md` files, splits each one at its headings (a section keeps its heading path, cut at
+  `docs.max_section_chars`), and publishes one `doc` event per section to the stream the miner already uses — so the
+  worker masks and indexes documentation exactly as it does a mined recipe, into `category=doc` of
+  `<prefix>_<scope>`, which `plan`, `implement` and `review` already ask for and which rendered nothing before.
+- A file is republished when its **content** changes, not when it is looked at: the digest of the whole file feeds every
+  section's fingerprint, and a scan state in Redis (`<key_prefix>:docs:<scope>`, one key per scope) compares digests, so
+  a `touch` or a branch checkout over unchanged files publishes nothing. A changed file gets new document names and the
+  scan publishes a `docs_prune` control message retiring the names it superseded, which is also what removes the
+  documents of a deleted file. **A scan that ran out of `docs.max_files` or `docs.max_total_bytes` publishes no
+  retirement at all** — pruning against a partial listing would delete documentation the scan never reached.
+- The scan runs on the request path, bounded by `docs.rescan_interval_seconds` per process and by its byte and file
+  ceilings, and is **fail-open** like the rest of the layer: a repository the router cannot see is
+  `skipped: no-such-directory`, never an error. Where the router does not run next to the agents, the new
+  `llm-router-agentic-kb-docs` command (`--path`, `--scope`, `--dry-run`, `--no-prune`, `--json`) does the same scan
+  against the same policy from a machine that can; it publishes to the stream and never talks to the engine.
+- Policy: a `docs` section (`enabled`, `auto_index`, `patterns`, `excluded_dirs`, `max_files`, `max_file_bytes`,
+  `max_total_bytes`, `max_section_chars`, `rescan_interval_seconds`, `state_ttl_seconds`) and the matching
+  `LLM_ROUTER_KNOWLEDGE_AGENTIC_DOCS_*` environment overrides. `payload["routing"]["knowledge"]` carries a `docs`
+  outcome (`status`, `files`, `published`, `pruned`, `reason`, `truncated`) — no paths and no document names.
 
 ## [0.1.5] - 2026-10-17
 

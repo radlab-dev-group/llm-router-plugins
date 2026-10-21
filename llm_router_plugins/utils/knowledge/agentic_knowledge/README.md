@@ -149,6 +149,7 @@ knowledge to use, and none is mined from it, so it carries no annotation.
 | `cache.py`         | `GenerationContextCache` (Redis) + in-process one when Redis is absent       |
 | `redisclient.py`   | `RedisClientHandle`: lazy, fork-aware Redis client shared by cache and pub   |
 | `miner.py`         | `EpisodeMiner`: recipe / deadend / loop / compaction → `KnowledgeEvent`      |
+| `docs_ingestor.py` | scans the repository's markdown into `doc` documents and keeps them current  |
 | `events.py`        | `KnowledgeEventPublisher`: `SET NX` dedup + `XADD`                           |
 | `escalation.py`    | `EscalationPolicy.decide`                                                    |
 | `sse.py`           | `KnowledgeStore`: thin fail-open façade over `sse_lib`                       |
@@ -174,12 +175,12 @@ the scope is unknown, and both reads and writes are skipped (`scope: ""` in the 
 
 ### Collections and documents
 
-| Kind              | Collection                       | Produced by                    |
-|-------------------|----------------------------------|--------------------------------|
-| `recipe`          | `<prefix>_<scope>`               | `test_failure → patch → test pass` |
-| `deadend`         | `<prefix>_<scope>`               | a repeated failure, a dead end |
-| `doc`             | `<prefix>_<scope>`               | nothing yet (reserved for conventions indexed by you) |
-| `session_archive` | `<prefix>_<scope>_sessions`      | a request classified `compaction` |
+| Kind              | Collection                       | Produced by                                          |
+|-------------------|----------------------------------|--------------------------------------------------------|
+| `recipe`          | `<prefix>_<scope>`               | `test_failure → patch → test pass`                      |
+| `deadend`         | `<prefix>_<scope>`               | a repeated failure, a dead end                          |
+| `doc`             | `<prefix>_<scope>`               | the repository's markdown — [Documentation](#documentation-doc) |
+| `session_archive` | `<prefix>_<scope>_sessions`      | a request classified `compaction`                       |
 
 Default `<prefix>` is `agentic_kb`. A collection is `<prefix>_<scope>` (and
 `<prefix>_<scope>_sessions` for the archive); the engine's character set —
@@ -296,6 +297,40 @@ boundaries (`archive.max_chunk_chars`) and indexed into `<prefix>_<scope>_sessio
 `position`. The next `main` request of the same thread reads that collection filtered by `thread_id`, so the exact
 lines a summary dropped come back as `## Exact context from before compaction`.
 
+### Documentation (`doc`)
+
+The `doc` category is the repository's own documentation: `README`, `CONTRIBUTING`, everything under `docs/`. It is the
+cheapest project-specific knowledge there is, it is already written, and the miner cannot produce it — so the layer
+reads the directory the request declared and publishes it.
+
+```bash
+llm-router-agentic-kb-docs --path /repo/webapp --dry-run    # what would be published
+llm-router-agentic-kb-docs --path /repo/webapp              # publish it to the stream
+```
+
+| Step        | What happens                                                                                          |
+|-------------|--------------------------------------------------------------------------------------------------------|
+| Scan        | `docs.patterns` below `repo_root`, skipping `docs.excluded_dirs` and never `.git`, symlinks or deep trees |
+| Split       | each file at its headings; a section keeps its heading path (`Guide > Deploy`) and is cut at `max_section_chars` |
+| Publish     | one `doc` event per section, to the same stream the miner uses — the worker masks it like any other document |
+| Index       | by the worker, into `<prefix>_<scope>` with `category=doc` and `source_file`, `doc_type`, `heading` in its header |
+
+A file is republished when its **content** changes, not when it is looked at: the digest of the whole file feeds every
+section's fingerprint and the scan state (Redis, one key per scope: `<key_prefix>:docs:<scope>`) compares digests, so
+`touch` and a branch checkout across ten unchanged files publish nothing. A section whose content changed gets a new
+document name — the digest is part of it — and the scan then publishes a `docs_prune` control message asking the worker
+to retire the name it superseded, which is also what removes the documents of a file that was deleted. **A scan that
+hit `max_files` or `max_total_bytes` publishes no prune at all**: pruning against a partial listing would delete the
+documentation the scan never reached, and the outcome says `truncated: true`.
+
+The scan runs on the request path and is bounded by `docs.rescan_interval_seconds` per process (a repository is looked
+at once per interval, not once per request) and by the byte and file ceilings. It reads the filesystem **as the router
+sees it**: where the router does not run next to the agents, `repo_root` is not a directory it can open, the scan
+reports `skipped: no-such-directory`, and documentation is published with the command above from a machine that can.
+
+`docs.auto_index: false` keeps the category and the retrieval but takes the filesystem away from the request path: only
+`llm-router-agentic-kb-docs` (or the CLI's own `--dry-run`) publishes then.
+
 ### Knowledge-or-escalate
 
 `EscalationPolicy.decide(turn, context, policy, loop_count, signature_hash)` escalates only when **all** of these hold:
@@ -328,7 +363,11 @@ flaky test looks exactly like a loop. The "already tried" list comes from the cu
   "loop_count": 3,
   "escalation": {"action": "escalate", "reason": "loop_without_recipe",
                   "from": "auto_codex", "to": "qwen/Qwen3.8-27B"},
-  "write": {"published": 1, "deduplicated": 0, "errors": 0, "status": "ok"}   // ok | partial | unavailable | disabled
+  "write": {"published": 1, "deduplicated": 0, "errors": 0, "status": "ok"},  // ok | partial | unavailable | disabled
+  "docs": {"status": "ok", "files": 12, "published": 1, "pruned": 1}
+                    // absent when documentation is off or no repository is known;
+                    // status ok | skipped | disabled | unavailable, `reason` when it
+                    // did not run, `truncated: true` when a ceiling cut the scan
 }
 ```
 
@@ -356,7 +395,13 @@ means the feature is unavailable.
              "max_patch_chars": 4000,
              "archive": {"enabled": true, "max_chunk_chars": 2000,
                           "ttl_seconds": 1209600}},
-  "escalation": {"enabled": false, "loop_threshold": 3, "strong_recipe_score": 0.75}
+  "escalation": {"enabled": false, "loop_threshold": 3, "strong_recipe_score": 0.75},
+  "docs": {"enabled": true, "auto_index": true,
+            "patterns": ["*.md", "*.markdown", "*.mdx"],
+            "excluded_dirs": ["node_modules", "dist", "build", "vendor"],
+            "max_files": 200, "max_file_bytes": 200000,
+            "max_total_bytes": 2000000, "max_section_chars": 1200,
+            "rescan_interval_seconds": 21600, "state_ttl_seconds": 7776000}
 }
 ```
 
@@ -404,6 +449,14 @@ All use the prefix `LLM_ROUTER_KNOWLEDGE_AGENTIC_`. Booleans accept `1/0`, `true
 | `…_MAX_PATCH_CHARS`                   | `4000`           | patch text admitted into an event                        |
 | `…_ARCHIVE_MAX_CHUNK_CHARS`           | `2000`           | archive chunk size                                       |
 | `…_ARCHIVE_TTL_SECONDS`               | `1209600`        | archive retention                                        |
+| `…_DOCS_ENABLED`                      | `true`           | repository documentation is part of the knowledge base    |
+| `…_DOCS_AUTO_INDEX`                   | `true`           | a request may trigger a scan; `false` ⇒ only the CLI publishes |
+| `…_DOCS_MAX_FILES`                    | `200`            | files read per scan; a scan that hits it prunes nothing   |
+| `…_DOCS_MAX_FILE_BYTES`               | `200000`         | largest documentation file read                           |
+| `…_DOCS_MAX_TOTAL_BYTES`              | `2000000`        | bytes read per scan                                       |
+| `…_DOCS_MAX_SECTION_CHARS`            | `1200`           | one documentation section, roughly one engine chunk       |
+| `…_DOCS_RESCAN_INTERVAL_SECONDS`      | `21600`          | per-process interval between scans of one repository      |
+| `…_DOCS_STATE_TTL_SECONDS`            | `7776000`        | lifetime of a scope's scan state (90 days)                |
 | `…_LOOP_THRESHOLD`                    | `3`              | repetitions of one signature that make a loop            |
 | `…_STRONG_RECIPE_SCORE`               | `0.75`           | a recipe this good keeps the routed model                |
 | `…_REDIS_HOST`                        | **empty**        | **empty ⇒ no writes, no cache**                          |
@@ -436,7 +489,20 @@ Chunking is declared when a collection is **created** and never rewritten afterw
 new size means dropping the `<prefix>_<scope>[…_sessions]` collections and letting the worker index them again. The
 default 400/60 sits under the 508 tokens the embedder cuts at, which a chunk of the engine's 500 default does not.
 
-CLI: `--config <path>`, `--once` (drain one batch and exit — cron friendly), `--no-retain`, `--log-level`.
+CLI (worker): `--config <path>`, `--once` (drain one batch and exit — cron friendly), `--no-retain`, `--log-level`.
+
+### Documentation command
+
+```bash
+llm-router-agentic-kb-docs --path /repo/webapp --dry-run   # list, publish nothing
+llm-router-agentic-kb-docs --path /repo/webapp --json      # publish, machine-readable outcome
+llm-router-agentic-kb-docs --path /repo/webapp --no-prune  # publish, keep superseded documents
+```
+
+Same policy, same scan, same stream: the command only reads files and appends events, so the worker masks and indexes
+what it indexes for a mined episode and there is no second write path. It therefore needs the stream
+(`…_REDIS_HOST`) and never the engine. `--scope` overrides the scope key the proxy would derive from the directory, so
+a repository indexed by hand lands in the collection its agents read from.
 
 ---
 
@@ -517,8 +583,17 @@ leak-free.
   `max_stream_len`.
 - **False escalations.** A flaky test looks like a loop. Identical signatures and `loop_threshold` help; keep
   `ESCALATION_ENABLED` off until the replay is convincing.
-- **No architectural decisions.** The `doc` kind is the only one the miner never produces — conventions are indexed
-  by you, and extracting architectural decisions would need generation.
+- **No architectural decisions.** Documentation is copied into the knowledge base, never distilled from a session:
+  extracting the decision behind a change would need generation, and a wrong summary indexed as a convention is worse
+  than the source file an agent can read itself.
+- **Documentation is read where the router runs.** The scan reads `repo_root` from this host; a router that does not
+  run next to the agents cannot scan their repositories and its outcomes say `skipped: no-such-directory`. Publish the
+  documentation with `llm-router-agentic-kb-docs` from a machine that can see them.
+- **A lost scan state republishes a repository's documentation.** `<key_prefix>:docs:<scope>` is what keeps a scan from
+  re-publishing unchanged files and what names the documents a change supersedes; flush it and the next scan publishes
+  everything again, leaving the previous copies of each file in the collection until they are deleted by hand.
+  The reverse also holds: delete documents out of the engine by hand and the scan will not republish them — their
+  content is unchanged and their fingerprints are deduplicated — so delete the scope's state key together with them.
 - **Coupling to the `codex` package.** The adapter imports its parser, phase and state modules explicitly; their
   contracts are pinned by tests.
 

@@ -30,6 +30,7 @@ __all__ = [
     "RepositoryScope",
     "ScopeResolver",
     "declared_working_directory",
+    "scope_key",
 ]
 
 #: Scope key is the name of the checked-out directory.
@@ -239,20 +240,62 @@ class ScopeResolver:
         root = declared_working_directory(payload)
         if not root:
             return RepositoryScope(key=_normalize(self.default_scope))
-        override = self.overrides.get(root) or self.overrides.get(f"{root}/")
-        if override:
-            return RepositoryScope(key=_normalize(override), repo_root=root)
-        return RepositoryScope(key=self._key_from_root(root), repo_root=root)
+        return RepositoryScope(
+            key=scope_key(
+                root,
+                strategy=self.strategy,
+                overrides=self.overrides,
+                default=self.default_scope,
+            ),
+            repo_root=root,
+        )
 
-    def _key_from_root(self, root: str) -> str:
-        """Derive a scope key from an absolute path."""
-        parts = [part for part in root.split("/") if part and part != "."]
-        if not parts:
-            return _normalize(self.default_scope)
-        name = parts[-1]
-        if self.strategy == STRATEGY_PARENT_DIRECTORY and len(parts) > 1:
-            name = f"{parts[-2]}-{name}"
-        return _normalize(name) or _normalize(self.default_scope)
+
+def scope_key(
+    root: str,
+    *,
+    strategy: str = STRATEGY_REPO_BASENAME,
+    overrides: Optional[Mapping[str, str]] = None,
+    default: str = "",
+) -> str:
+    """
+    Return the scope key of the repository rooted at *root*.
+
+    Split out of :meth:`ScopeResolver.resolve` because a scope is not always
+    declared in a payload: the operator's documentation command knows the
+    directory it was pointed at and has to derive the same key the proxy would
+    have derived from a request made in it.  Both go through here, so a
+    repository indexed by hand and a repository an agent works in are the same
+    collection rather than two that never meet.
+
+    Parameters
+    ----------
+    root : str
+        Directory of the checkout, absolute or relative.
+    strategy : str
+        One of :data:`SCOPE_STRATEGIES`.
+    overrides : Mapping[str, str], optional
+        Explicit ``directory → scope key`` table, consulted first.
+    default : str, optional
+        Key to fall back to when nothing can be derived.
+
+    Returns
+    -------
+    str
+        The scope key, possibly ``""``.
+    """
+    text = _clean_path(root)
+    given = overrides or {}
+    override = given.get(text) or given.get(f"{text}/")
+    if override:
+        return _normalize(override)
+    parts = [part for part in text.split("/") if part and part != "."]
+    if not parts:
+        return _normalize(default)
+    name = parts[-1]
+    if strategy == STRATEGY_PARENT_DIRECTORY and len(parts) > 1:
+        name = f"{parts[-2]}-{name}"
+    return _normalize(name) or _normalize(default)
 
 
 def _normalize(value: Optional[str]) -> str:

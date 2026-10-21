@@ -61,6 +61,8 @@ setup(
             "llm_router_plugins.cli.plugins.utils.rag.langchain:main",
             "llm-router-agentic-kb-worker="
             "llm_router_plugins.cli.plugins.utils.knowledge.worker:main",
+            "llm-router-agentic-kb-docs="
+            "llm_router_plugins.cli.plugins.utils.knowledge.docs:main",
         ],
     },
     classifiers=[

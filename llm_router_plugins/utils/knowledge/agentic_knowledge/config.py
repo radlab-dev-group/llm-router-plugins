@@ -39,7 +39,13 @@ JSON structure::
                 "archive": {"enabled": true, "max_chunk_chars": 2000,
                             "ttl_seconds": 1209600}},
       "escalation": {"enabled": false, "loop_threshold": 3,
-                     "strong_recipe_score": 0.75}
+                     "strong_recipe_score": 0.75},
+      "docs": {"enabled": true, "auto_index": true,
+               "patterns": ["*.md"], "excluded_dirs": ["node_modules"],
+               "max_files": 200, "max_file_bytes": 200000,
+               "max_total_bytes": 2000000, "max_section_chars": 1200,
+               "rescan_interval_seconds": 21600,
+               "state_ttl_seconds": 7776000}
     }
 """
 
@@ -49,7 +55,7 @@ import pathlib
 import re
 
 from dataclasses import dataclass, field, replace
-from typing import Any, ClassVar, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, ClassVar, Dict, Mapping, Optional, Tuple
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import (
     SCOPE_STRATEGIES,
@@ -67,6 +73,42 @@ __all__ = [
     "SourcePolicy",
     "WorkerSettings",
 ]
+
+#: Filename patterns the documentation scan picks up by default.  Markdown is
+#: the lingua franca of a repository's own documentation; an .rst tree is worth
+#: adding by an operator who has one.
+DEFAULT_DOC_PATTERNS: Tuple[str, ...] = ("*.md", "*.markdown", "*.mdx")
+
+#: Directories a documentation scan never descends into.  Everything here is
+#: either a dependency's documentation (retrieved as the team's own, which it
+#: is not), a build artifact, or a tool's cache — noise in all three cases, and
+#: in the first two a great deal of it.
+DEFAULT_DOC_EXCLUDED_DIRS: Tuple[str, ...] = (
+    ".git",
+    ".hg",
+    ".svn",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    ".env",
+    ".idea",
+    ".vscode",
+    "node_modules",
+    "bower_components",
+    "venv",
+    "env",
+    "dist",
+    "build",
+    "target",
+    "site-packages",
+    "__pycache__",
+    "vendor",
+    "coverage",
+    "htmlcov",
+    "site",
+)
 
 #: Prefix of every environment variable this plugin reads.
 AGENTIC_KNOWLEDGE_ENV_PREFIX = "LLM_ROUTER_KNOWLEDGE_AGENTIC_"
@@ -137,6 +179,26 @@ _DEFAULT_WORKER_BATCH = 32
 _DEFAULT_CHUNK_TOKENS = 400
 _DEFAULT_CHUNK_OVERLAP = 60
 _DEFAULT_WORKER_BLOCK_MS = 5_000
+
+#: Ceilings of the documentation scan.  They are budgets, not expectations: a
+#: scan that runs out of one stops and says so, because pruning against a
+#: partial listing would delete the documentation the scan never reached.
+_DEFAULT_DOC_MAX_FILES = 200
+_DEFAULT_DOC_MAX_FILE_BYTES = 200_000
+_DEFAULT_DOC_MAX_TOTAL_BYTES = 2_000_000
+
+#: Size of one documentation section, in characters.  Aimed at the engine's
+#: chunking (400 tokens by default) so a section is one chunk that carries its
+#: own heading, which is what makes a retrieved fragment citable.
+_DEFAULT_DOC_SECTION_CHARS = 1_200
+
+#: How often one process looks at the repository's documentation again.
+_DEFAULT_DOC_RESCAN_INTERVAL_SECONDS = 21_600
+
+#: Lifetime of a scope's scan state.  It has to outlive a redeploy — losing it
+#: means re-publishing every document — while a scope that has gone quiet should
+#: not hold its listing in Redis forever.
+_DEFAULT_DOC_STATE_TTL_SECONDS = 7_776_000
 
 _INDEX_TYPES = ("HNSW", "IVF_FLAT")
 
@@ -291,6 +353,22 @@ class AgenticKnowledgeConfig:
     archive_max_chunk_chars: int = _DEFAULT_ARCHIVE_CHUNK_CHARS
     archive_ttl_seconds: int = _DEFAULT_ARCHIVE_TTL_SECONDS
 
+    #: Whether the repository's own documentation belongs to the knowledge base.
+    docs_enabled: bool = True
+    #: Whether a request may trigger a documentation scan.  Off means the
+    #: documentation is indexed by hand, with the operator's own command.
+    docs_auto_index: bool = True
+    #: Filename patterns a scan picks up.
+    docs_patterns: Tuple[str, ...] = DEFAULT_DOC_PATTERNS
+    #: Directory names a scan does not descend into.
+    docs_excluded_dirs: Tuple[str, ...] = DEFAULT_DOC_EXCLUDED_DIRS
+    docs_max_files: int = _DEFAULT_DOC_MAX_FILES
+    docs_max_file_bytes: int = _DEFAULT_DOC_MAX_FILE_BYTES
+    docs_max_total_bytes: int = _DEFAULT_DOC_MAX_TOTAL_BYTES
+    docs_max_section_chars: int = _DEFAULT_DOC_SECTION_CHARS
+    docs_rescan_interval_seconds: int = _DEFAULT_DOC_RESCAN_INTERVAL_SECONDS
+    docs_state_ttl_seconds: int = _DEFAULT_DOC_STATE_TTL_SECONDS
+
     escalation_enabled: bool = False
     loop_threshold: int = _DEFAULT_LOOP_THRESHOLD
     strong_recipe_score: float = _DEFAULT_STRONG_RECIPE_SCORE
@@ -376,6 +454,7 @@ class AgenticKnowledgeConfig:
         read = _section(data, "read")
         write = _section(data, "write")
         archive = _section(write, "archive")
+        docs = _section(data, "docs")
         escalation = _section(data, "escalation")
         scope = _section(data, "scope")
         claude = _section(data, "claude_code")
@@ -449,6 +528,42 @@ class AgenticKnowledgeConfig:
                 archive.get("ttl_seconds", _DEFAULT_ARCHIVE_TTL_SECONDS),
                 "write.archive.ttl_seconds",
             ),
+            docs_enabled=_boolean(docs.get("enabled", True), "docs.enabled"),
+            docs_auto_index=_boolean(
+                docs.get("auto_index", True), "docs.auto_index"
+            ),
+            docs_patterns=_string_list(
+                docs.get("patterns", DEFAULT_DOC_PATTERNS), "docs.patterns"
+            ),
+            docs_excluded_dirs=_string_list(
+                docs.get("excluded_dirs", DEFAULT_DOC_EXCLUDED_DIRS),
+                "docs.excluded_dirs",
+            ),
+            docs_max_files=_positive(
+                docs.get("max_files", _DEFAULT_DOC_MAX_FILES), "docs.max_files"
+            ),
+            docs_max_file_bytes=_positive(
+                docs.get("max_file_bytes", _DEFAULT_DOC_MAX_FILE_BYTES),
+                "docs.max_file_bytes",
+            ),
+            docs_max_total_bytes=_positive(
+                docs.get("max_total_bytes", _DEFAULT_DOC_MAX_TOTAL_BYTES),
+                "docs.max_total_bytes",
+            ),
+            docs_max_section_chars=_positive(
+                docs.get("max_section_chars", _DEFAULT_DOC_SECTION_CHARS),
+                "docs.max_section_chars",
+            ),
+            docs_rescan_interval_seconds=_non_negative(
+                docs.get(
+                    "rescan_interval_seconds", _DEFAULT_DOC_RESCAN_INTERVAL_SECONDS
+                ),
+                "docs.rescan_interval_seconds",
+            ),
+            docs_state_ttl_seconds=_positive(
+                docs.get("state_ttl_seconds", _DEFAULT_DOC_STATE_TTL_SECONDS),
+                "docs.state_ttl_seconds",
+            ),
             escalation_enabled=_boolean(
                 escalation.get("enabled", False), "escalation.enabled"
             ),
@@ -514,7 +629,10 @@ class AgenticKnowledgeConfig:
         # budget; `SSE_API_TIMEOUT` is one name among many below, so the flag
         # has to start false rather than appear with it.
         sse_timeout_overridden = False
-        for name, target, cast in (
+        # One annotated tuple rather than a literal one: the casts differ in
+        # what they return, and unpacking a heterogeneous literal makes mypy
+        # hold the first entry's type for the whole loop.
+        casts: Tuple[Tuple[str, str, Callable[[Any, str], Any]], ...] = (
             ("SSE_API_TIMEOUT", "sse_timeout_seconds", _positive_float),
             ("READ_TIMEOUT_SECONDS", "read_timeout_seconds", _positive_float),
             ("MIN_SIMILARITY", "min_similarity", _fraction),
@@ -527,9 +645,22 @@ class AgenticKnowledgeConfig:
             ("MAX_PATCH_CHARS", "max_patch_chars", _positive),
             ("ARCHIVE_MAX_CHUNK_CHARS", "archive_max_chunk_chars", _positive),
             ("ARCHIVE_TTL_SECONDS", "archive_ttl_seconds", _positive),
+            ("DOCS_ENABLED", "docs_enabled", _boolean),
+            ("DOCS_AUTO_INDEX", "docs_auto_index", _boolean),
+            ("DOCS_MAX_FILES", "docs_max_files", _positive),
+            ("DOCS_MAX_FILE_BYTES", "docs_max_file_bytes", _positive),
+            ("DOCS_MAX_TOTAL_BYTES", "docs_max_total_bytes", _positive),
+            ("DOCS_MAX_SECTION_CHARS", "docs_max_section_chars", _positive),
+            (
+                "DOCS_RESCAN_INTERVAL_SECONDS",
+                "docs_rescan_interval_seconds",
+                _non_negative,
+            ),
+            ("DOCS_STATE_TTL_SECONDS", "docs_state_ttl_seconds", _positive),
             ("LOOP_THRESHOLD", "loop_threshold", _positive),
             ("STRONG_RECIPE_SCORE", "strong_recipe_score", _fraction),
-        ):
+        )
+        for name, target, cast in casts:
             raw = _env_override(prefix, name)
             if raw is None:
                 continue
@@ -598,6 +729,18 @@ class AgenticKnowledgeConfig:
             raise ValueError("min_similarity must be in [0, 1]")
         if not 0.0 < self.strong_recipe_score <= 1.0:
             raise ValueError("strong_recipe_score must be in (0, 1]")
+        if self.docs_max_file_bytes < 1024:
+            raise ValueError("docs.max_file_bytes must be at least 1024 bytes")
+        if self.docs_max_total_bytes < self.docs_max_file_bytes:
+            raise ValueError(
+                "docs.max_total_bytes must not be below docs.max_file_bytes"
+            )
+        if self.docs_max_section_chars < 200:
+            raise ValueError(
+                "docs.max_section_chars must be at least 200 characters"
+            )
+        if not any(str(pattern).strip() for pattern in self.docs_patterns):
+            raise ValueError("docs.patterns must name at least one file pattern")
         for policy in self.modes.values():
             if policy.max_chars < 200:
                 raise ValueError(
@@ -667,6 +810,17 @@ class AgenticKnowledgeConfig:
         return bool(self.write_available and self.archive_enabled)
 
     @property
+    def docs_available(self) -> bool:
+        """
+        Whether the repository's documentation may be indexed.
+
+        Documentation is written through the same stream as mined knowledge:
+        the proxy reads files and publishes events, the worker masks and
+        indexes them — so no Redis means no documentation either.
+        """
+        return bool(self.write_available and self.docs_enabled)
+
+    @property
     def escalation_available(self) -> bool:
         """Whether a request's model may be escalated."""
         return bool(self.enabled and self.escalation_enabled)
@@ -713,7 +867,11 @@ class AgenticKnowledgeConfig:
         # that differ only by punctuation are the same repository as far as a
         # collection name is concerned.
         fragment = _engine_collection_fragment(scope, "scope") if scope else ""
-        base = f"{self.collection_prefix}_{fragment}" if fragment else self.collection_prefix
+        base = (
+            f"{self.collection_prefix}_{fragment}"
+            if fragment
+            else self.collection_prefix
+        )
         return f"{base}_sessions" if kind == "session_archive" else base
 
     @property
@@ -757,6 +915,7 @@ _POLICY_KEYS = frozenset(
         "claude_code",
         "write",
         "escalation",
+        "docs",
     }
 )
 
