@@ -57,11 +57,9 @@ release tagged as `v<version>`.
   margin); an operator-set socket timeout that already covers it is kept.
 - **Added:** `run-agentic-kb-worker.sh` in the `llm-router` checkout starts the
   indexing worker with the environment of the router's own run script — it reads
-  that script's assignments rather than executing it, so no second server starts
-  — and `run-agentic-kb-worker-pk.sh` the same over the personal
-  `run-rest-api-gunicorn-pk.sh`.  A `--once` run now also logs how many events
-  the batch drained, so a cron worker is not indistinguishable from one that
-  never ran.
+  that script's assignments rather than executing it, so no second server starts.
+  A `--once` run now also logs how many events the batch drained, so a cron
+  worker is not indistinguishable from one that never ran.
 - **Fix:** a search for a repository whose knowledge has not been indexed yet
   stops being a per-request failure.  The engine answers a missing collection
   with an error code in a 200 body rather than with an empty list, so every
@@ -196,10 +194,11 @@ release tagged as `v<version>`.
 
 ### Changed
 - **The operator's knowledge scripts moved to the `llm-router` checkout, and the worker stopped
-  fishing for `sse_lib` in a sibling checkout.** The `run-agentic-kb-{worker,docs}[-pk].sh`
-  wrappers now live next to the `run-rest-api-gunicorn*.sh` scripts they read, because that is
-  where their configuration lives and where an operator looks for a second process to start;
-  the default `ROUTER_SCRIPT` resolves next to the wrapper instead of up a directory tree.
+  fishing for `sse_lib` in a sibling checkout.** The `run-agentic-kb-worker.sh` and
+  `run-agentic-kb-docs.sh` wrappers now live next to the `run-rest-api-gunicorn.sh` script they
+  read, because that is where their configuration lives and where an operator looks for a second
+  process to start; the default `ROUTER_SCRIPT` resolves next to the wrapper instead of up a
+  directory tree.
   The `sse-lib` dependency of the `knowledge` extra is pinned to `>=0.1.0` — the first
   published release with `ignore_question_lang_detect` on `SSEClient.search` — and the
   wrappers no longer prepend a sibling `semantic-search-engine/sse_lib/src` to
