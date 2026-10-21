@@ -43,8 +43,7 @@ same fail-hard rule the Codex router uses.
 ### 1. Install
 
 ```bash
-pip install -e ".[knowledge]"                       # sse-lib + redis>=5
-pip install ../semantic-search-engine/sse_lib       # until sse-lib is published, from the sibling checkout
+pip install -e ".[knowledge]"                       # sse-lib>=0.1.0 + redis>=5
 ```
 
 `sse_lib` depends only on `requests`. Without it, and without a configured host, the plugin loads and does nothing.
@@ -84,13 +83,15 @@ llm-router-agentic-kb-worker
 Without a worker the layer only reads: nothing new is ever learned. The embedder and reranker are required because the
 worker creates a collection the first time a scope produces knowledge.
 
-The worker is a second process, started by the operator — the router never spawns it. `scripts/` wraps that for a
-deployment whose configuration lives in the router's own run script: it reads that script's assignments (never
-executes it, so no second server starts), exports them, and runs the worker with the rest of its arguments.
+The worker is a second process, started by the operator — the router never spawns it. The `llm-router` checkout
+wraps that for a deployment whose configuration lives in the router's own run script: `run-agentic-kb-worker.sh`
+reads that script's assignments (never executes it, so no second server starts), exports them, and runs the
+worker with the rest of its arguments.
 
 ```bash
-bash scripts/run-agentic-kb-worker.sh [ROUTER_SCRIPT] [--once | --no-retain | --log-level …]
-bash scripts/run-agentic-kb-worker-pk.sh    # the personal run-rest-api-gunicorn-pk.sh environment
+# from the llm-router checkout (sibling of this one)
+bash run-agentic-kb-worker.sh [ROUTER_SCRIPT] [--once | --no-retain | --log-level …]
+bash run-agentic-kb-worker-pk.sh    # the personal run-rest-api-gunicorn-pk.sh environment
 ```
 
 Run it with `--once` from cron to drain a backlog, or without it as a daemon. `--once` logs what the batch did,
