@@ -627,6 +627,15 @@ default 400/60 sits under the 508 tokens the embedder cuts at, which a chunk of 
 
 CLI (worker): `--config <path>`, `--once` (drain one batch and exit — cron friendly), `--no-retain`, `--log-level`.
 
+The worker logs its configuration block (engine, stream, group, consumer, chunking, retention) on start and then:
+a per-batch summary with read/indexed/dropped counts and elapsed time, per-event details at `DEBUG`
+(kind, scope, thread, fingerprint), collection creation, retention deletions, docs pruning, and an
+idle heartbeat every five minutes. The level comes from `--log-level`, else from
+`LLM_ROUTER_IN_DEBUG` (on → `DEBUG`), else from `LLM_ROUTER_LOG_LEVEL`, else `INFO` — the last two
+being what the router's run script already exports, so a debug deployment gets a debug worker
+without repeating the switch. Failures are logged with the engine's own message, not just the
+exception class, and credentials are reported by their kind (`auth=token`), never by their value.
+
 ### Documentation command
 
 ```bash

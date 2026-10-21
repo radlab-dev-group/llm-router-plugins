@@ -10,7 +10,9 @@ and then dropped with a log; it never stalls the group.
 
 import dataclasses
 import json
+import logging
 import sys
+import time
 import datetime
 import pathlib
 import types
@@ -693,3 +695,176 @@ def test_the_default_chunking_is_declared_on_a_new_collection():
         "max_tokens_in_chunk": 400,
         "number_of_overlap_tokens": 60,
     }
+
+
+# --------------------------------------------------------------- verbosity -
+class _Recorder:
+    """A logger that keeps every line, whatever its level."""
+
+    def __init__(self):
+        self.lines = []
+
+    def info(self, message, *args):
+        self.lines.append(message % args if args else message)
+
+    @property
+    def text(self):
+        return "\n".join(self.lines)
+
+
+def test_the_command_line_level_beats_the_router_switches(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_IN_DEBUG", "1")
+    monkeypatch.setenv("LLM_ROUTER_LOG_LEVEL", "WARNING")
+    level, reason = worker_cli._log_level("ERROR")
+    assert (level, reason) == (logging.ERROR, "command line")
+
+
+def test_the_router_debug_switch_debugs_the_worker(monkeypatch):
+    """
+    The operator turns debug on in one script, the router's, and the wrapper
+    exports it here — a worker that stayed at INFO in a debug deployment was
+    the whole complaint.
+    """
+    monkeypatch.delenv("LLM_ROUTER_LOG_LEVEL", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_IN_DEBUG", "true")
+    assert worker_cli._log_level(None) == (logging.DEBUG, "LLM_ROUTER_IN_DEBUG")
+
+
+def test_a_router_debug_switch_that_is_off_does_not_debug(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_LOG_LEVEL", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_IN_DEBUG", "0")
+    assert worker_cli._log_level(None)[0] == logging.INFO
+
+
+def test_the_router_log_level_is_honoured(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_IN_DEBUG", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_LOG_LEVEL", "warning")
+    assert worker_cli._log_level(None) == (logging.WARNING, "LLM_ROUTER_LOG_LEVEL")
+
+
+def test_no_switch_at_all_means_info(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_IN_DEBUG", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_LOG_LEVEL", raising=False)
+    assert worker_cli._log_level(None) == (logging.INFO, "default")
+
+
+def test_an_unknown_level_name_falls_back_to_info(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_IN_DEBUG", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_LOG_LEVEL", "chatty")
+    assert worker_cli._log_level(None)[0] == logging.INFO
+
+
+def test_startup_names_the_engine_the_stream_and_the_collections():
+    """
+    A worker that quietly indexes into the wrong place costs more than one that
+    refuses to start, so where it writes is on the console before the first
+    event.
+    """
+    recorder = _Recorder()
+    config = knowledge_config()
+    config.sse_host = "http://engine.test"
+    worker_cli._log_startup(recorder, config, logging.DEBUG, "LLM_ROUTER_IN_DEBUG")
+    assert "engine=http://engine.test" in recorder.text
+    assert config.stream_key in recorder.text
+    assert config.collection_prefix in recorder.text
+    assert "logging at DEBUG (from LLM_ROUTER_IN_DEBUG)" in recorder.text
+
+
+def test_startup_reports_a_credential_without_repeating_it():
+    recorder = _Recorder()
+    config = knowledge_config()
+    config.sse_host = "http://engine.test"
+    config.sse_token = "a-secret-token"
+    config.sse_password = "a-secret-password"
+    worker_cli._log_startup(recorder, config, logging.INFO, "default")
+    assert "auth=token" in recorder.text
+    assert "a-secret-token" not in recorder.text
+    assert "a-secret-password" not in recorder.text
+
+
+def test_a_batch_says_what_it_indexed(caplog):
+    event = knowledge_event(kind="recipe", scope="webapp")
+    redis = FakeRedis(messages=[("1-0", stream_message(event))])
+    work = worker(redis=redis, sse=FakeSSE())
+    with caplog.at_level("INFO"):
+        assert work.run_once(block_ms=0) == 1
+    assert "knowledge batch: 1 read, 1 indexed, 0 dropped" in caplog.text
+
+
+def test_a_created_collection_is_announced(caplog):
+    work = worker(sse=FakeSSE())
+    with caplog.at_level("INFO"):
+        work._ensure_collection("agentic_kb_webapp")
+    assert "knowledge collection created: agentic_kb_webapp" in caplog.text
+    assert "embedder=embed" in caplog.text
+
+
+def test_an_existing_collection_is_not_announced(caplog):
+    work = worker(sse=FakeSSE(exists=("agentic_kb_webapp",)))
+    with caplog.at_level("INFO"):
+        work._ensure_collection("agentic_kb_webapp")
+    assert "collection created" not in caplog.text
+
+
+def test_retention_says_what_it_deleted(caplog):
+    config = dataclasses.replace(knowledge_config())
+    config.archive_ttl_seconds = 7 * 86400
+    sse = FakeSSE()
+    work = worker(sse=sse, config=config)
+    work._scopes.add("webapp")
+    old = (datetime.date.today() - datetime.timedelta(days=30)).strftime("%Y%m%d")
+    sse.names["agentic_kb_webapp_sessions"] = [f"session_archive:{old}:old"]
+    with caplog.at_level("INFO"):
+        assert work.run_retention()["deleted"] == 1
+    assert "retention deleted 1 archived document(s)" in caplog.text
+    assert "agentic_kb_webapp_sessions" in caplog.text
+
+
+def test_an_idle_worker_says_it_is_alive(caplog):
+    work = worker()
+    work._last_heartbeat -= worker_cli.HEARTBEAT_SECONDS + 1
+    with caplog.at_level("INFO"):
+        work._heartbeat()
+    assert "knowledge worker idle" in caplog.text
+
+
+def test_a_recently_busy_worker_does_not_echo_its_heartbeat(caplog):
+    work = worker()
+    with caplog.at_level("INFO"):
+        work._heartbeat()
+    assert "idle" not in caplog.text
+
+
+def test_indexing_a_document_resets_the_heartbeat_clock():
+    event = knowledge_event(kind="recipe", scope="webapp")
+    redis = FakeRedis(messages=[("1-0", stream_message(event))])
+    work = worker(redis=redis, sse=FakeSSE())
+    work._last_heartbeat -= worker_cli.HEARTBEAT_SECONDS + 1
+    work.run_once(block_ms=0)
+    assert time.monotonic() - work._last_heartbeat < worker_cli.HEARTBEAT_SECONDS
+
+
+def test_a_failure_names_the_engine_message_and_not_only_its_class(caplog):
+    """``RuntimeError`` says a call failed; the message says which and why."""
+    event = knowledge_event(kind="recipe", scope="webapp")
+    redis = FakeRedis(messages=[("1-0", stream_message(event))])
+    sse = FakeSSE(fail_methods=("index_documents",))
+    work = worker(redis=redis, sse=sse, max_attempts=1)
+    with caplog.at_level("ERROR"):
+        work.run_once(block_ms=0)
+    assert "boom:index_documents" in caplog.text
+
+
+def test_describe_folds_whitespace_and_names_the_class():
+    described = worker_cli._describe(RuntimeError(" collection\n  rejected "))
+    assert described == "RuntimeError: collection rejected"
+
+
+def test_describe_clips_a_page_of_html_from_a_proxy():
+    described = worker_cli._describe(RuntimeError("<html>" + "x" * 5000))
+    assert len(described) <= worker_cli._ERROR_DETAIL_CHARS + 20
+    assert described.endswith("…")
+
+
+def test_describe_on_a_messageless_exception_still_names_it():
+    assert worker_cli._describe(RuntimeError()) == "RuntimeError"

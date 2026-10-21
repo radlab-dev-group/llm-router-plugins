@@ -91,6 +91,16 @@ BLOCK_SOCKET_MARGIN_SECONDS = 2.0
 #: group, so after this many failures it is acknowledged with a log.
 DEFAULT_MAX_ATTEMPTS = 3
 
+#: How often an idle worker says so on the console, in seconds.  A process
+#: waiting for events and a process that died look the same from outside, and
+#: "is it running at all" is the first question an operator asks of it.
+HEARTBEAT_SECONDS = 300
+
+#: How much of an exception's own message reaches the log, in characters.  The
+#: engine's error body names the collection and the constraint that failed,
+#: which is actionable; a page of HTML from a proxy in front of it is not.
+_ERROR_DETAIL_CHARS = 200
+
 #: How long an entry may sit unacknowledged before this worker claims it back
 #: for another attempt, in milliseconds.  Without a reclaim pass a message that
 #: fails once is never read again — ``XREADGROUP ``>`` hands out new messages
@@ -165,6 +175,11 @@ class KnowledgeIndexWorker:
         self._group_ready = False
         self._masker = None
         self._scopes: set = set()
+        # Counted per process so the heartbeat and the exit line can say what
+        # the worker did while nobody was watching it.
+        self._indexed = 0
+        self._dropped = 0
+        self._last_heartbeat = time.monotonic()
 
     # ----------------------------------------------------------- lifecycle -
     def run(self) -> None:
@@ -192,13 +207,34 @@ class KnowledgeIndexWorker:
                     # earlier are claimed back for another attempt.
                     self._reclaim_due()
                     self._maybe_retain()
+                    self._heartbeat()
             except Exception as exc:  # a read failure must not end the loop
                 self._log(
-                    "warning", "knowledge worker read failed: %s", type(exc).__name__
+                    "warning", "knowledge worker read failed: %s", _describe(exc)
                 )
                 time.sleep(1.0)
                 continue
-        self._log("info", "knowledge worker stopped")
+        self._log(
+            "info",
+            "knowledge worker stopped (%d indexed, %d dropped)",
+            self._indexed,
+            self._dropped,
+        )
+
+    def _heartbeat(self) -> None:
+        """Say that an idle worker is alive, on the heartbeat clock."""
+        now = time.monotonic()
+        if now - self._last_heartbeat < HEARTBEAT_SECONDS:
+            return
+        self._last_heartbeat = now
+        self._log(
+            "info",
+            "knowledge worker idle (indexed=%d dropped=%d stream=%s group=%s)",
+            self._indexed,
+            self._dropped,
+            self._stream,
+            self._group,
+        )
 
     def run_once(self, block_ms: Optional[int] = None) -> int:
         """
@@ -219,13 +255,26 @@ class KnowledgeIndexWorker:
             Messages processed (indexed or dropped) in this batch.
         """
         self._ensure_group()
+        started = time.monotonic()
         messages = self._read(block_ms)
+        self._log("debug", "knowledge read returned %d entr(y|ies)", len(messages))
         processed = 0
+        indexed = 0
         for entry_id, fields in messages:
             if self._stop:
                 break
-            self._process_entry(entry_id, fields)
+            if self._process_entry(entry_id, fields):
+                indexed += 1
             processed += 1
+        if processed:
+            self._log(
+                "info",
+                "knowledge batch: %d read, %d indexed, %d dropped in %.1fs",
+                processed,
+                indexed,
+                processed - indexed,
+                time.monotonic() - started,
+            )
         return processed
 
     def stop(self) -> None:
@@ -237,16 +286,35 @@ class KnowledgeIndexWorker:
         """Index one stream message, acknowledging it when done or dropped."""
         event = self._decode(fields)
         if event is None or not self._supported(event):
+            self._log(
+                "info",
+                "knowledge entry %s skipped (version this worker reads is %d)",
+                entry_id,
+                EVENT_VERSION,
+            )
             self._ack(entry_id)
+            self._dropped += 1
             return False
+        self._log(
+            "debug",
+            "knowledge entry %s: kind=%s scope=%s thread=%s fingerprint=%s",
+            entry_id,
+            event.kind,
+            event.scope,
+            event.thread_id,
+            event.fingerprint,
+        )
         try:
             self.index_event(event)
         except Exception as exc:
             if self._drop_if_exhausted(entry_id, event, exc):
                 self._forget(entry_id)
+                self._dropped += 1
             return False
         self._forget(entry_id)
         self._ack(entry_id)
+        self._indexed += 1
+        self._last_heartbeat = time.monotonic()
         return True
 
     def _drop_if_exhausted(
@@ -270,14 +338,14 @@ class KnowledgeIndexWorker:
                 event.fingerprint,
                 tries,
                 self._max_attempts,
-                type(exc).__name__,
+                _describe(exc),
             )
             return False
         self._log(
             "error",
             "knowledge index failed, dropping (fingerprint=%s, %s)",
             event.fingerprint,
-            type(exc).__name__,
+            _describe(exc),
         )
         self._ack(entry_id)
         return True
@@ -518,6 +586,20 @@ class KnowledgeIndexWorker:
                 index_type=worker.index_type,
                 chunking=chunking,
             )
+            self._log(
+                "info",
+                "knowledge collection created: %s (embedder=%s reranker=%s"
+                " index=%s chunking=%s)",
+                name,
+                worker.embedder,
+                worker.reranker,
+                worker.index_type,
+                (
+                    f"{worker.chunk_tokens}+{worker.chunk_overlap}"
+                    if chunking
+                    else "engine default"
+                ),
+            )
         except Exception:
             # A concurrent worker may have created it a moment before; that is
             # not a failure, but anything else must surface so the message
@@ -743,6 +825,14 @@ class KnowledgeIndexWorker:
         if not stale:
             return 0
         self._sse.delete_documents(collection, documents=stale)
+        self._log(
+            "info",
+            "knowledge retention deleted %d archived document(s) older than"
+            " %s from %s",
+            len(stale),
+            cutoff.isoformat(),
+            collection,
+        )
         return len(stale)
 
     # --------------------------------------------------------- redis plumbing -
@@ -965,6 +1055,124 @@ def _default_consumer() -> str:
     return f"worker-{int(time.time())}-{os.getpid()}"
 
 
+#: Values an operator writes for "on" in the router's run script.
+_ON_VALUES: Tuple[str, ...] = ("1", "true", "yes", "on")
+
+
+def _describe(exc: BaseException) -> str:
+    """
+    Name a failure the way an operator can act on it.
+
+    The exception's class alone says that a call failed; the engine's own
+    message says which collection and which constraint, which is the difference
+    between a fix and a restart.  Whitespace is folded and the text clipped,
+    because a proxy in front of the engine answers with a whole HTML page.
+    """
+    text = " ".join(str(exc).split())
+    if len(text) > _ERROR_DETAIL_CHARS:
+        text = text[:_ERROR_DETAIL_CHARS].rstrip() + "…"
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def _log_level(explicit: Optional[str]) -> Tuple[int, str]:
+    """
+    Resolve the logging level from the command line and the router's switches.
+
+    The router's own run script exports ``LLM_ROUTER_IN_DEBUG`` and
+    ``LLM_ROUTER_LOG_LEVEL``, and the worker wrapper reads those assignments,
+    so an operator who turns debug on for the router gets a debug worker
+    without repeating the switch.  An explicit ``--log-level`` still wins: it
+    is the narrower statement.
+
+    Parameters
+    ----------
+    explicit : str, optional
+        The ``--log-level`` value, or ``None``/``""`` when the operator did
+        not name one.
+
+    Returns
+    -------
+    Tuple[int, str]
+        The level and the plain-language reason for it, so the startup line can
+        name which of the three knobs won.
+    """
+    for value, reason in (
+        (explicit, "command line"),
+        (
+            (
+                "DEBUG"
+                if str(os.environ.get("LLM_ROUTER_IN_DEBUG", "")).strip().lower()
+                in _ON_VALUES
+                else None
+            ),
+            "LLM_ROUTER_IN_DEBUG",
+        ),
+        (os.environ.get("LLM_ROUTER_LOG_LEVEL"), "LLM_ROUTER_LOG_LEVEL"),
+    ):
+        name = str(value or "").strip().upper()
+        if not name:
+            continue
+        level = logging.getLevelName(name)
+        if isinstance(level, int):
+            return level, reason
+    return logging.INFO, "default"
+
+
+def _log_startup(
+    logger: Any, config: AgenticKnowledgeConfig, level: int, reason: str
+) -> None:
+    """
+    Write down what this worker is wired to, before it touches anything.
+
+    A worker that indexes into the wrong place is worse than one that refuses
+    to start, so the host, the stream it reads and the collection names it will
+    create are all on the console before the first event.  Credentials are not:
+    the presence of a secret is configuration worth confirming, its value is
+    not a log line.
+    """
+    worker = config.worker
+    logger.info(
+        "knowledge worker configuration: engine=%s prefix=%s auth=%s",
+        config.sse_host,
+        config.sse_prefix or "(client default)",
+        (
+            "token"
+            if config.sse_token
+            else (
+                "username" if config.sse_username and config.sse_password else "none"
+            )
+        ),
+    )
+    logger.info(
+        "  stream=%s group=%s consumer=%s batch=%d block_ms=%d",
+        config.stream_key,
+        worker.group,
+        config.worker.consumer or "(this process)",
+        worker.batch,
+        worker.block_ms,
+    )
+    logger.info(
+        "  collections=%s_<scope>[_docs|_sessions] embedder=%s reranker=%s",
+        config.collection_prefix,
+        worker.embedder,
+        worker.reranker,
+    )
+    logger.info(
+        "  chunking=%s retention=%ds redis=%s:%s/%s keys=%s",
+        (
+            f"{worker.chunk_tokens}+{worker.chunk_overlap}"
+            if worker.chunk_tokens
+            else "engine default"
+        ),
+        worker.retention_interval_seconds,
+        config.redis.host,
+        config.redis.port,
+        config.redis.db,
+        config.key_prefix,
+    )
+    logger.info("  logging at %s (from %s)", logging.getLevelName(level), reason)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Create the command-line parser."""
     parser = argparse.ArgumentParser(
@@ -991,8 +1199,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--log-level",
-        default="INFO",
-        help="Logging level (DEBUG, INFO, WARNING, ...).",
+        default=None,
+        help=(
+            "Logging level (DEBUG, INFO, WARNING, ...). Defaults to DEBUG "
+            "when LLM_ROUTER_IN_DEBUG is on and to LLM_ROUTER_LOG_LEVEL "
+            "otherwise, both of which the router's run script exports."
+        ),
     )
     return parser
 
@@ -1026,11 +1238,16 @@ def _build_worker(args: argparse.Namespace) -> KnowledgeIndexWorker:
         from dataclasses import replace
 
         config.worker = replace(config.worker, retention_interval_seconds=0)
+    level, level_reason = _log_level(getattr(args, "log_level", None))
     logger = logging.getLogger("agentic-kb-worker")
+    # The root gets INFO and this logger the requested level: raising the root
+    # would turn every library the worker imports — Redis sockets, the HTTP
+    # client — loose at once, and the operator asked about the worker.
     logging.basicConfig(
-        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
+        level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    logger.setLevel(level)
     _require_settings(config)
     try:
         client = _engine_client(config)
@@ -1039,6 +1256,7 @@ def _build_worker(args: argparse.Namespace) -> KnowledgeIndexWorker:
             "The knowledge worker needs the SSE client library installed "
             f"({exc})."
         ) from exc
+    _log_startup(logger, config, level, level_reason)
     _verify_model_names(client, config, logger)
     return KnowledgeIndexWorker(config=config, logger=logger, sse_client=client)
 

@@ -193,6 +193,19 @@ release tagged as `v<version>`.
   reason for a conflict (`state` still compares equal to the outcome string).
 
 ### Changed
+- **The worker says on the console what it is doing, and follows the router's
+  debug switch.** On start it writes its configuration block (engine, stream,
+  group, consumer, chunking, retention, and which switch chose the log level);
+  during a run it reports each batch's read/indexed/dropped counts and elapsed
+  time, names a created collection, reports what retention and a docs prune
+  removed, and beats an idle heartbeat every five minutes. `DEBUG` adds the
+  per-event line — kind, scope, thread, fingerprint. The level resolves from
+  `--log-level`, else `LLM_ROUTER_IN_DEBUG` (the router's own debug switch,
+  which the operator's wrapper already exports), else `LLM_ROUTER_LOG_LEVEL`,
+  else `INFO`, so a deployment the operator turned debug on gets a debug worker
+  without repeating the switch. A failure is logged with the engine's own
+  message, not only the exception's class, and credentials are reported by kind
+  (`auth=token`), never by value.
 - **The knowledge extra and its CLI package are named after the plugin.** `pip install
   radlab-llm-router-plugins[knowledge]` is now `…[agentic-knowledge]`, so an operator installing
   the extra sees the same name the pipeline does, and the console commands are built from
