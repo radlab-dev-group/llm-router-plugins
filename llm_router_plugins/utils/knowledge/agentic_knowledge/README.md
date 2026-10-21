@@ -91,7 +91,6 @@ worker with the rest of its arguments.
 ```bash
 # from the llm-router checkout (sibling of this one)
 bash run-agentic-kb-worker.sh [ROUTER_SCRIPT] [--once | --no-retain | --log-level …]
-bash run-agentic-kb-worker-pk.sh    # the personal run-rest-api-gunicorn-pk.sh environment
 ```
 
 Run it with `--once` from cron to drain a backlog, or without it as a daemon. `--once` logs what the batch did,
