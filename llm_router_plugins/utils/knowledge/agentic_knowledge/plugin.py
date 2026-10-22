@@ -312,6 +312,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         if not context.empty:
             payload = adapter.inject(payload, context.rendered)
 
+        recipe_trials = dict(cached.recipe_trials) if cached is not None else {}
         decision = (
             self._escalation.decide(
                 turn,
@@ -319,6 +320,7 @@ class AgenticKnowledgePlugin(PluginInterface):
                 policy,
                 mining.loop_count,
                 mining.signature_hash,
+                recipe_offered_at=recipe_trials.get(mining.signature_hash),
             )
             if self._escalation is not None
             else EscalationDecision()
@@ -362,7 +364,15 @@ class AgenticKnowledgePlugin(PluginInterface):
             # this generation built under a live read path stays intact, so
             # switching reads back on resumes instead of finding an empty block
             # it would treat as fresh.
-            self._remember_context(turn, context, target)
+            if (
+                self._escalation is not None
+                and mining.loop_count > 0
+                and self._escalation.has_strong_recipe(
+                    context, mining.signature_hash
+                )
+            ):
+                recipe_trials.setdefault(mining.signature_hash, mining.loop_count)
+            self._remember_context(turn, context, target, recipe_trials)
         self._annotate(payload, adapter, turn, context, decision, publish, docs)
         return payload
 
@@ -465,7 +475,11 @@ class AgenticKnowledgePlugin(PluginInterface):
         return cached.escalated_model or ""
 
     def _remember_context(
-        self, turn: AgentTurn, context: KnowledgeContext, escalated_model: str
+        self,
+        turn: AgentTurn,
+        context: KnowledgeContext,
+        escalated_model: str,
+        recipe_trials: Optional[Dict[str, int]] = None,
     ) -> None:
         """Remember the block for the rest of the generation, if caching is on."""
         cache = self._cache
@@ -480,6 +494,7 @@ class AgenticKnowledgePlugin(PluginInterface):
                 mode=turn.mode,
                 escalated=bool(escalated_model),
                 escalated_model=escalated_model,
+                recipe_trials=dict(recipe_trials or {}),
             ),
         )
 

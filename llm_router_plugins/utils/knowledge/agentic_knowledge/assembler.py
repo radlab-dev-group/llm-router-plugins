@@ -159,6 +159,10 @@ class KnowledgeHit:
         ``""`` outside the documentation collection.
     heading : str
         Heading path the section sits under, for the citation.
+    signature_hash : str
+        Exact failure identity, independent of retrieval relevance.
+    test_command : str
+        Verification command declared by a mined recipe.
     """
 
     category: str = ""
@@ -173,6 +177,8 @@ class KnowledgeHit:
     source: str = ""
     doc_type: str = ""
     heading: str = ""
+    signature_hash: str = ""
+    test_command: str = ""
 
 
 @dataclass(frozen=True)
@@ -192,7 +198,7 @@ class KnowledgeContext:
         The standing documentation digest that was injected, when any; the
         annotation reads its level, size and source files from here.
     best_recipe_score : float
-        Highest weighted score among the recipes; an escalation input.
+        Highest retrieval relevance among recipes, not a success estimate.
     deadends : Tuple[KnowledgeHit, ...]
         The dead ends among the hits.
     cache : str
@@ -404,6 +410,8 @@ class ContextAssembler:
                 source=meta.source if kind == KIND_DOC else "",
                 doc_type=doc_type,
                 heading=meta.heading if kind == KIND_DOC else "",
+                signature_hash=meta.signature_hash,
+                test_command=meta.test_command,
             ),
             meta=meta,
             vote=vote,
