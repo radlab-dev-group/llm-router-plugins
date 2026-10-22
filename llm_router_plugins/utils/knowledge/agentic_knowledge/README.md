@@ -47,6 +47,8 @@ pip install -e ".[agentic-knowledge]"               # sse-lib>=0.1.0 + redis>=5
 ```
 
 `sse_lib` depends only on `requests`. Without it, and without a configured host, the plugin loads and does nothing.
+Documentation uploads require both the client and SSE server to support the `upload_files(file_metadata=...)`
+contract; update both together. Older clients cannot preserve documentation metadata through file uploads.
 
 ### 2. Load it into the pipeline, after routing
 
@@ -123,7 +125,7 @@ graph LR
   M -->|XADD| ST[Redis Stream]
   ST --> W[Worker CLI]
   W --> FM[FastMasker]
-  W -->|index_documents| S
+  W -->|index_documents / upload_files| S
   C --> E[EscalationPolicy]
   E --> O[Payload + context + routing.knowledge]
 ```
@@ -311,7 +313,8 @@ patch 2 → pass`, the dead end contains only patch 1, while the recipe retains 
 The worker (`llm-router-agentic-kb-worker`) consumes the stream with a consumer group, masks every document with
 `FastMasker` and **discards the mappings** (no re-identification is possible downstream) — the filter keys
 (`thread_id`, `scope`, `kind`, `mode`, `phase`, …) are written verbatim so a document can be read back — creates the
-collection on first use, then `index_documents(category=<kind>, options=<metadata>)`. Logs never contain document text. Retention
+collection on first use, then sends mined events through `index_documents` and documentation through `upload_files`,
+preserving `category` and `options` metadata in both paths. Logs never contain document text. Retention
 deletes only this plugin's own documents older than the configured TTL (`session_archive` on `archive.ttl_seconds`).
 Events with an unknown version are acknowledged and logged; an indexing error is retried up to a bounded number of
 attempts and then dropped with a log, so one poison event cannot stall the stream.
@@ -340,17 +343,22 @@ llm-router-agentic-kb-docs --path /repo/webapp              # publish it to the 
 | Step        | What happens                                                                                          |
 |-------------|--------------------------------------------------------------------------------------------------------|
 | Scan        | `docs.patterns` below `repo_root`, skipping `docs.excluded_dirs` and never `.git`, symlinks or deep trees |
-| Split       | each file at its headings; a section keeps its heading path (`Guide > Deploy`) and is cut at `max_section_chars` |
-| Publish     | one `doc` event per section, to the same stream the miner uses — the worker masks it like any other document |
-| Index       | by the worker, into `<prefix>_<scope>_docs` with `category=doc` and `source_file`, `doc_type`, `heading` in its header |
+| Publish     | one `doc` event per whole file, without local splitting, to the same stream the miner uses |
+| Upload      | the worker masks the snapshot and sends it as a UTF-8 `.txt` attachment through `sse_lib.SSEClient.upload_files`; files for one collection share a request, including on retry |
+| Index       | SSE splits each uploaded document using `indexing_options` identical to collection `chunking`; `file_metadata` carries `category=doc` and `options`, including `source_file`, `doc_type` and `heading` |
 
-A file is republished when its **content** changes, not when it is looked at: the digest of the whole file feeds every
-section's fingerprint and the scan state (Redis, one key per scope: `<key_prefix>:docs:<scope>`) compares digests, so
-`touch` and a branch checkout across ten unchanged files publish nothing. A section whose content changed gets a new
+A file is republished when its **content** changes, not when it is looked at: the digest of the whole file feeds its
+document fingerprint and the scan state (Redis, one key per scope: `<key_prefix>:docs:<scope>`) compares digests, so
+`touch` and a branch checkout across ten unchanged files publish nothing. A file whose content changed gets a new
 document name — the digest is part of it — and the scan then publishes a `docs_prune` control message asking the worker
 to retire the name it superseded, which is also what removes the documents of a file that was deleted. **A scan that
 hit `max_files` or `max_total_bytes` publishes no prune at all**: pruning against a partial listing would delete the
 documentation the scan never reached, and the outcome says `truncated: true`.
+
+Switching to uploads does not automatically rewrite already-indexed, unchanged files: the scan still compares
+content digests. Their existing documents remain searchable; a content change publishes the replacement through
+the new upload path and prunes the old names. `docs.max_section_chars` and `DOCS_MAX_SECTION_CHARS` no longer control
+indexing — chunk sizes are configured on the worker instead.
 
 The documentation lives apart from mined knowledge, and the state says so: a listing records the collection it was
 written for, and a policy that moves the documentation to another collection finds no listing at all and republishes
@@ -522,7 +530,7 @@ means the feature is unavailable.
             "patterns": ["*.md", "*.markdown", "*.mdx"],
             "excluded_dirs": ["node_modules", "dist", "build", "vendor"],
             "max_files": 200, "max_file_bytes": 200000,
-            "max_total_bytes": 2000000, "max_section_chars": 1200,
+            "max_total_bytes": 2000000,
             "rescan_interval_seconds": 21600, "state_ttl_seconds": 7776000,
             "context_enabled": true, "context_max_chars": 700,
             "context_ttl_seconds": 86400}
@@ -608,7 +616,6 @@ All use the prefix `LLM_ROUTER_KNOWLEDGE_AGENTIC_`. Booleans accept `1/0`, `true
 | `…_DOCS_MAX_FILES`                    | `200`            | files read per scan; a scan that hits it prunes nothing   |
 | `…_DOCS_MAX_FILE_BYTES`               | `200000`         | largest documentation file read                           |
 | `…_DOCS_MAX_TOTAL_BYTES`              | `2000000`        | bytes read per scan                                       |
-| `…_DOCS_MAX_SECTION_CHARS`            | `1200`           | one documentation section, roughly one engine chunk       |
 | `…_DOCS_RESCAN_INTERVAL_SECONDS`      | `21600`          | per-process interval between scans of one repository      |
 | `…_DOCS_STATE_TTL_SECONDS`            | `7776000`        | lifetime of a scope's scan state (90 days)                |
 | `…_DOCS_CONTEXT_ENABLED`               | `true`           | the session carries the standing documentation map         |
@@ -637,13 +644,13 @@ Redis settings come from these fixed variables only — never from JSON, a Redis
 | `…_SSE_EMBEDDER`                            | empty          | **required** to create a collection             |
 | `…_SSE_RERANKER`                            | empty          | **required** to create a collection             |
 | `…_SSE_INDEX_TYPE`                          | `HNSW`         | `HNSW` or `IVF_FLAT`                            |
-| `…_SSE_CHUNK_TOKENS`                         | `400`          | chunk size declared for a **new** collection; `0` leaves the engine default (500 tokens, embedded text cut at 508) |
+| `…_SSE_CHUNK_TOKENS`                         | `400`          | chunk size sent on collection creation and every indexing request; `0` leaves the engine default (500 tokens, embedded text cut at 508) |
 | `…_SSE_CHUNK_OVERLAP`                        | `60`           | chunk overlap in tokens, must be `< SSE_CHUNK_TOKENS` |
 | `…_RETENTION_INTERVAL_SECONDS`              | `21600`        | seconds between retention passes; `0` disables  |
 
-Chunking is declared when a collection is **created** and never rewritten afterwards: change
-`…_SSE_CHUNK_TOKENS`/`…_SSE_CHUNK_OVERLAP` and only collections created from then on get the new split, so applying a
-new size means dropping the `<prefix>_<scope>[…_sessions]` collections and letting the worker index them again. The
+The same `max_tokens_in_chunk` and `number_of_overlap_tokens` are sent when a collection is **created** and on every
+indexing request. Changing `…_SSE_CHUNK_TOKENS`/`…_SSE_CHUNK_OVERLAP` does not rewrite an existing collection or its
+documents: recreate and re-index the affected collections (including `_docs` and `_sessions`) to keep them consistent. The
 default 400/60 sits under the 508 tokens the embedder cuts at, which a chunk of the engine's 500 default does not.
 
 CLI (worker): `--config <path>`, `--once` (drain one batch and exit — cron friendly), `--no-retain`, `--log-level`.
@@ -663,12 +670,36 @@ exception class, and credentials are reported by their kind (`auth=token`), neve
 llm-router-agentic-kb-docs --path /repo/webapp --dry-run   # list, publish nothing
 llm-router-agentic-kb-docs --path /repo/webapp --json      # publish, machine-readable outcome
 llm-router-agentic-kb-docs --path /repo/webapp --no-prune  # publish, keep superseded documents
+llm-router-agentic-kb-docs --path /repo/webapp --force    # replace queued docs and republish all files
 ```
 
-Same policy, same scan, same stream: the command only reads files and appends events, so the worker masks and indexes
+Same policy, same scan, same stream: the command reads files and publishes events, so the worker masks and indexes
 what it indexes for a mined episode and there is no second write path. It therefore needs the stream
 (`…_REDIS_HOST`) and never the engine. `--scope` overrides the scope key the proxy would derive from the directory, so
 a repository indexed by hand lands in the collection its agents read from.
+
+`--force` is for rebuilding after deleting the SSE database or collection, even when file contents have not changed.
+It deletes existing `doc` and `docs_prune` entries for the selected scope from the configured Redis stream,
+clears their deduplication claims (including claims for current files whose old entries were already trimmed),
+and republishes every scanned file. It refreshes the scan state after successful publication. Other scopes,
+recipes and session archives are untouched; it does **not** delete the SSE collection itself. `--no-prune`
+still prevents retiring superseded documents in SSE, but does not disable replacement of queued events.
+
+Stop the indexing workers and pause other publishers for this scope before using `--force`, then restart them
+afterwards. Stream deletion cannot cancel a batch a worker has already fetched. Replacement is not atomic:
+if Redis fails midway, the command exits unsuccessfully; rerun with `--force` to replace the partial attempt.
+Forced scans bypass `docs.max_files`, `docs.max_file_bytes` and `docs.max_total_bytes`, so a large changelog
+does not block rebuilding. File patterns, excluded directories and symlink restrictions still apply; normal scans
+keep their configured limits. Forced scans read all selected files into memory, so preview large repositories first.
+Unreadable files/directories or a truncated scan refuse replacement before touching the stream.
+`--force --dry-run` previews the same unlimited scan and never accesses Redis.
+
+The CLI reads Redis settings from **exported environment variables**, not from the scan directory or an automatically
+loaded `.env` file. `--path .` only chooses what to scan; previous indexing does not persist connection settings.
+An error saying `LLM_ROUTER_KNOWLEDGE_AGENTIC_REDIS_HOST is unset` occurs before inspecting any indexed state,
+and `--force` cannot fix it. Export the same `LLM_ROUTER_KNOWLEDGE_AGENTIC_REDIS_HOST` (and port, DB and credentials,
+if applicable) used by the worker in this shell before rerunning. `--config` selects the knowledge policy,
+not Redis connection settings.
 
 ---
 
