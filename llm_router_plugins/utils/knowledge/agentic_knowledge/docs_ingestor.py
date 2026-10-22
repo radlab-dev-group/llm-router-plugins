@@ -42,6 +42,7 @@ import json
 import os
 import posixpath
 import re
+import stat
 import threading
 import time
 
@@ -221,7 +222,7 @@ class ScanReport:
         Documentation files read.
     skipped : int
         Files that matched but could not be used — unreadable, or above the
-        per-file ceiling.
+        per-file ceiling — and directories that could not be scanned.
     truncated : bool
         ``True`` when a ceiling stopped the scan, which makes the listing
         partial and therefore useless for pruning.
@@ -289,6 +290,7 @@ class ScanOutcome:
             "files": self.files,
             "published": self.published,
             "pruned": self.pruned,
+            "unchanged": self.unchanged,
         }
         if self.reason:
             result["reason"] = self.reason
@@ -338,9 +340,9 @@ def scan_repository(
     *,
     patterns: Sequence[str] = DEFAULT_DOC_PATTERNS,
     excluded_dirs: Sequence[str] = DEFAULT_DOC_EXCLUDED_DIRS,
-    max_files: int = 200,
-    max_file_bytes: int = 200_000,
-    max_total_bytes: int = 2_000_000,
+    max_files: Optional[int] = 200,
+    max_file_bytes: Optional[int] = 200_000,
+    max_total_bytes: Optional[int] = 2_000_000,
     scope: str = "",
 ) -> ScanReport:
     """
@@ -364,12 +366,13 @@ def scan_repository(
         Filename patterns to pick up, matched case-insensitively.
     excluded_dirs : Sequence[str]
         Directory names to skip at any depth.
-    max_files : int
-        Most files to read.
-    max_file_bytes : int
-        Largest file to read; a bigger one is counted as skipped.
-    max_total_bytes : int
-        Most bytes to read in one scan.
+    max_files : int, optional
+        Most files to read; ``None`` disables this ceiling.
+    max_file_bytes : int, optional
+        Largest file to read; a bigger one is counted as skipped. ``None``
+        disables this ceiling.
+    max_total_bytes : int, optional
+        Most bytes to read in one scan; ``None`` disables this ceiling.
     scope : str
         Repository key the records belong to; part of every fingerprint.
 
@@ -391,7 +394,14 @@ def scan_repository(
     skipped = 0
     total = 0
     truncated = False
-    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+
+    def walk_error(error: OSError) -> None:
+        nonlocal skipped
+        skipped += 1
+
+    for directory, dirnames, filenames in os.walk(
+        root, followlinks=False, onerror=walk_error,
+    ):
         relative = directory[len(root) :]
         if relative.count(os.sep) >= _MAX_SCAN_DEPTH:
             dirnames[:] = []
@@ -400,18 +410,21 @@ def scan_repository(
             if not _matches(name, wanted):
                 continue
             path = os.path.join(directory, name)
-            if os.path.islink(path) or not os.path.isfile(path):
+            if os.path.islink(path):
                 continue
             try:
                 info = os.stat(path)
             except OSError:
                 skipped += 1
                 continue
-            if info.st_size > max_file_bytes:
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            if max_file_bytes is not None and info.st_size > max_file_bytes:
                 skipped += 1
                 continue
-            if files + 1 > int(max_files) or total + info.st_size > int(
-                max_total_bytes
+            if (max_files is not None and files + 1 > int(max_files)) or (
+                max_total_bytes is not None
+                and total + info.st_size > int(max_total_bytes)
             ):
                 truncated = True
                 break
@@ -908,6 +921,7 @@ class DocsIndexer:
         model: str = "",
         generation: str = "",
         force: bool = False,
+        republish: bool = False,
         allow_prune: bool = True,
     ) -> ScanOutcome:
         """
@@ -928,6 +942,11 @@ class DocsIndexer:
             Command generation the scan ran in.
         force : bool, optional
             Ignore the in-process cooldown; the operator's command uses it.
+        republish : bool, optional
+            Replace this scope's queued documentation and publish every file,
+            bypassing scan state, publication deduplication and the automatic
+            scan's file/byte ceilings. Requires a complete scan; workers and
+            other publishers must be paused.
         allow_prune : bool, optional
             ``False`` retires nothing: the scan publishes new and changed files
             and leaves the superseded documents where they are.
@@ -939,7 +958,7 @@ class DocsIndexer:
         """
         if not self.config.docs_enabled or self.publisher is None:
             return ScanOutcome(reason="disabled")
-        if not force and not self.config.docs_auto_index:
+        if not (force or republish) and not self.config.docs_auto_index:
             # ``docs.auto_index`` off means the operator indexes documentation
             # by hand, so a request must not quietly do it instead.
             return ScanOutcome(status=STATUS_SKIPPED, reason="manual")
@@ -949,7 +968,7 @@ class DocsIndexer:
             return ScanOutcome(status=STATUS_SKIPPED, reason="no scope")
         if not repo_root:
             return ScanOutcome(status=STATUS_SKIPPED, reason="no root")
-        if not force and self._in_cooldown(scope, repo_root):
+        if not (force or republish) and self._in_cooldown(scope, repo_root):
             return ScanOutcome(status=STATUS_SKIPPED, reason="cooldown")
         self._mark_scanned(scope, repo_root)
 
@@ -957,9 +976,9 @@ class DocsIndexer:
             repo_root,
             patterns=self.config.docs_patterns,
             excluded_dirs=self.config.docs_excluded_dirs,
-            max_files=self.config.docs_max_files,
-            max_file_bytes=self.config.docs_max_file_bytes,
-            max_total_bytes=self.config.docs_max_total_bytes,
+            max_files=None if republish else self.config.docs_max_files,
+            max_file_bytes=None if republish else self.config.docs_max_file_bytes,
+            max_total_bytes=None if republish else self.config.docs_max_total_bytes,
             scope=scope,
         )
         if report.reason:
@@ -967,6 +986,17 @@ class DocsIndexer:
             # cannot read the repository at all.  That is a deployment shape,
             # not an outage, and it is reported as one.
             return ScanOutcome(status=STATUS_SKIPPED, reason=report.reason)
+        if republish and (report.truncated or report.skipped):
+            return ScanOutcome(
+                status=STATUS_UNAVAILABLE,
+                reason=(
+                    "incomplete force scan: "
+                    f"unreadable files/directories={report.skipped}, "
+                    f"truncated={report.truncated}; stream unchanged"
+                ),
+                files=report.files,
+                truncated=report.truncated,
+            )
         if self.state is None or not self.state.available:
             return ScanOutcome(
                 status=STATUS_UNAVAILABLE,
@@ -983,9 +1013,11 @@ class DocsIndexer:
         by_file = _group(report.records)
         changed = _changed_files(entries, by_file)
         stale = _superseded_names(entries, by_file, changed)
+        if republish:
+            changed = list(by_file)
 
         published: int = 0
-        if changed:
+        if changed or republish:
             events = doc_events(
                 _records_of(by_file, changed),
                 scope=scope,
@@ -993,7 +1025,9 @@ class DocsIndexer:
                 model=model,
                 generation=generation,
             )
-            attempted = self._publish(events)
+            attempted = self._publish(
+                events, replace_scope=scope if republish else ""
+            )
             if attempted is None:
                 return ScanOutcome(
                     status=STATUS_UNAVAILABLE,
@@ -1097,16 +1131,23 @@ class DocsIndexer:
         with self._lock:
             self._last_scan[f"{scope}\x00{repo_root}"] = float(self.clock())
 
-    def _publish(self, events: Sequence[KnowledgeEvent]) -> Optional[int]:
+    def _publish(
+        self, events: Sequence[KnowledgeEvent], *, replace_scope: str = ""
+    ) -> Optional[int]:
         """Hand events to the worker; ``None`` when the stream refused them."""
-        if not events:
+        if not events and not replace_scope:
             return 0
         try:
-            status = self.publisher.publish(events)  # type: ignore[union-attr]
+            if replace_scope:
+                status = self.publisher.replace_docs(  # type: ignore[union-attr]
+                    replace_scope, events
+                )
+            else:
+                status = self.publisher.publish(events)  # type: ignore[union-attr]
         except Exception as exc:
             self._warn("knowledge docs publish failed: %s", type(exc).__name__)
             return None
-        if getattr(status, "status", "") == STATUS_UNAVAILABLE:
+        if getattr(status, "status", "") != STATUS_OK:
             return None
         return int(getattr(status, "published", 0))
 

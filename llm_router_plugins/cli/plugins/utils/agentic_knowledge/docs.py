@@ -12,9 +12,9 @@ same configuration, and publishes to the same stream — so the indexing worker
 masks and writes what it writes for a mined episode, and there is no second
 write path to keep honest.
 
-Nothing here talks to the search engine: the command only reads files and
-appends events.  A repository can therefore be indexed from a machine that
-cannot even reach the engine, as long as it reaches the stream.
+Nothing here talks to the search engine: the command reads files and publishes
+events, optionally replacing queued documentation. A repository can be indexed
+from a machine that cannot reach the engine, as long as it reaches the stream.
 """
 
 import argparse
@@ -72,6 +72,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="List what would be published and exit; reads no Redis, "
         "publishes nothing.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace this scope's documentation events in Redis and republish "
+        "all files, even unchanged ones, without automatic scan file/byte limits. "
+        "Pause workers and other publishers first.",
     )
     parser.add_argument(
         "--no-prune",
@@ -132,7 +139,10 @@ def _publisher(config: Any, logger: logging.Logger) -> KnowledgeEventPublisher:
         raise SystemExit(
             "Documentation is published to the knowledge stream, so this "
             "command needs Redis "
-            f"(LLM_ROUTER_KNOWLEDGE_AGENTIC_REDIS_HOST is unset){problem}."
+            f"(LLM_ROUTER_KNOWLEDGE_AGENTIC_REDIS_HOST is unset){problem}. "
+            "Export the same Redis settings used by the worker; this CLI does "
+            "not load .env files automatically. Previous indexing does not "
+            "persist connection settings."
         )
     return KnowledgeEventPublisher(
         connection=config.redis,
@@ -144,15 +154,15 @@ def _publisher(config: Any, logger: logging.Logger) -> KnowledgeEventPublisher:
     )
 
 
-def _report_scan(config: Any, root: str, scope: str) -> int:
+def _report_scan(config: Any, root: str, scope: str, *, force: bool = False) -> int:
     """Print what a scan would publish; return the number of documents."""
     report = scan_repository(
         root,
         patterns=config.docs_patterns,
         excluded_dirs=config.docs_excluded_dirs,
-        max_files=config.docs_max_files,
-        max_file_bytes=config.docs_max_file_bytes,
-        max_total_bytes=config.docs_max_total_bytes,
+        max_files=None if force else config.docs_max_files,
+        max_file_bytes=None if force else config.docs_max_file_bytes,
+        max_total_bytes=None if force else config.docs_max_total_bytes,
         scope=scope,
     )
     for record in report.records:
@@ -161,7 +171,9 @@ def _report_scan(config: Any, root: str, scope: str) -> int:
             where = f"{where} [{record.heading}]"
         print(f"{record.doc_type:<13} {where}  {len(record.text)} chars")
     if report.skipped:
-        print(f"{report.skipped} file(s) skipped (unreadable or too large)")
+        print(f"{report.skipped} file(s)/directory(s) skipped (unreadable or too large)")
+        if force:
+            print("force would abort: unreadable files/directories; stream unchanged")
     if report.truncated:
         print(
             "scan truncated by the configured ceilings: superseded documents "
@@ -224,7 +236,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.dry_run:
         print(f"scope={scope} root={root}")
-        _report_scan(config, root, scope)
+        _report_scan(config, root, scope, force=args.force)
         return 0
 
     indexer = DocsIndexer(
@@ -237,6 +249,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         root,
         agent="cli",
         force=True,
+        republish=args.force,
         allow_prune=not args.no_prune,
     )
     if args.json:

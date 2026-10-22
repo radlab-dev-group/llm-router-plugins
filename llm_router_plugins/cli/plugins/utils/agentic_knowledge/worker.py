@@ -127,6 +127,9 @@ _TRIES_TTL_SECONDS = 86_400
 #: empty one, and an operator who wants a different description pre-creates it.
 _COLLECTION_DESCRIPTION = "Agentic knowledge base (auto-created by llm-router)."
 
+#: Plain text keeps markdown and the machine-readable header intact in SSE.
+_DOC_FILE_SUFFIX = ".txt"
+
 #: Metadata fields a reader filters on, written verbatim and never masked.
 #: They are the join between the two halves of the layer: the search asks
 #: ``{"operator": "eq", "field": {"thread_id": …}}`` with the value the request
@@ -400,9 +403,7 @@ class KnowledgeIndexWorker:
         documents = [document for _entry_id, _event, document in items]
         try:
             self._ensure_collection(collection)
-            self._sse_client().index_documents(
-                collection, documents, indexing_options=self._chunking()
-            )
+            self._write_documents(collection, documents)
         except Exception as exc:
             self._collections.discard(collection)
             self._log(
@@ -543,10 +544,7 @@ class KnowledgeIndexWorker:
             )
             return 0
         entries = _claimed_entries(claimed)
-        for entry_id, fields in entries:
-            if self._stop:
-                break
-            self._process_entry(entry_id, fields)
+        self._process_batch(entries)
         return len(entries)
 
     def _warn_backlog(self) -> None:
@@ -596,9 +594,46 @@ class KnowledgeIndexWorker:
         # The same chunking the collection was created with: the engine splits
         # what this call tells it to, and a document indexed with other numbers
         # is a document split unlike its neighbours.
-        self._sse_client().index_documents(
-            collection, [document], indexing_options=self._chunking()
-        )
+        self._write_documents(collection, [document])
+
+    def _write_documents(
+        self, collection: str, documents: Sequence[Dict[str, Any]]
+    ) -> None:
+        """Upload whole documentation files; mined events remain structured texts.
+
+        The snapshots came through the stream, so the worker does not reopen
+        repository paths.  Attachments are masked UTF-8 held in memory, with
+        metadata carried separately through the SSE library's file contract.
+        Repeated deliveries share one attachment but keep their own ACKs.
+        """
+        client = self._sse_client()
+        texts = []
+        files = {}
+        file_metadata = {}
+        for document in documents:
+            if document["category"] != KIND_DOC:
+                texts.append(document)
+                continue
+            name = document["filepath"] + _DOC_FILE_SUFFIX
+            content = document["pages"][0]["page_content"].encode("utf-8")
+            metadata = {"category": KIND_DOC, "options": document["options"]}
+            if name in files and (
+                files[name] != content or file_metadata[name] != metadata
+            ):
+                raise ValueError("conflicting documentation attachments")
+            files[name] = content
+            file_metadata[name] = metadata
+        if files:
+            client.upload_files(
+                collection,
+                [(name, content, "text/plain") for name, content in files.items()],
+                indexing_options=self._chunking(),
+                file_metadata=file_metadata,
+            )
+        if texts:
+            client.index_documents(
+                collection, texts, indexing_options=self._chunking()
+            )
 
     def _prepare(self, event: KnowledgeEvent) -> str:
         """
@@ -844,6 +879,8 @@ class KnowledgeIndexWorker:
         collection = self._config.collection(event.scope, KIND_DOC)
         wanted = {name for name in names} | {
             f"{name}{ENGINE_NAME_SUFFIX}" for name in names
+        } | {
+            f"{name}{_DOC_FILE_SUFFIX}" for name in names
         }
         client = self._sse_client()
         try:

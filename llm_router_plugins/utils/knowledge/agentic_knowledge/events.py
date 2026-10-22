@@ -199,6 +199,75 @@ class KnowledgeEventPublisher:
             break
         return self._status(published, deduplicated, errors, reason)
 
+    def replace_docs(
+        self, scope: str, events: Sequence[KnowledgeEvent]
+    ) -> PublishStatus:
+        """Replace one scope's queued documentation, including dedup claims.
+
+        This operator-only operation is not atomic with running consumers or
+        publishers: pause them first. A failure may leave a partial replacement;
+        retry the forced scan, which clears it before publishing again.
+        """
+        if not scope or any(
+            event.scope != scope or event.kind != "doc" for event in events
+        ):
+            return PublishStatus(STATUS_UNAVAILABLE, reason="scope")
+        client = self._handle.get()
+        if client is None:
+            return PublishStatus(STATUS_UNAVAILABLE, reason="connection")
+        try:
+            # Bound the scan to the existing tail; never chase concurrent writes.
+            tail = client.xrevrange(self._stream_key, count=1)
+            if tail:
+                end = tail[0][0]
+                start = "-"
+                while True:
+                    batch = client.xrange(
+                        self._stream_key, min=start, max=end, count=200
+                    )
+                    if not batch:
+                        break
+                    for entry_id, fields in batch:
+                        raw = fields.get("event", fields.get(b"event"))
+                        try:
+                            event = json.loads(raw)
+                        except (TypeError, ValueError, UnicodeError):
+                            continue
+                        if (
+                            not isinstance(event, dict)
+                            or event.get("scope") != scope
+                        ):
+                            continue
+                        if event.get("kind") not in ("doc", "docs_prune"):
+                            continue
+                        client.xdel(self._stream_key, entry_id)
+                        fingerprint = event.get("fingerprint")
+                        if isinstance(fingerprint, str) and fingerprint:
+                            client.delete(f"{self._key_prefix}:seen:{fingerprint}")
+                    last = batch[-1][0]
+                    if last == end:
+                        break
+                    # Exclusive XRANGE bounds require Redis 6.2. Advance the
+                    # inclusive ID instead, retaining Redis 5 compatibility.
+                    milliseconds, sequence = map(
+                        int,
+                        (last.decode("ascii") if isinstance(last, bytes) else str(last)).split("-"),
+                    )
+                    if sequence == 2**64 - 1:
+                        start = f"{milliseconds + 1}-0"
+                    else:
+                        start = f"{milliseconds}-{sequence + 1}"
+            # Claims can outlive trimmed stream entries, or the entire stream.
+            for event in events:
+                client.delete(self._seen_key(event))
+        except Exception as exc:
+            self._warn(
+                "knowledge docs stream replacement failed: %s: %s",
+                type(exc).__name__, exc,
+            )
+            return PublishStatus(STATUS_UNAVAILABLE, errors=1, reason="replace")
+        return self.publish(events)
+
     def _status(
         self, published: int, deduplicated: int, errors: int, reason: str
     ) -> PublishStatus:
