@@ -559,14 +559,18 @@ def test_a_doc_event_is_indexed_into_the_scopes_collection():
     worker = _worker(sse=sse)
     worker.index_event(event)
 
-    collection, documents = sse.indexed[0]
+    collection, files, metadata = sse.uploaded[0]
     # Documentation is indexed apart from mined knowledge: it is written on a
     # human's clock, re-indexed as a set, and read with its own metadata
     # restriction, so it lives in a collection of its own.
     assert collection == "agentic_kb_webapp_docs"
-    assert documents[0]["category"] == "doc"
-    assert documents[0]["filepath"].startswith("doc:")
-    assert 'src="docs/guide.md"' in documents[0]["pages"][0]["page_content"]
+    assert len(files) == 1
+    name, content, mime = files[0]
+    assert metadata[name]["category"] == "doc"
+    assert name.startswith("doc:") and name.endswith(".txt")
+    assert mime == "text/plain"
+    assert 'src="docs/guide.md"' in content.decode("utf-8")
+    assert not sse.indexed
 
 
 def test_a_prune_event_deletes_the_documents_the_engine_holds():

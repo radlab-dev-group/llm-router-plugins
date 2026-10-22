@@ -21,6 +21,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
     ModePolicy,
     SourcePolicy,
+    WorkerSettings,
 )
 
 
@@ -531,7 +532,12 @@ def test_a_ceiling_below_its_floor_is_a_configuration_error():
         AgenticKnowledgeConfig.from_json('{"docs": {"max_section_chars": 10}}')
         is not None
     )
-    with pytest.raises(ValueError, match="worker.chunk_overlap"):
+    with pytest.raises(ValueError, match="Unknown knowledge config keys"):
         AgenticKnowledgeConfig.from_json(
             '{"worker": {"chunk_tokens": 400, "chunk_overlap": 400}}'
         )
+    config = AgenticKnowledgeConfig(
+        worker=WorkerSettings(chunk_tokens=400, chunk_overlap=400)
+    )
+    with pytest.raises(ValueError, match="worker.chunk_overlap"):
+        config.validate()

@@ -387,6 +387,7 @@ class FakeSSE:
         #: empty by default so a double that never lists keeps old behaviour.
         self.catalogue = tuple(catalogue or ())
         self.indexed = []
+        self.uploaded = []
         #: The ``indexing_options`` of each indexed call, in order: a test can
         #: see what chunking the worker sent with the documents.
         self.indexing_options = []
@@ -429,6 +430,14 @@ class FakeSSE:
     def index_documents(self, collection, documents, indexing_options=None):
         self._maybe_fail("index_documents")
         self.indexed.append((collection, documents))
+        self.indexing_options.append(indexing_options)
+        return {}
+
+    def upload_files(
+        self, collection, files, *, indexing_options=None, file_metadata=None
+    ):
+        self._maybe_fail("upload_files")
+        self.uploaded.append((collection, files, file_metadata))
         self.indexing_options.append(indexing_options)
         return {}
 
