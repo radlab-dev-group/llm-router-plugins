@@ -201,7 +201,6 @@
     "max_files": 200,
     "max_file_bytes": 200000,
     "max_total_bytes": 2000000,
-    "max_section_chars": 1200,
     "rescan_interval_seconds": 21600,
     "state_ttl_seconds": 7776000,
     "context_enabled": true,
