@@ -43,7 +43,7 @@ JSON structure::
       "docs": {"enabled": true, "auto_index": true,
                "patterns": ["*.md"], "excluded_dirs": ["node_modules"],
                "max_files": 200, "max_file_bytes": 200000,
-               "max_total_bytes": 2000000, "max_section_chars": 1200,
+               "max_total_bytes": 2000000,
                "rescan_interval_seconds": 21600,
                "state_ttl_seconds": 7776000}
     }
@@ -179,12 +179,16 @@ _DEFAULT_RETENTION_INTERVAL_SECONDS = 21_600
 _DEFAULT_MAX_PENDING = 1_000
 _DEFAULT_WORKER_BATCH = 32
 
-#: Chunking declared for a collection the worker creates.  The engine cuts the
-#: *embedded* text at 508 tokens however a collection is declared, so a chunk
-#: of 500 is truncated by the embedder while one of 400 is not: at 400 tokens
-#: with a 60-token overlap a chunk and its neighbour still share a sentence or
-#: two, which is what makes a recipe's failure and its fix retrieve together.
-#: ``0`` still means "declare nothing" and leaves the engine's own default.
+#: Chunking of a collection: declared when the worker **creates** one and
+#: repeated on every indexing call, because the engine only splits a document
+#: the way the call says, and a document indexed with different numbers than
+#: the collection declares is a document split unlike its neighbours.  The
+#: engine cuts the *embedded* text at 508 tokens however a collection is
+#: declared, so a chunk of 500 is truncated by the embedder while one of 400 is
+#: not: at 400 tokens with a 60-token overlap a chunk and its neighbour still
+#: share a sentence or two, which is what makes a recipe's failure and its fix
+#: retrieve together.  ``0`` means "say nothing" at creation and at indexing
+#: alike, which leaves the engine's own default on both sides.
 _DEFAULT_CHUNK_TOKENS = 400
 _DEFAULT_CHUNK_OVERLAP = 60
 _DEFAULT_WORKER_BLOCK_MS = 5_000
@@ -195,11 +199,6 @@ _DEFAULT_WORKER_BLOCK_MS = 5_000
 _DEFAULT_DOC_MAX_FILES = 200
 _DEFAULT_DOC_MAX_FILE_BYTES = 200_000
 _DEFAULT_DOC_MAX_TOTAL_BYTES = 2_000_000
-
-#: Size of one documentation section, in characters.  Aimed at the engine's
-#: chunking (400 tokens by default) so a section is one chunk that carries its
-#: own heading, which is what makes a retrieved fragment citable.
-_DEFAULT_DOC_SECTION_CHARS = 1_200
 
 #: How often one process looks at the repository's documentation again.
 _DEFAULT_DOC_RESCAN_INTERVAL_SECONDS = 21_600
@@ -309,12 +308,14 @@ class WorkerSettings:
     index_type : str
         Vector index type for a new collection.
     chunk_tokens : int
-        Chunk size declared for a new collection; ``0`` leaves the server
-        default.  Applied when a collection is *created* only — changing it
-        never re-splits one that already exists.
+        Chunk size, in tokens: declared when a collection is created and sent
+        again on every indexing call, so a document is split the way the
+        collection says it is split.  Changing it never re-splits a collection
+        that already exists; ``0`` declares nothing on either side and leaves
+        the engine's own default.
     chunk_overlap : int
-        Chunk overlap declared for a new collection, in tokens, and smaller
-        than *chunk_tokens*.
+        Chunk overlap, in tokens, sent with the same two-sided rule and always
+        smaller than *chunk_tokens*.
     retention_interval_seconds : int
         Seconds between retention passes; ``0`` disables them.
     max_pending : int
@@ -394,7 +395,6 @@ class AgenticKnowledgeConfig:
     docs_max_files: int = _DEFAULT_DOC_MAX_FILES
     docs_max_file_bytes: int = _DEFAULT_DOC_MAX_FILE_BYTES
     docs_max_total_bytes: int = _DEFAULT_DOC_MAX_TOTAL_BYTES
-    docs_max_section_chars: int = _DEFAULT_DOC_SECTION_CHARS
     docs_rescan_interval_seconds: int = _DEFAULT_DOC_RESCAN_INTERVAL_SECONDS
     docs_state_ttl_seconds: int = _DEFAULT_DOC_STATE_TTL_SECONDS
     #: Whether the session carries a stable digest of the repository's own
@@ -596,10 +596,6 @@ class AgenticKnowledgeConfig:
                 docs.get("max_total_bytes", _DEFAULT_DOC_MAX_TOTAL_BYTES),
                 "docs.max_total_bytes",
             ),
-            docs_max_section_chars=_positive(
-                docs.get("max_section_chars", _DEFAULT_DOC_SECTION_CHARS),
-                "docs.max_section_chars",
-            ),
             docs_rescan_interval_seconds=_non_negative(
                 docs.get(
                     "rescan_interval_seconds", _DEFAULT_DOC_RESCAN_INTERVAL_SECONDS
@@ -709,7 +705,6 @@ class AgenticKnowledgeConfig:
             ("DOCS_MAX_FILES", "docs_max_files", _positive),
             ("DOCS_MAX_FILE_BYTES", "docs_max_file_bytes", _positive),
             ("DOCS_MAX_TOTAL_BYTES", "docs_max_total_bytes", _positive),
-            ("DOCS_MAX_SECTION_CHARS", "docs_max_section_chars", _positive),
             (
                 "DOCS_RESCAN_INTERVAL_SECONDS",
                 "docs_rescan_interval_seconds",
@@ -811,12 +806,19 @@ class AgenticKnowledgeConfig:
             raise ValueError(
                 "docs.max_total_bytes must not be below docs.max_file_bytes"
             )
-        if self.docs_max_section_chars < 200:
-            raise ValueError(
-                "docs.max_section_chars must be at least 200 characters"
-            )
         if not any(str(pattern).strip() for pattern in self.docs_patterns):
             raise ValueError("docs.patterns must name at least one file pattern")
+        # The same pair the worker declares on a collection and repeats on every
+        # indexing call; the engine refuses ``overlap >= chunk`` and a policy
+        # that says so is a deployment that indexes nothing.
+        if self.worker.chunk_tokens and not (
+            0 <= self.worker.chunk_overlap < self.worker.chunk_tokens
+        ):
+            raise ValueError(
+                "worker.chunk_overlap must be at least 0 and below"
+                f" worker.chunk_tokens, got {self.worker.chunk_overlap} for"
+                f" {self.worker.chunk_tokens}"
+            )
         if self.doc_context_max_chars < 120:
             raise ValueError(
                 "docs.context_max_chars must be at least 120 characters"

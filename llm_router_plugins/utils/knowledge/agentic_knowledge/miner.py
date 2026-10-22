@@ -30,6 +30,7 @@ which is what makes a retried request harmless.
 
 import datetime
 import re
+import shlex
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -67,21 +68,10 @@ _RECIPE_MIN_PATCHES = 1
 
 _WINDOW_CHUNK_RE = re.compile(r"\n(?=\[[a-z_]+\]\n)")
 
-#: A rerun that narrows the suite away: passing it says nothing about the tests
-#: that were left out, which is exactly the test that failed.
-_EXCLUSION_RE = re.compile(
-    r"(?:^|\s)(?:-k\b|--deselect|--ignore(?:-path)?|--collect-only|--co\b|-m\b)(?:\s|$)"
-)
-
 #: How pytest is launched as a module: the ``-m`` of an invocation does
 #: not narrow anything, and must not be read as the ``-m`` that selects markers.
 _MODULE_LAUNCHER_RE = re.compile(
     r"^\s*\S*python\d*(?:\.\d*)?\s+-m\s+(?=pytest\b|unittest\b)"
-)
-
-#: Source or test file a command line names.
-_TEST_FILE_RE = re.compile(
-    r"[\w./@-]+\.(?:py|pyi|go|rs|ts|tsx|js|jsx|java|kt|rb|php|cs|c|cc|cpp|h)"
 )
 
 
@@ -128,6 +118,9 @@ class _Failure:
     green_command: str = ""
     #: Position of the green run, ``-1`` when there was none.
     resolved_at: int = -1
+    #: Closed attempts retain only patches preceding their repeated failure.
+    failed_attempts: List["_Failure"] = field(default_factory=list)
+    attempt_start: int = 0
 
     @property
     def first_identity(self) -> str:
@@ -209,9 +202,9 @@ class EpisodeMiner:
             for event in (
                 *(self._recipe(turn, item) for item in failures if item.verified()),
                 *(
-                    self._deadend(turn, item)
+                    self._deadend(turn, attempt)
                     for item in failures
-                    if item.later_failures
+                    for attempt in item.failed_attempts
                 ),
             )
             if event is not None
@@ -244,6 +237,9 @@ class EpisodeMiner:
         the same signature did not verify anything, and publishing it as a recipe
         would both write a fix that does not work and hand the escalation policy
         a "strong recipe" that keeps the looping model in place.
+
+        Each repeat closes the pending attempt.  Its dead end is a snapshot,
+        while the episode keeps the cumulative diff for a later verified recipe.
         """
         texts = _output_texts(turn)
         commands = _call_arguments(turn)
@@ -259,6 +255,27 @@ class EpisodeMiner:
                     else None
                 )
                 if known is not None:
+                    if len(known.patches) > known.attempt_start:
+                        previous = (
+                            known.later_failures[-1]
+                            if known.later_failures
+                            else known.evidence
+                        )
+                        known.failed_attempts.append(
+                            _Failure(
+                                evidence=previous,
+                                signature=known.signature,
+                                command=_command_line(
+                                    commands.get(previous.call_id) or ""
+                                ),
+                                patches=known.patches[known.attempt_start:],
+                                patch_positions=known.patch_positions[
+                                    known.attempt_start:
+                                ],
+                                later_failures=[evidence],
+                            )
+                        )
+                    known.attempt_start = len(known.patches)
                     known.later_failures.append(evidence)
                     known.resolved_by = None
                     known.resolved_at = -1
@@ -338,9 +355,9 @@ class EpisodeMiner:
         if len(failure.patches) < _RECIPE_MIN_PATCHES or failure.signature is None:
             return None
         patch_text = self._patch_text(turn, failure.patches)
-        command = failure.green_command or self._command_text(
-            turn, failure.resolved_by
-        )
+        command = (
+            failure.green_command or self._command_text(turn, failure.resolved_by)
+        )[:200]
         body = "\n".join(
             part
             for part in (
@@ -372,10 +389,17 @@ class EpisodeMiner:
         if not failure.patches or failure.signature is None:
             return None
         patch_text = self._patch_text(turn, failure.patches)
+        paths = _deduplicated(
+            re.findall(
+                r"^\*\*\* (?:(?:Update|Add|Delete) File|Move to): (.+)$",
+                patch_text,
+                re.MULTILINE,
+            )
+        )
         body = "\n".join(
             (
                 f"Failure: {failure.signature.signature}",
-                f"Attempted: {', '.join(turn.touched_paths[:12]) or 'unknown files'}",
+                f"Attempted: {', '.join(paths[:12]) or 'unknown files'}",
                 "Outcome: the same failure was still there afterwards.",
                 "",
                 "Change that did not fix it:",
@@ -388,9 +412,10 @@ class EpisodeMiner:
             body,
             signature=failure.signature,
             parts=self._episode_parts(turn, "deadend", failure),
-            test_command=failure.command
-            or self._command_text(turn, failure.evidence),
-            paths=_merge_paths(turn.touched_paths, failure.signature.paths),
+            test_command=(
+                failure.command or self._command_text(turn, failure.evidence)
+            )[:200],
+            paths=_merge_paths(paths, failure.signature.paths),
             phase=_episode_phase(turn, failure),
         )
 
@@ -589,18 +614,18 @@ def _command_line(raw: str) -> str:
         return ""
     text = raw.strip()
     if not text.startswith("{"):
-        return text[:200]
+        return text
     import json
 
     try:
         decoded = json.loads(text)
     except (TypeError, ValueError):
-        return text[:200]
+        return text
     if isinstance(decoded, dict):
         for key in ("cmd", "command", "input"):
             value = decoded.get(key)
             if isinstance(value, str) and value.strip():
-                return value.strip()[:200]
+                return value.strip()
     return ""
 
 
@@ -623,14 +648,36 @@ def _deduplicated(lines: Iterable[str]) -> Tuple[str, ...]:
     return tuple(kept)
 
 
-def _normalized_command(raw: str) -> str:
-    """A command line compared against another one: whitespace, not much else."""
-    return " ".join((raw or "").split())
-
-
-def _test_files(command: str) -> Tuple[str, ...]:
-    """Test file paths a command names, e.g. ``pytest tests/test_a.py``."""
-    return tuple(_TEST_FILE_RE.findall(command or ""))
+def _verification_scope(command: str) -> Optional[Tuple[str, ...]]:
+    """Read an explicit scope, abstaining on shell syntax or unknown options."""
+    if not command or re.search(r"[;&|<>$`\n\r*?]", command):
+        return None
+    try:
+        tokens = shlex.split(_MODULE_LAUNCHER_RE.sub("", command))
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    if tokens[0] != "pytest":
+        # Other runners must match exactly, with no unrecognized options.
+        if any(token.startswith("-") for token in tokens[1:]):
+            return None
+        return tuple(tokens)
+    targets: List[str] = []
+    for token in tokens[1:]:
+        if re.fullmatch(r"-[qv]+", token) or token in (
+            "-s",
+            "--quiet",
+            "--verbose",
+            "--disable-warnings",
+            "--no-header",
+            "--no-summary",
+        ):
+            continue
+        if token.startswith("-") or token.startswith("@"):
+            return None
+        targets.append(token)
+    return ("pytest", *sorted(set(targets)))
 
 
 def _verifies(failing: str, green: str) -> bool:
@@ -654,19 +701,14 @@ def _verifies(failing: str, green: str) -> bool:
     Returns
     -------
     bool
-        ``True`` when the green run re-ran the failing test: the same command, or
-        the same named test files without narrowing anything away.
+        ``True`` for equivalent explicit scopes.  Pytest targets (including node
+        IDs and directories) may be reordered and reporting flags may differ.
+        Selection flags, unknown options and shell wrappers are not proof, even
+        if identical; no coverage of omitted tests is inferred from exit status.
     """
-    left = _normalized_command(failing)
-    right = _normalized_command(green)
-    if not left or not right:
-        return False
-    if _EXCLUSION_RE.search(_MODULE_LAUNCHER_RE.sub("", right)):
-        return False
-    if left == right:
-        return True
-    named = _test_files(left)
-    return any(path in right for path in named)
+    left = _verification_scope(failing)
+    right = _verification_scope(green)
+    return left is not None and left == right
 
 
 def _episode_phase(turn: AgentTurn, failure: _Failure) -> str:

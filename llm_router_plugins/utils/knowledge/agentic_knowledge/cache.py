@@ -97,6 +97,8 @@ class CachedContext:
     mode: str = ""
     escalated: bool = False
     escalated_model: str = ""
+    #: First failure count at which a qualifying recipe was offered, per failure.
+    recipe_trials: Dict[str, int] = field(default_factory=dict)
 
 
 class GenerationContextCache:
@@ -379,6 +381,7 @@ def _encode(entry: CachedContext) -> str:
         "mode": entry.mode,
         "escalated": bool(entry.escalated),
         "escalated_model": str(entry.escalated_model or ""),
+        "recipe_trials": dict(entry.recipe_trials),
         "chars": int(entry.context.chars),
         "status": entry.context.status,
         "rendered": entry.context.rendered,
@@ -392,6 +395,8 @@ def _encode(entry: CachedContext) -> str:
                 "created_at": hit.created_at,
                 "paths": list(hit.paths),
                 "signature": hit.signature,
+                "signature_hash": hit.signature_hash,
+                "test_command": hit.test_command,
                 "source": hit.source,
                 "doc_type": hit.doc_type,
                 "heading": hit.heading,
@@ -471,6 +476,8 @@ def _decode(raw: Any) -> Optional[CachedContext]:
                 created_at=item.get("created_at"),
                 paths=tuple(item.get("paths") or ()),
                 signature=str(item.get("signature", "")),
+                signature_hash=str(item.get("signature_hash") or ""),
+                test_command=str(item.get("test_command") or ""),
                 source=str(item.get("source", "")),
                 doc_type=str(item.get("doc_type", "")),
                 heading=str(item.get("heading", "")),
@@ -493,12 +500,21 @@ def _decode(raw: Any) -> Optional[CachedContext]:
             status=str(payload.get("status", "ok")),
             doc_context=doc_context,
         )
+        stored_trials = payload.get("recipe_trials") or {}
+        if not isinstance(stored_trials, dict):
+            stored_trials = {}
+        recipe_trials = {
+            key: value
+            for key, value in stored_trials.items()
+            if isinstance(key, str) and key and type(value) is int and value > 0
+        }
         return CachedContext(
             context=context,
             evidence_fingerprint=str(payload.get("evidence", "")),
             mode=str(payload.get("mode", "")),
             escalated=bool(payload.get("escalated")),
             escalated_model=str(payload.get("escalated_model", "")),
+            recipe_trials=recipe_trials,
         )
     except (TypeError, ValueError):
         return None
