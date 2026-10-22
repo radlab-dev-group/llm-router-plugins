@@ -302,6 +302,12 @@ A request whose repository is unknown publishes nothing: its documents would hav
 in — the reader asks for a scope's collection, never the bare prefix — and every scope-less checkout would archive
 into that one prefix, which is the isolation the scope exists to prevent.
 
+A green command verifies a recipe only when its full test scope can be established as equivalent to the failing
+command. A subset, selection filter, unknown option, or shell composition is conservatively rejected; command
+comparison is not truncated. This may omit valid fixes using unsupported runners/options rather than certify them
+without evidence. Each failed attempt owns its patches and resulting failure: in `failure → patch 1 → failure →
+patch 2 → pass`, the dead end contains only patch 1, while the recipe retains the cumulative patch history.
+
 The worker (`llm-router-agentic-kb-worker`) consumes the stream with a consumer group, masks every document with
 `FastMasker` and **discards the mappings** (no re-identification is possible downstream) — the filter keys
 (`thread_id`, `scope`, `kind`, `mode`, `phase`, …) are written verbatim so a document can be read back — creates the
@@ -309,6 +315,9 @@ collection on first use, then `index_documents(category=<kind>, options=<metadat
 deletes only this plugin's own documents older than the configured TTL (`session_archive` on `archive.ttl_seconds`).
 Events with an unknown version are acknowledged and logged; an indexing error is retried up to a bounded number of
 attempts and then dropped with a log, so one poison event cannot stall the stream.
+Masking is **fail closed for writes**: an exception or an invalid masker result for the body, signature, or masked
+metadata prevents indexing the entire document and follows that same bounded retry path. There is no raw-text
+fallback or new quarantine queue; after the retry limit the event is dropped. The user's request is not blocked.
 
 ### Compaction archive
 
@@ -430,15 +439,27 @@ not push a mode past its escalation threshold.
 
 ### Knowledge-or-escalate
 
-`EscalationPolicy.decide(turn, context, policy, loop_count, signature_hash)` escalates only when **all** of these hold:
+`EscalationPolicy.decide(...)` considers escalation only when enabled and **all** of these hold:
 
 1. `routing_source != "explicit"` — the operator who named a model is never overridden;
 2. the mode has an `escalation_model_name`;
 3. `loop_count >= loop_threshold` (default `3`) — the same error signature failed that many times in the generation;
-4. `best_recipe_score < strong_recipe_score` (default `0.75`) — the knowledge base has no known fix.
+4. no eligible recipe trial remains for this failure.
 
-Outcomes are `none`, `keep` (a strong recipe exists, the routed model stays) and `escalate`, with reasons `disabled`,
-`explicit_mode`, `no_loop`, `no_escalation_model`, `strong_recipe`, `loop_without_recipe`. On `escalate` the adapter
+Retrieval relevance (`best_recipe_score`) is **not** recipe reliability. To earn a trial, a recipe must actually
+be injected, match the current `signature_hash`, declare a nonempty `test_command`, and meet `strong_recipe_score`
+(default `0.75`). This is a minimum verification-provenance check, not a count of independent confirmations;
+legacy documents lacking these fields remain readable but cannot hold back escalation.
+
+The generation cache records the failure count at the first qualifying injection, even before the loop threshold.
+After the threshold is reached, a higher count means `recipe_did_not_resolve_loop` and permits escalation regardless
+of newly retrieved recipes. Replaying the same evidence does not consume the trial. This detects failure after
+**exposure**, not proof that the agent applied the advice. Without exposure history (including a cache outage),
+a recipe can keep the model only at `loop_threshold`; beyond it, `recipe_trial_limit` prevents indefinite suppression.
+
+Outcomes are `none`, `keep` (a qualifying recipe still has its trial) and `escalate`, with reasons `disabled`,
+`explicit_mode`, `no_loop`, `no_escalation_model`, `strong_recipe`, `loop_without_recipe`,
+`recipe_did_not_resolve_loop`, `recipe_trial_limit`. On `escalate` the adapter
 sets the model and `routing.model_before_knowledge` records the previous one. The policy is **off in the shipped
 config** (`escalation.enabled=false`) — enable it only after the replay shows the loop detection is right, because a
 flaky test looks exactly like a loop. The "already tried" list comes from the current turn's dead ends plus retrieved
