@@ -14,14 +14,17 @@ knowledge available, and someone has already written it.
 
 Three rules shape the implementation.
 
-* **The request path writes no documents.**  Files are read, split into
-  sections and published to the stream the miner already uses; the worker masks
-  and indexes them exactly as it masks a recipe, so documentation inherits the
-  privacy properties of everything else in the knowledge base.
+* **A file is one document.**  The file is read whole and published to the
+  stream the miner already uses; the engine splits it into chunks with the
+  collection's own chunking, and the worker masks and indexes it exactly as it
+  masks a recipe, so documentation inherits the privacy properties of
+  everything else in the knowledge base.  A heading is a citation, not a cut:
+  the document's title travels in its header, and a chunk cut out of the middle
+  falls back to the fields in the document name.
 * **A file is republished when its content changes**, not when it is looked at.
-  The digest of the whole file feeds each section's fingerprint and the scan
-  state compares digests, so an unchanged file costs one hash and no embedding,
-  and a ``git checkout`` across ten branches publishes nothing.
+  The digest of the whole file is the document's fingerprint and the scan state
+  compares digests, so an unchanged file costs one hash and no embedding, and a
+  ``git checkout`` across ten branches publishes nothing.
 * **A scan that did not see the whole repository prunes nothing.**  Replacing a
   document is only safe against a complete listing, so a scan that ran out of
   ``docs.max_files`` reports itself truncated and leaves the old documents in
@@ -88,9 +91,9 @@ __all__ = [
     "ScanReport",
     "classify_document",
     "doc_events",
+    "document_fingerprint",
     "prune_event",
     "scan_repository",
-    "split_sections",
 ]
 
 #: How the indexer knows it has no standing digest to serve yet.
@@ -105,22 +108,14 @@ CONTROL_DOCS_PRUNE = "docs_prune"
 #: A scan ran and published what it found.
 STATUS_SKIPPED = "skipped"
 
-#: The heading path is quoted into every chunk of a long section; a heading
-#: longer than this is a paragraph wearing a hash.
+#: The heading path is quoted into the document header; a heading longer than
+#: this is a paragraph wearing a hash.
 _MAX_HEADING_CHARS = 160
-
-#: A section shorter than this is folded into its predecessor.  A two-line
-#: section is a heading the author had not finished writing, and on its own it
-#: retrieves as noise.
-_MIN_SECTION_CHARS = 120
 
 #: How deep below the declared directory a scan descends.  Deep enough for any
 #: documentation tree, shallow enough that a symlink farm or a generated SDK
 #: cannot turn one request into a walk of a filesystem.
 _MAX_SCAN_DEPTH = 12
-
-#: A section below this size after splitting is dropped rather than indexed.
-_MIN_CHUNK_CHARS = 20
 
 #: Layout version of a scope's scan state, and the shape of its payload.
 #: Version ``2`` added the ``collection`` the listing was written for.
@@ -166,7 +161,7 @@ _GUIDE_DIRECTORIES = ("docs", "doc", "wiki", "documentation", "guides", "book")
 @dataclass(frozen=True)
 class DocRecord:
     """
-    One section of one documentation file, ready to become a document.
+    One documentation file, ready to become one document.
 
     Parameters
     ----------
@@ -175,18 +170,20 @@ class DocRecord:
     doc_type : str
         What kind of file it is; see :func:`classify_document`.
     heading : str
-        Heading path the section sits under, joined with ``>``; ``""`` for a
-        preamble or a document with no headings at all.
+        The document's title: its first heading, ``""`` for a file that opens
+        without one.  A citation, not a cut — the engine chunks the text.
     position : int
-        Order of the section inside the file.
+        Always ``0``; one file is one document, and the field is kept so an
+        older event on the stream still decodes.
     text : str
-        The section, headings included, at most the configured maximum.
+        The whole file, headings included.
     content_hash : str
-        Digest of the **whole file**, so one changed line marks the sections of
-        that file for republication and only that file's.
+        Digest of the **whole file**; the document's fingerprint is built on it,
+        so one changed line marks that file for republication and only that
+        file's.
     fingerprint : str
-        Identity of this section: scope, file, file digest and position.  It is
-        the publisher's deduplication key and the document name's last field.
+        Identity of the document: scope, file and file digest.  It is the
+        publisher's deduplication key and the document name's last field.
     size : int
         File size in bytes, as the scan saw it.
     mtime : float
@@ -214,12 +211,12 @@ class ScanReport:
     Parameters
     ----------
     records : Tuple[DocRecord, ...]
-        Every section of every file that was read.
+        One record per file that was read: the file is the document, and the
+        engine is what splits it into chunks.
     headings_by_file : Dict[str, Tuple[str, ...], ...]
-        The heading outline of each file, in document order, as it was written
-        — every heading, including the ones a section folded into its
-        neighbour.  Sections are what gets indexed; an outline is what a map
-        of the documentation is drawn from, and the two are not the same list.
+        The heading outline of each file, in document order, as it was written.
+        A heading is a citation and the map a session is given to navigate by,
+        not a cut: the whole file is indexed as one document.
     files : int
         Documentation files read.
     skipped : int
@@ -336,153 +333,6 @@ def classify_document(source_file: str) -> str:
     return "note"
 
 
-def split_sections(text: str, max_chars: int = 1200) -> List[Tuple[str, str]]:
-    """
-    Split a markdown document into heading-anchored sections.
-
-    A heading opens a section, and a section is what a model should be shown:
-    a retrieved paragraph that does not say what it was written about is a
-    quotation with no attribution.  Each heading level is tracked, so the
-    section carries its whole path (``Guide > Deployment``), and a section that
-    runs past *max_chars* is cut at paragraph boundaries with that path written
-    into every piece — the document's own header line reaches only the first
-    chunk the engine stores.
-
-    A heading inside a fenced code block is not a heading.  A section shorter
-    than a sentence or two is folded into its predecessor.
-
-    Parameters
-    ----------
-    text : str
-        The markdown document.
-    max_chars : int
-        Ceiling of one section.
-
-    Returns
-    -------
-    List[Tuple[str, str]]
-        ``(heading path, section text)`` pairs, in document order.
-    """
-    limit = max(200, int(max_chars))
-    sections: List[Tuple[str, str]] = []
-    stack: List[Tuple[int, str]] = []
-    fence = ""
-    current: List[str] = []
-    heading = ""
-
-    def close() -> None:
-        """End the section accumulated so far, under the heading it sits in."""
-        nonlocal current
-        body = "\n".join(current).strip("\n")
-        current = []
-        if body.strip():
-            sections.append((heading, body))
-
-    for line in str(text or "").splitlines():
-        opening = _FENCE_RE.match(line)
-        if fence:
-            current.append(line)
-            if line.strip().startswith(fence):
-                fence = ""
-            continue
-        if opening:
-            fence = opening.group(1)[:3]
-            current.append(line)
-            continue
-        title = _HEADING_RE.match(line)
-        if title:
-            close()
-            level = len(title.group(1))
-            while stack and stack[-1][0] >= level:
-                stack.pop()
-            stack.append((level, title.group(2).strip()))
-            heading = " > ".join(item[1] for item in stack)[:_MAX_HEADING_CHARS]
-            current.append(line)
-            continue
-        current.append(line)
-    close()
-
-    merged: List[Tuple[str, str]] = []
-    stub = ""
-    for path, body in sections:
-        if stub:
-            body = f"{stub}\n\n{body}"
-            stub = ""
-        if _has_no_body(body):
-            # A heading with no text under it — an author's placeholder, or the
-            # title of a file whose content begins one level down.  Kept, but
-            # attached to the section that follows: a document that is a title
-            # alone retrieves as noise and cites itself as nothing.
-            stub = f"{stub}\n\n{body}".strip() if stub else body
-            continue
-        previous = merged[-1] if merged else None
-        if (
-            previous is not None
-            and len(body) < _MIN_SECTION_CHARS
-            and len(previous[1]) + len(body) <= limit
-        ):
-            merged[-1] = (previous[0], previous[1] + "\n\n" + body)
-            continue
-        merged.append((path, body))
-    if stub:
-        # The document ended on a heading: it belongs to what precedes it.
-        if merged:
-            previous = merged[-1]
-            merged[-1] = (previous[0], f"{previous[1]}\n\n{stub}")
-        else:
-            merged.append(("", stub))
-
-    result: List[Tuple[str, str]] = []
-    for path, body in merged:
-        for piece in _split_long(body, limit, path):
-            result.append((path, piece))
-    return result
-
-
-def _has_no_body(body: str) -> bool:
-    """Whether a section is nothing but headings."""
-    lines = [line.strip() for line in (body or "").splitlines() if line.strip()]
-    return not lines or all(_HEADING_RE.match(line) for line in lines)
-
-
-def _split_long(body: str, max_chars: int, heading: str) -> List[str]:
-    """Cut one long section at paragraph boundaries, heading written in."""
-    if len(body) <= max_chars:
-        return [body]
-    prefix = f"{heading}\n" if heading else ""
-    limit = max(_MIN_SECTION_CHARS, max_chars - len(prefix))
-    paragraphs = body.split("\n\n")
-    pieces: List[str] = []
-    block: List[str] = []
-    size = 0
-    for paragraph in paragraphs:
-        if block and size + len(paragraph) + 2 > limit:
-            pieces.append("\n\n".join(block))
-            block, size = [], 0
-        block.append(paragraph)
-        size += len(paragraph) + 2
-    if block:
-        pieces.append("\n\n".join(block))
-
-    out: List[str] = []
-    for index, piece in enumerate(pieces):
-        text = piece if index == 0 else f"{prefix}{piece}"
-        if len(text.strip()) < _MIN_CHUNK_CHARS:
-            continue
-        out.append(text[:max_chars])
-    if not out:
-        # Every paragraph was smaller than the floor: the document was cut on
-        # a line by line, and that is a worse reading experience than one piece
-        # that is slightly over its ceiling.
-        return [body[:max_chars]]
-    # The cut left the document's own opening heading on the last piece it was
-    # attached to — impossible for a document, but a paragraph the first piece
-    # swallowed can orphan the heading the reader uses to place the rest, so
-    # the first piece keeps the heading the section began with, and the pieces
-    # after it carry the path written in.
-    return out
-
-
 def scan_repository(
     repo_root: str,
     *,
@@ -491,7 +341,6 @@ def scan_repository(
     max_files: int = 200,
     max_file_bytes: int = 200_000,
     max_total_bytes: int = 2_000_000,
-    max_section_chars: int = 1_200,
     scope: str = "",
 ) -> ScanReport:
     """
@@ -521,15 +370,13 @@ def scan_repository(
         Largest file to read; a bigger one is counted as skipped.
     max_total_bytes : int
         Most bytes to read in one scan.
-    max_section_chars : int
-        Ceiling of one section.
     scope : str
         Repository key the records belong to; part of every fingerprint.
 
     Returns
     -------
     ScanReport
-        The sections found, and what stopped the scan.
+        One record per documentation file, and what stopped the scan.
     """
     root = os.path.abspath(os.path.expanduser(str(repo_root or "")))
     if not root or not os.path.isdir(root):
@@ -579,15 +426,14 @@ def scan_repository(
                     _relative(root, directory), name.replace(os.sep, "/")
                 ).lstrip("/")
             ] = document_headings(text)
-            records.extend(
-                _file_records(
+            records.append(
+                _file_record(
                     posixpath.join(
                         _relative(root, directory), name.replace(os.sep, "/")
                     ).lstrip("/"),
                     text,
                     size=info.st_size,
                     mtime=info.st_mtime,
-                    max_section_chars=max_section_chars,
                     scope=scope,
                 )
             )
@@ -607,10 +453,9 @@ def document_headings(text: str) -> Tuple[str, ...]:
     Return the heading outline of one markdown document, in order.
 
     Every heading, at every level, outside fenced code blocks — the document's
-    own table of contents.  This is deliberately not the list of section
-    headings the indexer stores: a section shorter than the floor is folded
-    into its predecessor and loses its title, which is right for retrieval and
-    wrong for a map, where the title is the whole point of the line.
+    own table of contents.  Nothing here cuts a document: the file is indexed
+    whole and the engine chunks it, so an outline is only ever a map, and a map
+    that dropped a heading would be a worse one.
     """
     titles: List[str] = []
     fence = ""
@@ -654,45 +499,45 @@ def _read_text(path: str) -> Optional[str]:
     return raw.decode("utf-8", errors="replace")
 
 
-def _file_records(
+def _file_record(
     source_file: str,
     text: str,
     *,
     size: int,
     mtime: float,
-    max_section_chars: int,
     scope: str,
-) -> List[DocRecord]:
-    """Turn one file into the sections it should be indexed as."""
-    content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-    doc_type = classify_document(source_file)
-    records: List[DocRecord] = []
-    for position, (heading, body) in enumerate(
-        split_sections(text, max_section_chars)
-    ):
-        records.append(
-            DocRecord(
-                source_file=source_file,
-                doc_type=doc_type,
-                heading=heading,
-                position=position,
-                text=body,
-                content_hash=content_hash,
-                fingerprint=section_fingerprint(
-                    scope, source_file, content_hash, position
-                ),
-                size=size,
-                mtime=float(mtime),
-            )
-        )
-    return records
-
-
-def section_fingerprint(
-    scope: str, source_file: str, content_hash: str, position: int
-) -> str:
+) -> DocRecord:
     """
-    Return the identity of one section of one file.
+    Turn one file into the one document it is indexed as.
+
+    The file is a whole: the engine chunks it with the collection's own
+    chunking, and a section the author split it into is not a retrieval unit
+    this layer owns.  What the record keeps is the identity — scope, file,
+    digest — and the title, which a retrieved chunk cites.
+    """
+    content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return DocRecord(
+        source_file=source_file,
+        doc_type=classify_document(source_file),
+        heading=_document_title(text),
+        position=0,
+        text=text,
+        content_hash=content_hash,
+        fingerprint=document_fingerprint(scope, source_file, content_hash),
+        size=size,
+        mtime=float(mtime),
+    )
+
+
+def _document_title(text: str) -> str:
+    """The first heading of a document; ``""`` for one that opens without one."""
+    headings = document_headings(text)
+    return str(headings[0])[:_MAX_HEADING_CHARS] if headings else ""
+
+
+def document_fingerprint(scope: str, source_file: str, content_hash: str) -> str:
+    """
+    Return the identity of one file's document.
 
     The scope is in it because two repositories index into two collections and
     the digest must not collide between them; the file digest is in it because
@@ -707,15 +552,13 @@ def section_fingerprint(
         Repository-relative path.
     content_hash : str
         Digest of the whole file.
-    position : int
-        Section order inside the file.
 
     Returns
     -------
     str
         A short hex digest, stable for equal content.
     """
-    return digest("doc", scope, source_file, content_hash, str(int(position)))
+    return digest("doc", scope, source_file, content_hash)
 
 
 def doc_events(
@@ -731,16 +574,16 @@ def doc_events(
     """
     Build the events that carry *records* to the indexing worker.
 
-    The header says what the file is and where the section sits in it, so a
-    retrieved chunk names its source; the metadata repeats the file so the
-    worker can key its own bookkeeping on it.  No work mode is claimed:
-    documentation is not an episode, and a mode filter attached to it would
-    hide a guide from the one mode that needs it.
+    The header says what the file is and what it is titled, so a retrieved
+    chunk names its source even when the engine cut it out of the middle; the
+    metadata repeats the file so the worker can key its own bookkeeping on it.
+    No work mode is claimed: documentation is not an episode, and a mode filter
+    attached to it would hide a guide from the one mode that needs it.
 
     Parameters
     ----------
     records : Iterable[DocRecord]
-        Sections to publish.
+        Files to publish, one document each.
     scope : str
         Repository the documentation belongs to.
     agent : str, optional
@@ -757,7 +600,7 @@ def doc_events(
     Returns
     -------
     Tuple[KnowledgeEvent, ...]
-        One event per section, kind ``doc``.
+        One event per file, kind ``doc``.
     """
     day = today or datetime.date.today()
     stamp = time.time() if now is None else float(now)
@@ -765,10 +608,11 @@ def doc_events(
     for record in records:
         if not record.text.strip() or not record.fingerprint:
             continue
-        body = f"{record.heading}\n{record.text}" if record.heading else record.text
+        # The file goes out exactly as it was written: the engine splits it,
+        # so a heading quoted in here twice would only be read twice.
         text = build_document_text(
             KIND_DOC,
-            body,
+            record.text,
             date=day,
             paths=(record.source_file,),
             agent=agent,
@@ -1116,7 +960,6 @@ class DocsIndexer:
             max_files=self.config.docs_max_files,
             max_file_bytes=self.config.docs_max_file_bytes,
             max_total_bytes=self.config.docs_max_total_bytes,
-            max_section_chars=self.config.docs_max_section_chars,
             scope=scope,
         )
         if report.reason:
@@ -1288,7 +1131,7 @@ def _context_files(report: "ScanReport") -> List[Any]:
     """
     Return one entry per documentation file, for the standing digest.
 
-    A file's headings are the headings of its sections, in order, deduplicated;
+    A file's headings are the outline the scan collected, in order;
     the first is the file's own title.  The entry carries the file digest so the
     digest's fingerprint moves only when the file's text does.
     """
@@ -1319,17 +1162,18 @@ def _context_files(report: "ScanReport") -> List[Any]:
 
 
 def records_of(report: "ScanReport", path: str) -> List[DocRecord]:
-    """The sections of one file, in the order the scan read them."""
+    """The record of one file; one record, because one file is one document."""
     return [record for record in report.records if record.source_file == path]
 
 
 def _headings_of(records: Sequence[DocRecord]) -> Tuple[str, ...]:
     """
-    Fall back to the section headings when no outline was collected.
+    Fall back to the documents' titles when no outline was collected.
 
     A caller that builds a :class:`ScanReport` from records alone — a test, a
-    tool, a future writer — still gets a map, drawn from the headings the
-    sections carry.
+    tool, a future writer — still gets a map, drawn from the title each record
+    carries.  It is a thinner map than the outline the scan collects, because a
+    document has one title and many headings.
     """
     titles: List[str] = []
     for record in records:
@@ -1339,7 +1183,7 @@ def _headings_of(records: Sequence[DocRecord]) -> Tuple[str, ...]:
 
 
 def _group(records: Iterable[DocRecord]) -> Dict[str, List[DocRecord]]:
-    """Group scanned sections by the file they came from."""
+    """Group scanned records by the file they came from."""
     grouped: Dict[str, List[DocRecord]] = {}
     for record in records:
         grouped.setdefault(record.source_file, []).append(record)
@@ -1387,7 +1231,7 @@ def _superseded_names(
 def _records_of(
     by_file: Dict[str, List[DocRecord]], files: Sequence[str]
 ) -> List[DocRecord]:
-    """Sections to publish: those of the files that changed."""
+    """Documents to publish: one per file that changed."""
     wanted = set(files)
     return [
         record
