@@ -145,7 +145,7 @@ def _publisher(config: Any, logger: logging.Logger) -> KnowledgeEventPublisher:
 
 
 def _report_scan(config: Any, root: str, scope: str) -> int:
-    """Print what a scan would publish; return the number of sections."""
+    """Print what a scan would publish; return the number of documents."""
     report = scan_repository(
         root,
         patterns=config.docs_patterns,
@@ -153,7 +153,6 @@ def _report_scan(config: Any, root: str, scope: str) -> int:
         max_files=config.docs_max_files,
         max_file_bytes=config.docs_max_file_bytes,
         max_total_bytes=config.docs_max_total_bytes,
-        max_section_chars=config.docs_max_section_chars,
         scope=scope,
     )
     for record in report.records:
@@ -168,7 +167,10 @@ def _report_scan(config: Any, root: str, scope: str) -> int:
             "scan truncated by the configured ceilings: superseded documents "
             "will be kept, not retired"
         )
-    print(f"{report.files} file(s), {len(report.records)} section(s)")
+    print(
+        f"{report.files} file(s), {len(report.records)} document(s)"
+        " \u2014 the engine chunks each one"
+    )
     return len(report.records)
 
 
