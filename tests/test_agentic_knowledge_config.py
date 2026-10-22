@@ -480,7 +480,6 @@ def test_documentation_is_on_by_default_with_bounded_scans():
     assert config.docs_max_files > 0
     assert config.docs_max_file_bytes >= 1024
     assert config.docs_max_total_bytes >= config.docs_max_file_bytes
-    assert config.docs_max_section_chars >= 200
     assert config.docs_rescan_interval_seconds > 0
     assert config.docs_state_ttl_seconds > 0
 
@@ -526,5 +525,13 @@ def test_a_ceiling_below_its_floor_is_a_configuration_error():
         AgenticKnowledgeConfig.from_json(
             '{"docs": {"max_file_bytes": 4096, "max_total_bytes": 1024}}'
         )
-    with pytest.raises(ValueError, match="docs.max_section_chars"):
+    # A file is one document and the engine splits it, so there is no section
+    # ceiling left to get wrong: the key is ignored, not validated.
+    assert (
         AgenticKnowledgeConfig.from_json('{"docs": {"max_section_chars": 10}}')
+        is not None
+    )
+    with pytest.raises(ValueError, match="worker.chunk_overlap"):
+        AgenticKnowledgeConfig.from_json(
+            '{"worker": {"chunk_tokens": 400, "chunk_overlap": 400}}'
+        )

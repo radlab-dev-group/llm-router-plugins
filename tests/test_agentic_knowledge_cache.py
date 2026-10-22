@@ -210,3 +210,59 @@ def test_an_entry_without_a_digest_decodes_without_one():
     )
     assert decoded is not None
     assert decoded.context.doc_context is None
+
+
+def test_recipe_provenance_and_trial_counts_survive_serialization():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
+        KnowledgeHit,
+    )
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
+        _decode,
+        _encode,
+    )
+
+    original = CachedContext(
+        context=KnowledgeContext(
+            hits=(
+                KnowledgeHit(
+                    category="recipe",
+                    score=0.95,
+                    signature_hash="failure-a",
+                    test_command="pytest tests/test_a.py",
+                ),
+            ),
+            rendered="a tested fix",
+        ),
+        recipe_trials={"failure-a": 2, "failure-b": 3},
+    )
+    decoded = _decode(_encode(original))
+    assert decoded.recipe_trials == original.recipe_trials
+    assert decoded.context.hits[0].signature_hash == "failure-a"
+    assert decoded.context.hits[0].test_command == "pytest tests/test_a.py"
+
+
+def test_legacy_cache_does_not_invent_recipe_verification():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import _decode
+
+    decoded = _decode(
+        {
+            "schema": 2,
+            "rendered": "legacy fix",
+            "hits": [{"category": "recipe", "score": 0.99}],
+        }
+    )
+    assert decoded.recipe_trials == {}
+    assert decoded.context.hits[0].signature_hash == ""
+    assert decoded.context.hits[0].test_command == ""
+
+
+def test_invalid_recipe_trial_counts_are_not_used():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import _decode
+
+    decoded = _decode(
+        {
+            "schema": 2,
+            "recipe_trials": {"a": "2", "b": True, "c": -1, "d": 0, "e": 2},
+        }
+    )
+    assert decoded.recipe_trials == {"e": 2}

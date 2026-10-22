@@ -53,6 +53,13 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
 )
 
 
+class FakeSSE(FakeSSE):
+    """Adapt the shared double to the worker's indexing-options interface."""
+
+    def index_documents(self, collection, documents, indexing_options=None):
+        return super().index_documents(collection, documents)
+
+
 class _SilentLogger:
     """Records the one warning the fail-open path is allowed to write."""
 
@@ -128,6 +135,132 @@ def test_document_text_and_metadata_are_masked():
     document = sse.indexed[0][1][0]
     assert "jane@example.com" not in document["pages"][0]["page_content"]
     assert "jane@example.com" not in json.dumps(document["options"])
+
+
+@pytest.mark.parametrize("target", ["body", "signature", "test_command", "metadata"])
+@pytest.mark.parametrize("entrypoint", ["batch", "single"])
+def test_masking_failure_stays_pending_and_reclaim_retries(target, entrypoint, caplog):
+    secret = "jane@example.com"
+    event = dataclasses.replace(
+        knowledge_event(text=secret if target == "body" else "safe body"),
+        signature=secret if target == "signature" else "",
+        metadata={target: secret},
+    )
+    entry = ("1-0", stream_message(event))
+    redis = FakeRedis(messages=[entry])
+    sse = FakeSSE()
+    work = worker(redis=redis, sse=sse)
+    masker = work._get_masker()
+
+    class FailingMasker:
+        def mask_payload(self, payload):
+            if (target == "metadata" and isinstance(payload, dict)) or payload == secret:
+                raise RuntimeError(secret)
+            return masker.mask_payload(payload)
+
+    work._masker = FailingMasker()
+    with caplog.at_level("WARNING"):
+        if entrypoint == "batch":
+            work.run_once(block_ms=0)
+        else:
+            assert work._process_entry(*entry) is False
+    assert sse.indexed == []
+    assert sse.created == []
+    assert redis.acked == []
+    assert redis.kv[work._tries_key("1-0")] == 1
+    assert secret not in caplog.text
+    assert "retrying" in caplog.text
+
+    work._masker = masker
+    redis.pending.append(entry)
+    assert work._reclaim() == 1
+    assert redis.acked == ["1-0"]
+    assert len(sse.indexed) == 1
+    assert secret not in json.dumps(sse.indexed)
+    assert work._tries_key("1-0") not in redis.kv
+
+
+@pytest.mark.parametrize(
+    "target,result",
+    [
+        (target, result)
+        for target in ("text", "metadata")
+        for result in (
+            None, "ab", {"a": 1, "b": 2}, (), ("safe",),
+            ("safe", {}, "extra"), (None, {}), (123, {}), ([], {}),
+            ("safe", None), ({}, None),
+        )
+    ] + [("text", ({}, {})), ("metadata", ("safe", {}))],
+)
+def test_invalid_masker_result_is_not_indexed(target, result):
+    redis = FakeRedis()
+    sse = FakeSSE()
+    work = worker(redis=redis, sse=sse)
+    masker = work._get_masker()
+
+    class InvalidMasker:
+        def mask_payload(self, payload):
+            if isinstance(payload, dict) == (target == "metadata"):
+                return result
+            return masker.mask_payload(payload)
+
+    work._masker = InvalidMasker()
+    event = dataclasses.replace(
+        knowledge_event(text="jane@example.com"),
+        metadata={"contact": "jane@example.com"},
+    )
+    work._process_batch([("1-0", stream_message(event))])
+    assert sse.indexed == []
+    assert sse.created == []
+    assert redis.acked == []
+    assert redis.kv[work._tries_key("1-0")] == 1
+
+
+def test_masker_initialization_failure_is_retried_then_dropped(monkeypatch, caplog):
+    redis = FakeRedis()
+    sse = FakeSSE()
+    work = worker(redis=redis, sse=sse, max_attempts=2)
+
+    def fail():
+        raise RuntimeError("jane@example.com")
+
+    monkeypatch.setattr(work, "_get_masker", fail)
+    entry = ("1-0", stream_message(knowledge_event()))
+    with caplog.at_level("WARNING"):
+        assert work._process_entry(*entry) is False
+        assert redis.acked == []
+        assert work._process_entry(*entry) is False
+    assert sse.indexed == []
+    assert sse.created == []
+    assert redis.acked == ["1-0"]
+    assert work._dropped == 1
+    assert work._tries_key("1-0") not in redis.kv
+    assert "dropping" in caplog.text
+    assert "jane@example.com" not in caplog.text
+
+
+def test_masking_failure_does_not_block_other_documents_in_batch():
+    redis = FakeRedis()
+    sse = FakeSSE()
+    work = worker(redis=redis, sse=sse)
+    masker = work._get_masker()
+
+    class SelectiveMasker:
+        def mask_payload(self, payload):
+            if payload == "jane@example.com":
+                raise RuntimeError("masking unavailable")
+            return masker.mask_payload(payload)
+
+    work._masker = SelectiveMasker()
+    bad = knowledge_event(text="jane@example.com", fingerprint="bad")
+    good = knowledge_event(text="safe body", fingerprint="good")
+    assert work._process_batch([
+        ("1-0", stream_message(bad)), ("2-0", stream_message(good)),
+    ]) == (2, 1)
+    assert redis.acked == ["2-0"]
+    assert len(sse.indexed) == 1
+    assert len(sse.indexed[0][1]) == 1
+    assert sse.indexed[0][1][0]["filepath"].endswith(":good")
 
 
 # --------------------------------------------------------------------- F1 ---
@@ -401,7 +534,7 @@ def test_unprocessable_message_is_retried_then_dropped():
             super().__init__(**kwargs)
             self.calls = 0
 
-        def index_documents(self, collection, documents):
+        def index_documents(self, collection, documents, indexing_options=None):
             self.calls += 1
             raise RuntimeError("index down")
 

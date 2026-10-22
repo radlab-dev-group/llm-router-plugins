@@ -9,6 +9,9 @@ action other than escalate leaves the model alone.
 
 import sys
 import pathlib
+from dataclasses import replace
+
+import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -51,6 +54,8 @@ def context(recipe_score=0.0):
                 text="x",
                 score=recipe_score,
                 weight=1.0,
+                signature_hash="h",
+                test_command="pytest tests/test_a.py",
             ),
         )
     return KnowledgeContext(
@@ -85,7 +90,7 @@ def test_loop_without_recipe_escalates_to_the_mode_model():
 
 def test_strong_recipe_keeps_the_routed_model():
     config = knowledge_config(escalation_enabled=True)
-    decision = decide(config, loop=4, score=0.9)
+    decision = decide(config, loop=config.loop_threshold, score=0.9)
     assert decision.action == ACTION_KEEP
     assert decision.model_name is None
 
@@ -127,3 +132,53 @@ def test_a_mode_not_in_the_policy_never_escalates():
     config = knowledge_config(escalation_enabled=True)
     decision = decide(config, candidate=turn(mode="unknown"), loop=5)
     assert decision.action == ACTION_NONE
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"signature_hash": "other"},
+        {"signature_hash": ""},
+        {"test_command": ""},
+        {"category": "doc"},
+    ],
+)
+def test_similarity_without_matching_verification_does_not_keep_model(changes):
+    config = knowledge_config(escalation_enabled=True)
+    knowledge = context(0.95)
+    knowledge = replace(knowledge, hits=(replace(knowledge.hits[0], **changes),))
+    decision = EscalationPolicy(config).decide(
+        turn(), knowledge, policy_for(config), config.loop_threshold, "h"
+    )
+    assert decision.action == ACTION_ESCALATE
+
+
+def test_new_failure_after_recipe_exposure_escalates():
+    config = knowledge_config(escalation_enabled=True)
+    decision = EscalationPolicy(config).decide(
+        turn(), context(0.95), policy_for(config), 4, "h", recipe_offered_at=3
+    )
+    assert decision.action == ACTION_ESCALATE
+    assert decision.reason == "recipe_did_not_resolve_loop"
+
+
+def test_replayed_evidence_does_not_exhaust_recipe_trial():
+    config = knowledge_config(escalation_enabled=True)
+    decision = EscalationPolicy(config).decide(
+        turn(), context(0.95), policy_for(config), 3, "h", recipe_offered_at=3
+    )
+    assert decision.action == ACTION_KEEP
+
+
+def test_missing_cache_cannot_give_recipe_unlimited_trials():
+    config = knowledge_config(escalation_enabled=True)
+    decision = decide(config, loop=config.loop_threshold + 1, score=0.95)
+    assert decision.action == ACTION_ESCALATE
+
+
+def test_a_recipe_not_injected_cannot_hold_back_escalation():
+    config = knowledge_config(escalation_enabled=True)
+    decision = EscalationPolicy(config).decide(
+        turn(), replace(context(0.95), rendered=""), policy_for(config), 3, "h"
+    )
+    assert decision.action == ACTION_ESCALATE

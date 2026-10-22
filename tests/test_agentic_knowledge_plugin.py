@@ -17,6 +17,7 @@ import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from agentic_knowledge_support import (
+    FAILING,
     FakePublisher,
     FakeStore,
     base_items,
@@ -35,6 +36,12 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge import (
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
     InMemoryContextCache,
+)
+from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+    build_document_text,
+)
+from llm_router_plugins.utils.knowledge.agentic_knowledge.signature import (
+    signature_of,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
     STATUS_UNAVAILABLE,
@@ -340,12 +347,97 @@ def test_loop_without_recipe_escalates_and_annotates():
 
 def test_loop_with_a_strong_recipe_keeps_the_model():
     config = knowledge_config(escalation_enabled=True)
-    store = FakeStore(hits=(store_hit("recipe", score=0.95),))
+    store = FakeStore(hits=(matching_recipe(),))
     plugin = make_plugin(config, store=store)
     out = plugin.apply(main_payload(mode="debug", failures=3))
     knowledge = out["routing"]["knowledge"]
     assert knowledge["escalation"]["action"] == "keep"
     assert out["model"] == "auto_codex"
+
+
+def matching_recipe():
+    return store_hit(
+        "recipe",
+        score=0.95,
+        text=build_document_text(
+            "recipe",
+            "A tested fix",
+            signature_hash=signature_of(
+                "Process exited with code 1\nOutput:\n" + FAILING
+            ).signature_hash,
+            test_command="pytest tests/test_a.py",
+        ),
+    )
+
+
+def test_similar_unverified_recipe_does_not_block_escalation():
+    config = knowledge_config(escalation_enabled=True)
+    plugin = make_plugin(
+        config, store=FakeStore(hits=(store_hit("recipe", score=0.99),))
+    )
+    out = plugin.apply(main_payload(mode="debug", failures=3))
+    assert out["routing"]["knowledge"]["escalation"]["action"] == "escalate"
+
+
+def test_recipe_trial_survives_cache_and_escalates_on_next_failure():
+    config = knowledge_config(escalation_enabled=True)
+    cache = InMemoryContextCache()
+    store = FakeStore(hits=(matching_recipe(),))
+    plugin = make_plugin(config, store=store, cache=cache)
+    first = plugin.apply(main_payload(mode="debug", failures=2))
+    assert first["model"] == "auto_codex"
+    # A different worker must remember exposure, but replay is not a new failure.
+    other = make_plugin(config, store=store, cache=cache)
+    replay = other.apply(main_payload(mode="debug", failures=2))
+    assert replay["model"] == "auto_codex"
+    followup = other.apply(main_payload(mode="debug", failures=3))
+    assert followup["model"] == config.modes["debug"].escalation_model_name
+    assert (
+        followup["routing"]["knowledge"]["escalation"]["reason"]
+        == "recipe_did_not_resolve_loop"
+    )
+
+
+def test_replaying_recipe_at_loop_threshold_keeps_trial_open():
+    config = knowledge_config(escalation_enabled=True)
+    plugin = make_plugin(config, store=FakeStore(hits=(matching_recipe(),)))
+    for _ in range(3):
+        out = plugin.apply(main_payload(mode="debug", failures=3))
+        assert out["routing"]["knowledge"]["escalation"]["action"] == "keep"
+    out = plugin.apply(main_payload(mode="debug", failures=4))
+    assert out["routing"]["knowledge"]["escalation"]["action"] == "escalate"
+
+
+def test_recipe_exposure_does_not_leak_into_another_generation():
+    config = knowledge_config(escalation_enabled=True)
+    plugin = make_plugin(config, store=FakeStore(hits=(matching_recipe(),)))
+    plugin.apply(main_payload(mode="debug", failures=1))
+    out = plugin.apply(
+        main_payload(
+            mode="debug", failures=3, turn_id="next-turn", root_turn_id="next-root"
+        )
+    )
+    assert out["routing"]["knowledge"]["escalation"]["action"] == "keep"
+
+
+def test_no_cache_cannot_allow_a_recipe_to_suppress_an_advanced_loop():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
+        GenerationContextCache,
+    )
+
+    config = knowledge_config(escalation_enabled=True)
+    plugin = make_plugin(
+        config,
+        store=FakeStore(hits=(matching_recipe(),)),
+        cache=GenerationContextCache(),
+    )
+    first = plugin.apply(main_payload(mode="debug", failures=3))
+    assert first["routing"]["knowledge"]["escalation"]["action"] == "keep"
+    followup = plugin.apply(main_payload(mode="debug", failures=4))
+    assert (
+        followup["routing"]["knowledge"]["escalation"]["reason"]
+        == "recipe_trial_limit"
+    )
 
 
 def test_explicit_routing_is_never_escalated():

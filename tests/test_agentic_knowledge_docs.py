@@ -2,14 +2,16 @@
 The documentation ingestor: reading a repository's markdown into the KB.
 
 Documentation is the one knowledge kind the miner does not produce, so its
-path is its own: scan the repository the request declared, split each file at
-its headings, and publish only what changed.  The tests pin what that has to
-guarantee — an unchanged file publishes nothing, a changed file replaces the
-document it superseded, a scan that did not see the whole repository retires
-nothing, and a request never pays for a scan twice in an hour.
+path is its own: scan the repository the request declared, publish each file as
+one whole document — the engine is what chunks it — and publish only what
+changed.  The tests pin what that has to guarantee — a file is never split, an
+unchanged file publishes nothing, a changed file replaces the document it
+superseded, a scan that did not see the whole repository retires nothing, and a
+request never pays for a scan twice in an hour.
 """
 
 import dataclasses
+import inspect
 import os
 import pathlib
 import sys
@@ -176,75 +178,87 @@ def test_a_documentation_file_is_classified_by_its_name(path, expected):
     assert classify_document(path) == expected
 
 
-# ------------------------------------------------------------- sectioning --
-def test_a_section_carries_the_heading_path_it_sits_under():
+# ----------------------------------------------------------- one file each --
+def test_a_scan_returns_one_record_per_file(tmp_path):
     from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
-        split_sections,
+        scan_repository,
     )
 
-    sections = split_sections(
-        "# Guide\n\n"
-        + "Intro that is long enough to be a section of its own. " * 4
-        + "\n\n## Deploy\n\n"
-        + "Deploy instructions long enough to stand on their own. " * 4
-        + "\n\n### Docker\n\n"
-        + "Docker notes long enough to stand on their own as well. " * 4,
-        400,
-    )
-    headings = [heading for heading, _ in sections]
-    assert headings == ["Guide", "Guide > Deploy", "Guide > Deploy > Docker"]
+    report = scan_repository(demo_repo(tmp_path), scope="demo")
+    by_file = {record.source_file: record for record in report.records}
+    assert sorted(by_file) == ["README.md", "docs/api/reference.md", "docs/guide.md"]
+    assert len(report.records) == report.files, "one file must be one document"
 
 
-def test_a_hash_inside_a_code_block_is_not_a_heading():
+def test_a_file_is_published_whole_and_never_split(tmp_path):
     from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
-        split_sections,
+        scan_repository,
     )
 
-    sections = split_sections(
-        "# Guide\n\n```bash\n# not a heading\nmake run\n```\n", 1200
-    )
-    assert len(sections) == 1
-    assert "# not a heading" in sections[0][1]
+    root = demo_repo(tmp_path)
+    write(root, "docs/long.md", "# Long\n\n" + ("A paragraph of prose. " * 400))
+    report = scan_repository(root, scope="demo")
+    assert len([r for r in report.records if r.source_file == "docs/long.md"]) == 1
+    record = next(r for r in report.records if r.source_file == "docs/long.md")
+    with open(os.path.join(root, "docs/long.md"), encoding="utf-8") as handle:
+        assert record.text == handle.read()
+    # Cutting is the engine's job, so nothing here takes a size to cut at: a
+    # ceiling would be a split under another name.
+    assert "max_section_chars" not in inspect.signature(scan_repository).parameters
 
 
-def test_a_long_section_is_cut_and_each_piece_keeps_its_heading():
+def test_a_document_carries_its_title_not_a_cut(tmp_path):
     from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
-        split_sections,
+        scan_repository,
     )
 
-    body = "\n\n".join(
-        f"Paragraph {index} says something worth retrieving on its own."
-        for index in range(30)
-    )
-    sections = split_sections(f"# Guide\n\n## Deploy\n\n{body}\n", 700)
-    assert len(sections) > 1
-    for heading, piece in sections:
-        assert heading == "Guide > Deploy"
-        assert len(piece) <= 700
-        if piece is not sections[0][1]:
-            assert piece.startswith("Guide > Deploy")
+    root = demo_repo(tmp_path)
+    write(root, "docs/titled.md", "# Alpha\n\n## Beta\n\nProse.\n")
+    report = scan_repository(root, scope="demo")
+    record = next(r for r in report.records if r.source_file == "docs/titled.md")
+    assert record.heading == "Alpha"
+    assert "## Beta" in record.text, "the body is the file, headings included"
 
 
-def test_a_stub_section_is_folded_into_its_predecessor():
+def test_a_file_without_headings_has_no_title(tmp_path):
     from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
-        split_sections,
+        scan_repository,
     )
 
-    sections = split_sections(
-        "# Guide\n\n" + "Long enough to stand alone. " * 20 + "\n\n## See also\n",
-        1200,
-    )
-    assert len(sections) == 1
-    assert "## See also" in sections[0][1]
+    root = demo_repo(tmp_path)
+    write(root, "notes/plain.md", "Just prose, all the way down.\n")
+    report = scan_repository(root, scope="demo")
+    record = next(r for r in report.records if r.source_file == "notes/plain.md")
+    assert record.heading == ""
+    assert record.text == "Just prose, all the way down.\n"
 
 
-def test_a_document_without_headings_is_one_section():
+def test_a_heading_inside_a_code_block_is_not_a_title(tmp_path):
     from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
-        split_sections,
+        scan_repository,
     )
 
-    sections = split_sections("Just prose, all the way down.\n", 1200)
-    assert sections == [("", "Just prose, all the way down.")]
+    root = demo_repo(tmp_path)
+    write(
+        root,
+        "notes/fenced.md",
+        "```bash\n# not a heading\nmake run\n```\n\nProse.\n",
+    )
+    report = scan_repository(root, scope="demo")
+    record = next(r for r in report.records if r.source_file == "notes/fenced.md")
+    assert record.heading == ""
+
+
+def test_a_document_fingerprint_is_stable_and_content_bound():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
+        document_fingerprint,
+    )
+
+    first = document_fingerprint("demo", "docs/guide.md", "abc")
+    assert first == document_fingerprint("demo", "docs/guide.md", "abc")
+    assert first != document_fingerprint("demo", "docs/guide.md", "abd")
+    assert first != document_fingerprint("other", "docs/guide.md", "abc")
+    assert first != document_fingerprint("demo", "docs/other.md", "abc")
 
 
 # ----------------------------------------------------------- records/events -
@@ -290,8 +304,12 @@ def test_a_doc_event_names_its_file_type_and_section_in_its_header(tmp_path):
         "docs/guide.md",
         "guide",
     )
-    assert meta.heading in ("Guide", "Guide > Deploy")
+    assert meta.heading == "Guide"
+    # The document is the file, whole: the header quotes the title, the body
+    # keeps it, and neither is duplicated by the event.
     assert "Run `make run`." in body
+    assert body.count("# Guide") == 1
+    assert event.text.count("# Guide") == 1
 
 
 def test_a_prune_event_carries_the_names_it_retires():
