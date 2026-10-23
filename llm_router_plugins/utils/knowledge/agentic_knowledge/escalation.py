@@ -4,10 +4,10 @@ Knowledge-or-escalate: the retrieval answer steers the model, not just the text.
 An agent that keeps hitting the same wall is either one good answer away from
 a fix or spinning in a loop that no more of the same model will break.  The
 knowledge base tells the two apart: a strong recipe for exactly this failure
-means the context already carries the way out, so the routed model stays; the
-same loop with no known fix means the model is the limiting factor, so the
-request is switched to the mode's escalation model and the agent is told what
-it already tried.
+earns one chance for the routed model.  A further failure after that recipe
+was offered, or a loop with no matching verified fix, switches the request to
+the mode's escalation model.  Retrieval relevance alone is not evidence of
+success, and replaying the same evidence is not a failed attempt.
 
 The decision runs after routing, on top of it: routing chose a model from the
 agent's observed state, and this step only ever *replaces* it with the model
@@ -16,6 +16,7 @@ mechanism on.  It is a deliberate, fully annotated change, never a silent one.
 """
 
 from dataclasses import dataclass
+import math
 from typing import Optional
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
@@ -41,6 +42,8 @@ __all__ = [
     "REASON_NO_ESCALATION_MODEL",
     "REASON_STRONG_RECIPE",
     "REASON_LOOP_WITHOUT_RECIPE",
+    "REASON_RECIPE_FAILED",
+    "REASON_RECIPE_TRIAL_LIMIT",
 ]
 
 #: No escalation consideration was made at all.
@@ -69,6 +72,12 @@ REASON_STRONG_RECIPE = "strong_recipe"
 
 #: The loop went on with no known fix; the model is replaced.
 REASON_LOOP_WITHOUT_RECIPE = "loop_without_recipe"
+
+#: The failure recurred after a matching recipe was offered in this generation.
+REASON_RECIPE_FAILED = "recipe_did_not_resolve_loop"
+
+#: Without exposure history, an advanced loop cannot receive unlimited trials.
+REASON_RECIPE_TRIAL_LIMIT = "recipe_trial_limit"
 
 
 @dataclass(frozen=True)
@@ -120,6 +129,7 @@ class EscalationPolicy:
         policy: Optional[ModePolicy],
         loop_count: int,
         signature_hash: str,
+        recipe_offered_at: Optional[int] = None,
     ) -> EscalationDecision:
         """
         Return the model decision for one request.
@@ -136,7 +146,11 @@ class EscalationPolicy:
         loop_count : int
             Repetitions of the turn's most frequent failure, from the miner.
         signature_hash : str
-        Identity of that failure.
+            Identity of that failure.
+        recipe_offered_at : int or None
+            Failure count when a matching recipe was first injected in this
+            generation.  A higher count is evidence that the loop continued,
+            not proof that the agent applied the recipe.
 
         Returns
         -------
@@ -167,7 +181,19 @@ class EscalationPolicy:
             return EscalationDecision(
                 ACTION_NONE, REASON_NO_LOOP, None, loop_count, signature_hash
             )
-        if context.best_recipe_score >= self._config.strong_recipe_score:
+        if recipe_offered_at is not None and loop_count > recipe_offered_at:
+            return EscalationDecision(
+                ACTION_ESCALATE,
+                REASON_RECIPE_FAILED,
+                policy.escalation_model_name,
+                loop_count,
+                signature_hash,
+            )
+        strong_recipe = self.has_strong_recipe(context, signature_hash)
+        if strong_recipe and (
+            recipe_offered_at is not None
+            or loop_count == self._config.loop_threshold
+        ):
             return EscalationDecision(
                 ACTION_KEEP,
                 REASON_STRONG_RECIPE,
@@ -177,8 +203,32 @@ class EscalationPolicy:
             )
         return EscalationDecision(
             ACTION_ESCALATE,
-            REASON_LOOP_WITHOUT_RECIPE,
+            (
+                REASON_RECIPE_TRIAL_LIMIT
+                if strong_recipe
+                else REASON_LOOP_WITHOUT_RECIPE
+            ),
             policy.escalation_model_name,
             loop_count,
             signature_hash,
+        )
+
+    def has_strong_recipe(
+        self, context: KnowledgeContext, signature_hash: str
+    ) -> bool:
+        """Require an injected recipe with matching identity and verification.
+
+        The command is a minimum provenance requirement, not an independent
+        confirmation count.  Legacy recipes without it remain readable, but
+        cannot suppress escalation just because retrieval ranked them highly.
+        """
+        if context.empty or not signature_hash:
+            return False
+        return any(
+            hit.category == "recipe"
+            and hit.signature_hash == signature_hash
+            and bool(hit.test_command.strip())
+            and math.isfinite(hit.score)
+            and hit.score >= self._config.strong_recipe_score
+            for hit in context.hits
         )

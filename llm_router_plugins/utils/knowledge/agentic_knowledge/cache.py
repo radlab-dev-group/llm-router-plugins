@@ -32,6 +32,9 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
     best_recipe_score,
     deadends_of,
 )
+from llm_router_plugins.utils.knowledge.agentic_knowledge.doc_context import (
+    DocContext,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.redisclient import (
     RedisClientHandle,
 )
@@ -61,7 +64,11 @@ STATE_CACHE_DISABLED = "disabled"
 #: Redis was tried and failed.
 STATE_UNAVAILABLE = "unavailable"
 
-_SCHEMA = 1
+#: Shape of a serialized entry.  Version ``2`` added the documentation
+#: fields of a hit (`source`, `doc_type`, `heading`) and the standing
+#: documentation digest, so a cache written before them is not read as if
+#: it carried none.
+_SCHEMA = 2
 
 
 @dataclass
@@ -90,6 +97,8 @@ class CachedContext:
     mode: str = ""
     escalated: bool = False
     escalated_model: str = ""
+    #: First failure count at which a qualifying recipe was offered, per failure.
+    recipe_trials: Dict[str, int] = field(default_factory=dict)
 
 
 class GenerationContextCache:
@@ -372,6 +381,7 @@ def _encode(entry: CachedContext) -> str:
         "mode": entry.mode,
         "escalated": bool(entry.escalated),
         "escalated_model": str(entry.escalated_model or ""),
+        "recipe_trials": dict(entry.recipe_trials),
         "chars": int(entry.context.chars),
         "status": entry.context.status,
         "rendered": entry.context.rendered,
@@ -385,11 +395,54 @@ def _encode(entry: CachedContext) -> str:
                 "created_at": hit.created_at,
                 "paths": list(hit.paths),
                 "signature": hit.signature,
+                "signature_hash": hit.signature_hash,
+                "test_command": hit.test_command,
+                "source": hit.source,
+                "doc_type": hit.doc_type,
+                "heading": hit.heading,
             }
             for hit in entry.context.hits
         ],
     }
+    digest = entry.context.doc_context
+    if digest is not None and not digest.empty:
+        payload["doc_context"] = {
+            "scope": digest.scope,
+            "text": digest.text,
+            "files": list(digest.source_files),
+            "fingerprint": digest.fingerprint,
+            "truncated": digest.truncated,
+        }
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _decode_doc_context(raw: Any) -> Optional[DocContext]:
+    """
+    Rebuild the standing documentation digest of a cache entry.
+
+    A malformed or absent digest decodes to ``None``, which means the second
+    request of a generation is served the block the first one rendered — the
+    digest is already inside ``rendered`` — and simply is not reported again in
+    the annotation.  The block a request is shown and the block the cache holds
+    are never allowed to differ.
+    """
+    if not isinstance(raw, dict):
+        return None
+    text = str(raw.get("text") or "").strip()
+    if not text:
+        return None
+    files = raw.get("files")
+    return DocContext(
+        scope=str(raw.get("scope") or ""),
+        text=text,
+        source_files=(
+            tuple(str(path) for path in files if str(path).strip())
+            if isinstance(files, (list, tuple))
+            else ()
+        ),
+        fingerprint=str(raw.get("fingerprint") or ""),
+        truncated=bool(raw.get("truncated")),
+    )
 
 
 def _decode(raw: Any) -> Optional[CachedContext]:
@@ -423,11 +476,17 @@ def _decode(raw: Any) -> Optional[CachedContext]:
                 created_at=item.get("created_at"),
                 paths=tuple(item.get("paths") or ()),
                 signature=str(item.get("signature", "")),
+                signature_hash=str(item.get("signature_hash") or ""),
+                test_command=str(item.get("test_command") or ""),
+                source=str(item.get("source", "")),
+                doc_type=str(item.get("doc_type", "")),
+                heading=str(item.get("heading", "")),
             )
             for item in stored_hits
             if isinstance(item, dict)
         )
         rendered = str(payload.get("rendered", ""))
+        doc_context = _decode_doc_context(payload.get("doc_context"))
         context = KnowledgeContext(
             hits=hits,
             rendered=rendered,
@@ -439,13 +498,23 @@ def _decode(raw: Any) -> Optional[CachedContext]:
             best_recipe_score=best_recipe_score(hits),
             deadends=deadends_of(hits),
             status=str(payload.get("status", "ok")),
+            doc_context=doc_context,
         )
+        stored_trials = payload.get("recipe_trials") or {}
+        if not isinstance(stored_trials, dict):
+            stored_trials = {}
+        recipe_trials = {
+            key: value
+            for key, value in stored_trials.items()
+            if isinstance(key, str) and key and type(value) is int and value > 0
+        }
         return CachedContext(
             context=context,
             evidence_fingerprint=str(payload.get("evidence", "")),
             mode=str(payload.get("mode", "")),
             escalated=bool(payload.get("escalated")),
             escalated_model=str(payload.get("escalated_model", "")),
+            recipe_trials=recipe_trials,
         )
     except (TypeError, ValueError):
         return None

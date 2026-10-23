@@ -13,12 +13,14 @@ serves and ``relative_path`` in the unreformatted row.
 """
 
 import sys
+import time
 import types
 import pathlib
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+    REASON_READ_BUDGET,
     STATUS_OK,
     STATUS_UNAVAILABLE,
     KnowledgeStore,
@@ -290,6 +292,45 @@ def test_a_thread_filter_wins_over_the_phases():
     ]
 
 
+def test_a_doc_type_restriction_is_one_metadata_filter_per_kind():
+    """Documentation narrows on its own dimension, one ``eq`` per kind."""
+    options = _options(
+        SearchRequest(
+            collection="c", query="q", doc_types=("guide", "contributing")
+        ),
+        0.35,
+    )
+    assert options["metadata_filters"] == [
+        {"operator": "eq", "field": {"doc_type": "guide"}},
+        {"operator": "eq", "field": {"doc_type": "contributing"}},
+    ]
+
+
+def test_a_thread_filter_wins_over_doc_types():
+    """One request, one dimension — the narrower owner of the slot wins."""
+    options = _options(
+        SearchRequest(
+            collection="c", query="q", thread_id="thread-1", doc_types=("guide",)
+        ),
+        0.35,
+    )
+    assert options["metadata_filters"] == [
+        {"operator": "eq", "field": {"thread_id": "thread-1"}}
+    ]
+
+
+def test_modes_outrank_doc_types():
+    options = _options(
+        SearchRequest(
+            collection="c", query="q", modes=("debug",), doc_types=("guide",)
+        ),
+        0.35,
+    )
+    assert options["metadata_filters"] == [
+        {"operator": "eq", "field": {"mode": "debug"}}
+    ]
+
+
 def test_the_retrieval_options_are_the_ones_configured():
     """The legs and the reranker are the policy's, not the client's opinion."""
     options = _options(
@@ -309,7 +350,7 @@ def test_a_search_goes_out_with_the_store_default_legs():
     assert (
         store.search(SearchRequest(collection="c", query="q")).score_scale == "rrf"
     )
-    (_collection, _query, options), = client.calls
+    ((_collection, _query, options),) = client.calls
     assert options["hybrid_search"] is True
     assert options["rerank_results"] is False
 
@@ -318,6 +359,118 @@ def test_a_store_switches_every_search_it_makes():
     client = _Client(_Reply([], score_scale="reranker"))
     store = KnowledgeStore(client=client, hybrid_search=False, rerank_results=True)
     store.search(SearchRequest(collection="c", query="q"))
-    (_collection, _query, options), = client.calls
+    ((_collection, _query, options),) = client.calls
     assert options["hybrid_search"] is False
     assert options["rerank_results"] is True
+
+
+# ------------------------------------------------- the query's language -----
+class _LanguageAwareClient:
+    """A client of the current ``sse_lib``: it takes the language switch."""
+
+    def __init__(self):
+        self.calls = []
+
+    def search(
+        self, collection, query, options, *, ignore_question_lang_detect=False
+    ):
+        self.calls.append({"ignore": ignore_question_lang_detect})
+        return _Reply([])
+
+
+class _OldClient:
+    """A client of an ``sse_lib`` release that has no language switch."""
+
+    def __init__(self):
+        self.calls = []
+
+    def search(self, collection, query, options):
+        self.calls.append((collection, query, options))
+        return _Reply([])
+
+
+def test_the_engine_is_asked_not_to_guess_the_language_of_the_query():
+    """
+    A detected language filters the vector leg and names the full-text config.
+
+    The engine applies the language it detects in the question twice: as a
+    metadata filter on the vector leg, and as the name of the PostgreSQL
+    text-search configuration.  A knowledge base is indexed in the language of
+    the code and asked in the language of the operator, so the first throws the
+    answers away and the second asks a cluster for a configuration it may not
+    have — which is an HTTP 500, not an empty answer.
+    """
+    client = _LanguageAwareClient()
+    KnowledgeStore(client=client).search(
+        SearchRequest(collection="agentic_kb_webapp", query="jak to zrobia")
+    )
+    assert client.calls == [{"ignore": True}]
+
+
+def test_language_detection_can_be_left_to_the_engine():
+    """A deployment that indexes one language per collection wants it back."""
+    client = _LanguageAwareClient()
+    KnowledgeStore(client=client, ignore_language_detect=False).search(
+        SearchRequest(collection="agentic_kb_webapp", query="how does it work")
+    )
+    assert client.calls == [{"ignore": False}]
+
+
+def test_a_client_without_the_switch_is_still_asked_to_search():
+    """
+    A keyword the library does not have would read as an engine that is down.
+
+    ``sse_lib`` is an optional dependency and a deployment can be pinned to an
+    older release; passing a keyword it does not accept raises ``TypeError``,
+    which this layer can only report as an unavailable engine — every search
+    lost, and the reason indistinguishable from a network failure.
+    """
+    client = _OldClient()
+    result = KnowledgeStore(client=client).search(
+        SearchRequest(collection="agentic_kb_webapp", query="fix")
+    )
+    assert result.status == STATUS_OK
+    assert len(client.calls) == 1
+
+
+# ------------------------------------------------------- the read budget ----
+def test_a_search_is_not_started_once_the_read_budget_is_spent():
+    """
+    The budget bounds the request, so a call that would overrun it does not run.
+
+    The transport timeout belongs to the client and cannot be shortened per
+    call, so the only way a second and third source of one request cannot each
+    wait the full timeout is not to start them once the room is gone.
+    """
+    client = _OldClient()
+    store = KnowledgeStore(client=client, timeout_seconds=2.0)
+    result = store.search(
+        SearchRequest(collection="agentic_kb_webapp", query="fix"),
+        deadline=time.monotonic(),
+    )
+    assert result.status == STATUS_UNAVAILABLE
+    assert result.reason == REASON_READ_BUDGET
+    assert client.calls == []
+
+
+def test_a_search_with_room_in_the_budget_runs():
+    client = _OldClient()
+    store = KnowledgeStore(client=client, timeout_seconds=2.0)
+    result = store.search(
+        SearchRequest(collection="agentic_kb_webapp", query="fix"),
+        deadline=time.monotonic() + 5,
+    )
+    assert result.status == STATUS_OK
+    assert len(client.calls) == 1
+
+
+def test_no_budget_means_the_store_behaves_as_it_always_did():
+    """A caller without a deadline gets a search, not a budget question."""
+    client = _OldClient()
+    assert (
+        KnowledgeStore(client=client)
+        .search(SearchRequest(collection="agentic_kb_webapp", query="fix"))
+        .status
+        == STATUS_OK
+    )
+    assert len(client.calls) == 1

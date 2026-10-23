@@ -47,11 +47,12 @@ setup(
             "Pillow",
         ],
         # Agentic knowledge layer: the SSE client and the stream/cache backend.
-        # ``sse-lib`` is the Semantic Search Engine client; during development
-        # install it from the sibling checkout instead
-        # (``pip install ../semantic-search-engine/sse_lib``).
-        "knowledge": [
-            "sse-lib",
+        # ``sse-lib`` is the Semantic Search Engine client; the minimum version
+        # is the one that added ``ignore_question_lang_detect`` to
+        # ``SSEClient.search``, which the read path needs to keep the engine
+        # from guessing the question's language.
+        "agentic-knowledge": [
+            "sse-lib>=0.1.0",
             "redis>=5",
         ],
     },
@@ -60,7 +61,9 @@ setup(
             "llm-router-rag-langchain="
             "llm_router_plugins.cli.plugins.utils.rag.langchain:main",
             "llm-router-agentic-kb-worker="
-            "llm_router_plugins.cli.plugins.utils.knowledge.worker:main",
+            "llm_router_plugins.cli.plugins.utils.agentic_knowledge.worker:main",
+            "llm-router-agentic-kb-docs="
+            "llm_router_plugins.cli.plugins.utils.agentic_knowledge.docs:main",
         ],
     },
     classifiers=[

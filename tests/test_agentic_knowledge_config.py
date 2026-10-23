@@ -21,6 +21,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
     ModePolicy,
     SourcePolicy,
+    WorkerSettings,
 )
 
 
@@ -50,6 +51,85 @@ def test_collection_names_separate_the_session_archive():
         config.collection("webapp", "session_archive")
         == "agentic_kb_webapp_sessions"
     )
+
+
+def test_collection_names_separate_the_documentation():
+    """Documentation lives apart from mined knowledge.
+
+    One search request carries one metadata dimension, so a mode that reads
+    only the guides of a repository can restrict by doc_type in one request
+    only when nothing else shares the request; giving the documentation its own
+    collection is what buys that, and it re-indexes as a set besides.
+    """
+    config = knowledge_config()
+    assert config.collection("webapp", "doc") == "agentic_kb_webapp_docs"
+    assert config.collection("", "doc") == "agentic_kb_docs"
+    assert config.collection("web-app", "doc") == "agentic_kb_web_app_docs"
+
+
+def test_a_doc_source_can_list_the_kinds_it_reads():
+    config = AgenticKnowledgeConfig.from_json(
+        '{"modes": {"implement": {"sources": '
+        '[{"category": "doc", "doc_types": ["guide", "readme"]}]}}}'
+    )
+    source = config.modes["implement"].sources[0]
+    assert source.doc_types == ("guide", "readme")
+
+
+def test_a_source_without_doc_types_reads_every_kind():
+    config = AgenticKnowledgeConfig.from_json(
+        '{"modes": {"implement": {"sources": [{"category": "doc"}]}}}'
+    )
+    assert config.modes["implement"].sources[0].doc_types == ()
+
+
+def test_only_the_doc_source_may_list_doc_types():
+    """A mined episode carries no doc_type; the filter would read as empty."""
+    with pytest.raises(ValueError, match="doc_types"):
+        AgenticKnowledgeConfig.from_json(
+            '{"modes": {"debug": {"sources": '
+            '[{"category": "recipe", "doc_types": ["guide"]}]}}}'
+        )
+
+
+def test_the_doc_source_cannot_restrict_phases_or_modes():
+    """Documentation is searched by kind, in its own request."""
+    with pytest.raises(ValueError, match="doc"):
+        AgenticKnowledgeConfig.from_json(
+            '{"modes": {"plan": {"sources": '
+            '[{"category": "doc", "phases": ["test"]}]}}}'
+        )
+    with pytest.raises(ValueError, match="doc"):
+        AgenticKnowledgeConfig.from_json(
+            '{"modes": {"plan": {"sources": '
+            '[{"category": "doc", "modes": ["debug"]}]}}}'
+        )
+
+
+def test_documentation_does_not_share_the_phase_dimension():
+    """The doc source is its own request, so it cannot collide with phases."""
+    config = AgenticKnowledgeConfig.from_json(
+        '{"modes": {"debug": {"sources": '
+        '[{"category": "recipe", "phases": ["test"]}, '
+        '{"category": "doc", "doc_types": ["guide"]}]}}}'
+    )
+    assert len(config.modes["debug"].sources) == 2
+
+
+def test_the_bundled_modes_restrict_documentation_per_work():
+    """What each work reads of the documentation is a decision, not a default."""
+    config = AgenticKnowledgeConfig.from_file()
+    types = {
+        mode: tuple(source.doc_types)
+        for mode, policy in config.modes.items()
+        for source in policy.sources
+        if source.category == "doc"
+    }
+    assert types["implement"] == ("readme", "guide", "contributing")
+    assert "changelog" not in types["implement"]
+    assert "changelog" in types["plan"]
+    assert types["review"] == ("guide", "contributing", "security")
+    assert all("license" not in value for value in types.values())
 
 
 def test_read_is_available_only_with_an_engine():
@@ -160,7 +240,10 @@ def test_a_hyphenated_repo_scope_gets_an_engine_safe_collection(monkeypatch):
     have a collection created, so nothing would ever be indexed.
     """
     config = AgenticKnowledgeConfig.from_file()
-    assert config.collection("llm-router-plugins", "recipe") == "agentic_kb_llm_router_plugins"
+    assert (
+        config.collection("llm-router-plugins", "recipe")
+        == "agentic_kb_llm_router_plugins"
+    )
     assert (
         config.collection("kb-probe", "session_archive")
         == "agentic_kb_kb_probe_sessions"
@@ -174,15 +257,17 @@ def test_a_hyphenated_repo_scope_gets_an_engine_safe_collection(monkeypatch):
 def test_two_scopes_differing_only_by_punctuation_share_a_collection():
     """A hyphen and an underscore name the same repository, for a name."""
     config = AgenticKnowledgeConfig.from_file()
-    assert config.collection("my-repo", "recipe") == config.collection("my_repo", "recipe")
+    assert config.collection("my-repo", "recipe") == config.collection(
+        "my_repo", "recipe"
+    )
 
 
 def test_the_default_collection_prefix_is_engine_safe():
     config = AgenticKnowledgeConfig.from_file()
     for character in config.collection_prefix:
-        assert character.isalnum() or character in "._", (
-            f"the engine would refuse the default prefix {character!r}"
-        )
+        assert (
+            character.isalnum() or character in "._"
+        ), f"the engine would refuse the default prefix {character!r}"
     assert not config.collection_prefix[0].isdigit()
 
 
@@ -202,8 +287,12 @@ def test_engine_credentials_come_from_the_environment(monkeypatch):
 
 
 def test_engine_credentials_default_to_empty(monkeypatch):
-    monkeypatch.delenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_API_USERNAME", raising=False)
-    monkeypatch.delenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_API_PASSWORD", raising=False)
+    monkeypatch.delenv(
+        f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_API_USERNAME", raising=False
+    )
+    monkeypatch.delenv(
+        f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_API_PASSWORD", raising=False
+    )
     config = AgenticKnowledgeConfig.from_file()
     config.override_from_env()
     assert config.sse_username == ""
@@ -345,7 +434,6 @@ def test_the_bundled_policy_can_ask_for_a_reranker():
         del os.environ[f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}CONFIG"]
 
 
-
 def test_a_malformed_retrieval_switch_is_an_error(monkeypatch):
     monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}RERANK_RESULTS", "sometimes")
     config = AgenticKnowledgeConfig.from_file()
@@ -381,3 +469,75 @@ def test_an_overlap_that_eats_the_chunk_is_an_error(monkeypatch):
     config = AgenticKnowledgeConfig.from_file()
     with pytest.raises(ValueError, match="SSE_CHUNK_OVERLAP"):
         config.override_from_env()
+
+
+# ------------------------------------------------------------- documentation -
+def test_documentation_is_on_by_default_with_bounded_scans():
+    config = AgenticKnowledgeConfig.from_file()
+    assert config.docs_enabled is True
+    assert config.docs_auto_index is True
+    assert config.docs_patterns == ("*.md", "*.markdown", "*.mdx")
+    assert "node_modules" in config.docs_excluded_dirs
+    assert config.docs_max_files > 0
+    assert config.docs_max_file_bytes >= 1024
+    assert config.docs_max_total_bytes >= config.docs_max_file_bytes
+    assert config.docs_rescan_interval_seconds > 0
+    assert config.docs_state_ttl_seconds > 0
+
+
+def test_the_docs_section_of_the_policy_is_loaded():
+    config = AgenticKnowledgeConfig.from_json(
+        '{"docs": {"enabled": false, "auto_index": false, "max_files": 5}}'
+    )
+    assert config.docs_enabled is False
+    assert config.docs_auto_index is False
+    assert config.docs_max_files == 5
+
+
+def test_documentation_settings_come_from_the_environment(monkeypatch):
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}DOCS_ENABLED", "false")
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}DOCS_AUTO_INDEX", "false")
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}DOCS_MAX_FILES", "7")
+    monkeypatch.setenv(
+        f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}DOCS_RESCAN_INTERVAL_SECONDS", "0"
+    )
+    config = AgenticKnowledgeConfig.from_file()
+    config.override_from_env()
+    assert config.docs_enabled is False
+    assert config.docs_auto_index is False
+    assert config.docs_max_files == 7
+    assert config.docs_rescan_interval_seconds == 0
+
+
+def test_documentation_needs_the_write_path_to_be_available():
+    config = knowledge_config()
+    assert config.docs_available is True
+    config.write_enabled = False
+    assert config.docs_available is False
+    config.write_enabled = True
+    config.docs_enabled = False
+    assert config.docs_available is False
+
+
+def test_a_ceiling_below_its_floor_is_a_configuration_error():
+    with pytest.raises(ValueError, match="docs.max_file_bytes"):
+        AgenticKnowledgeConfig.from_json('{"docs": {"max_file_bytes": 8}}')
+    with pytest.raises(ValueError, match="docs.max_total_bytes"):
+        AgenticKnowledgeConfig.from_json(
+            '{"docs": {"max_file_bytes": 4096, "max_total_bytes": 1024}}'
+        )
+    # A file is one document and the engine splits it, so there is no section
+    # ceiling left to get wrong: the key is ignored, not validated.
+    assert (
+        AgenticKnowledgeConfig.from_json('{"docs": {"max_section_chars": 10}}')
+        is not None
+    )
+    with pytest.raises(ValueError, match="Unknown knowledge config keys"):
+        AgenticKnowledgeConfig.from_json(
+            '{"worker": {"chunk_tokens": 400, "chunk_overlap": 400}}'
+        )
+    config = AgenticKnowledgeConfig(
+        worker=WorkerSettings(chunk_tokens=400, chunk_overlap=400)
+    )
+    with pytest.raises(ValueError, match="worker.chunk_overlap"):
+        config.validate()

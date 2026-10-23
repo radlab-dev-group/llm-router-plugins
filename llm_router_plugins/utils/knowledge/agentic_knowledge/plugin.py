@@ -20,6 +20,7 @@ plugin cannot serve comes back the very object it was given.
 """
 
 import logging
+import time
 
 from typing import Any, Dict, Optional, Tuple
 
@@ -50,6 +51,10 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
 from llm_router_plugins.utils.knowledge.agentic_knowledge.debug_capture import (
     capture_payload as _capture_payload,
 )
+from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
+    DocsIndexer,
+    ScanOutcome,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.escalation import (
     ACTION_ESCALATE,
     EscalationDecision,
@@ -64,6 +69,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.miner import EpisodeMi
 from llm_router_plugins.utils.knowledge.agentic_knowledge.query import QueryBuilder
 from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import ScopeResolver
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+    REASON_READ_BUDGET,
     KnowledgeStore,
     STATUS_DISABLED,
     STATUS_OK,
@@ -129,6 +135,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._query_builder: Optional[QueryBuilder] = None
         self._escalation: Optional[EscalationPolicy] = None
         self._limiter: Optional[LookupLimiter] = None
+        self._docs: Optional[DocsIndexer] = None
         self._wire(self._config)
 
     # -------------------------------------------------------------- wiring -
@@ -154,6 +161,7 @@ class AgenticKnowledgePlugin(PluginInterface):
                 min_similarity=config.min_similarity,
                 hybrid_search=config.hybrid_search,
                 rerank_results=config.rerank_results,
+                ignore_language_detect=config.sse_ignore_language_detect,
                 logger=self._logger,
             )
         if self._publisher is None:
@@ -183,6 +191,12 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._escalation = EscalationPolicy(config)
         self._limiter = LookupLimiter(
             max_per_generation=config.max_lookups_per_generation
+        )
+        # Built whether or not documentation is enabled: the indexer is the one
+        # that says why it did nothing, and a plugin whose documentation path
+        # quietly never existed is the failure this layer keeps avoiding.
+        self._docs = DocsIndexer(
+            config=config, publisher=self._publisher, logger=self._logger
         )
         if self._logger is not None:
             # One line per process, at a level an operator actually reads.  The
@@ -246,14 +260,17 @@ class AgenticKnowledgePlugin(PluginInterface):
         )
         mining = self._mine(turn)
         publish = self._publish(mining, config, turn)
+        docs = self._index_docs(turn, config)
 
         if turn.request_class == _REQUEST_CLASS_COMPACTION:
             # A window about to be summarized is written, never read from.
             self._annotate(
-                payload, adapter, turn, None, EscalationDecision(), publish
+                payload, adapter, turn, None, EscalationDecision(), publish, docs
             )
             return payload
-        return self._serve_read(adapter, turn, payload, config, mining, publish)
+        return self._serve_read(
+            adapter, turn, payload, config, mining, publish, docs
+        )
 
     # ----------------------------------------------------------- read path -
     def _serve_read(
@@ -264,6 +281,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         config: AgenticKnowledgeConfig,
         mining: Any,
         publish: PublishStatus,
+        docs: Optional[ScanOutcome] = None,
     ) -> Any:
         """Search, inject, decide escalation, and annotate — in one pass."""
         read_on = config.read_available
@@ -284,13 +302,17 @@ class AgenticKnowledgePlugin(PluginInterface):
                 deadends=cached.context.deadends,
                 cache="hit",
                 status=cached.context.status,
+                doc_context=cached.context.doc_context,
             )
         else:
-            context = self._assemble(turn, config, policy, mining)
+            context = self._assemble(
+                turn, config, policy, mining, self._doc_context(turn, docs)
+            )
 
         if not context.empty:
             payload = adapter.inject(payload, context.rendered)
 
+        recipe_trials = dict(cached.recipe_trials) if cached is not None else {}
         decision = (
             self._escalation.decide(
                 turn,
@@ -298,6 +320,7 @@ class AgenticKnowledgePlugin(PluginInterface):
                 policy,
                 mining.loop_count,
                 mining.signature_hash,
+                recipe_offered_at=recipe_trials.get(mining.signature_hash),
             )
             if self._escalation is not None
             else EscalationDecision()
@@ -341,8 +364,16 @@ class AgenticKnowledgePlugin(PluginInterface):
             # this generation built under a live read path stays intact, so
             # switching reads back on resumes instead of finding an empty block
             # it would treat as fresh.
-            self._remember_context(turn, context, target)
-        self._annotate(payload, adapter, turn, context, decision, publish)
+            if (
+                self._escalation is not None
+                and mining.loop_count > 0
+                and self._escalation.has_strong_recipe(
+                    context, mining.signature_hash
+                )
+            ):
+                recipe_trials.setdefault(mining.signature_hash, mining.loop_count)
+            self._remember_context(turn, context, target, recipe_trials)
+        self._annotate(payload, adapter, turn, context, decision, publish, docs)
         return payload
 
     def _assemble(
@@ -351,10 +382,13 @@ class AgenticKnowledgePlugin(PluginInterface):
         config: AgenticKnowledgeConfig,
         policy: Any,
         mining: Any,
+        doc_context: Any = None,
     ) -> KnowledgeContext:
         """Search the sources and assemble the block; fail-open to an empty one."""
         if policy is None:
-            return KnowledgeContext(cache="disabled", status="disabled")
+            return KnowledgeContext(
+                cache="disabled", status="disabled", doc_context=doc_context
+            )
         if not turn.scope:
             return KnowledgeContext(cache="miss", status="disabled")
         generation = turn.cache_generation
@@ -365,9 +399,19 @@ class AgenticKnowledgePlugin(PluginInterface):
 
         results = []
         statuses = set()
+        # One budget for the whole read, not one per source: a mode asks one
+        # question per collection and they are asked one after another, so
+        # without a shared ceiling a request pays the transport timeout as
+        # many times as the mode has sources.  The store starts a search only
+        # while a whole call fits before this moment, which is what makes
+        # `read_timeout_seconds` the number a request actually waits.
+        deadline = time.monotonic() + self._config.read_timeout_seconds
+        skipped = 0
         for request in self._query_builder.build(turn, policy):
             try:
-                result = self._store.search(request)
+                result = self._store.search(request, deadline=deadline)
+                if result.reason == REASON_READ_BUDGET:
+                    skipped += 1
             except Exception as exc:
                 self._warn("knowledge search failed: %s", type(exc).__name__)
                 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
@@ -377,6 +421,16 @@ class AgenticKnowledgePlugin(PluginInterface):
                 result = _SR(STATUS_UNAVAILABLE, reason="search")
             statuses.add(result.status)
             results.append((result, request.categories))
+        if skipped:
+            # The reads the operator will otherwise conclude never happened.
+            self._warn(
+                "knowledge read budget of %.1fs spent: %d search(es) of %s not "
+                "started (raise READ_TIMEOUT_SECONDS or shorten the mode's "
+                "sources)",
+                self._config.read_timeout_seconds,
+                skipped,
+                turn.scope or "?",
+            )
         status = _status_of(statuses)
 
         assembler = ContextAssembler(
@@ -384,7 +438,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             touched_paths=turn.touched_paths,
             local_deadends=mining.tried,
         )
-        context = assembler.assemble(results, policy)
+        context = assembler.assemble(results, policy, doc_context=doc_context)
         return KnowledgeContext(
             hits=context.hits,
             rendered=context.rendered,
@@ -393,6 +447,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             deadends=context.deadends,
             cache="miss",
             status=status,
+            doc_context=context.doc_context,
         )
 
     # ---------------------------------------------------------- cache path -
@@ -420,7 +475,11 @@ class AgenticKnowledgePlugin(PluginInterface):
         return cached.escalated_model or ""
 
     def _remember_context(
-        self, turn: AgentTurn, context: KnowledgeContext, escalated_model: str
+        self,
+        turn: AgentTurn,
+        context: KnowledgeContext,
+        escalated_model: str,
+        recipe_trials: Optional[Dict[str, int]] = None,
     ) -> None:
         """Remember the block for the rest of the generation, if caching is on."""
         cache = self._cache
@@ -435,6 +494,7 @@ class AgenticKnowledgePlugin(PluginInterface):
                 mode=turn.mode,
                 escalated=bool(escalated_model),
                 escalated_model=escalated_model,
+                recipe_trials=dict(recipe_trials or {}),
             ),
         )
 
@@ -477,9 +537,11 @@ class AgenticKnowledgePlugin(PluginInterface):
             if events:
                 self._debug(
                     "agentic knowledge write skipped: %s",
-                    "write disabled"
-                    if not config.write_enabled
-                    else "no Redis configured",
+                    (
+                        "write disabled"
+                        if not config.write_enabled
+                        else "no Redis configured"
+                    ),
                 )
             return PublishStatus()
         if not turn.scope:
@@ -524,6 +586,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         context: Optional[KnowledgeContext],
         decision: EscalationDecision,
         publish: Optional[PublishStatus],
+        docs: Optional[ScanOutcome] = None,
     ) -> None:
         """Write the knowledge layer's decision into ``payload["routing"]``."""
         routing = payload.get("routing")
@@ -558,7 +621,69 @@ class AgenticKnowledgePlugin(PluginInterface):
                 "errors": publish.errors,
                 "status": publish.status,
             }
+        if docs is not None:
+            knowledge["docs"] = docs.as_dict()
+        if context is not None and getattr(context, "doc_context", None):
+            digest = context.doc_context
+            knowledge["doc_context"] = {
+                "level": "digest",
+                "chars": digest.chars,
+                "source_files": list(digest.source_files)[:8],
+            }
         routing["knowledge"] = knowledge
+
+    def _index_docs(
+        self, turn: AgentTurn, config: AgenticKnowledgeConfig
+    ) -> Optional[ScanOutcome]:
+        """
+        Offer the repository's documentation to the knowledge base.
+
+        Returns ``None`` — no annotation at all — when documentation is not part
+        of this deployment, or when the request named no repository: reading a
+        filesystem is only worth doing when its result has a collection to live
+        in.  The indexer itself is cooldown-bound and never raises; this is the
+        belt for the case where it does.
+        """
+        if not config.docs_available or self._docs is None:
+            return None
+        if not turn.scope or not turn.repo_root:
+            return None
+        try:
+            return self._docs.index(
+                turn.scope,
+                turn.repo_root,
+                agent=turn.agent,
+                model=turn.model,
+                generation=turn.cache_generation,
+            )
+        except Exception as exc:
+            self._warn("knowledge docs scan failed: %s", type(exc).__name__)
+            return ScanOutcome(status=STATUS_UNAVAILABLE, reason="scan")
+
+    def _doc_context(self, turn: AgentTurn, docs: Optional[ScanOutcome]) -> Any:
+        """
+        Return the standing documentation digest for this request.
+
+        The scan that just ran carries the digest it refreshed; every other
+        request of the session reads the same map from the store, so a long
+        session sees one stable digest of what the repository has written down
+        rather than re-walking it per command.  ``None`` — no standing context —
+        when documentation is off, no repository is known, or nothing has been
+        scanned yet.  Never raises: this is context, not a dependency.
+        """
+        if not self._config or not self._config.doc_context_enabled:
+            return None
+        if not self._config.docs_available or self._docs is None:
+            return None
+        if not turn.scope:
+            return None
+        if docs is not None and docs.context is not None:
+            return docs.context
+        try:
+            return self._docs.context(turn.scope)
+        except Exception as exc:
+            self._warn("knowledge doc context read failed: %s", type(exc).__name__)
+            return None
 
     def _warn(self, message: str, *args: Any) -> None:
         """Report one failure when a logger was given."""
@@ -602,8 +727,7 @@ def _payload_shape(payload: Any) -> str:
             kind = f"{kind}:{name}"
         shapes[kind] = shapes.get(kind, 0) + 1
     return "items=" + (
-        ",".join(f"{kind}:{count}" for kind, count in sorted(shapes.items()))
-        or "0"
+        ",".join(f"{kind}:{count}" for kind, count in sorted(shapes.items())) or "0"
     )
 
 
@@ -622,9 +746,9 @@ def _turn_shape(turn: Any) -> str:
         if getattr(item, "kind", "") == "function_call":
             name = getattr(item, "name", "") or "?"
             calls[name] = calls.get(name, 0) + 1
-    tools = ",".join(
-        f"{name}:{count}" for name, count in sorted(calls.items())
-    ) or "-"
+    tools = (
+        ",".join(f"{name}:{count}" for name, count in sorted(calls.items())) or "-"
+    )
     states = []
     for evidence in list(getattr(turn, "evidence", ()) or ())[-8:]:
         outcome = getattr(evidence, "succeeded", None)
@@ -671,6 +795,8 @@ def _wiring_summary(
         f"/rerank:{_on_off(config.rerank_results)}"
         f", write={config.write_available}"
         f", archive={config.archive_available}"
+        f", docs={_on_off(config.docs_enabled)}"
+        f"/{'auto' if config.docs_auto_index else 'manual'}"
         f", escalation={config.escalation_available}"
         f", phase_rules={'on' if rules_on else 'OFF (nothing will be mined)'}"
         f", stream={config.stream_key}"

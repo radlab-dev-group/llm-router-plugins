@@ -111,9 +111,7 @@ def _heredoc_patch(call_id, event_id, paths=("src/a.py",), cwd="/repo"):
     The envelope rides as a here-document piped to ``apply_patch`` inside an
     ``exec_command``, so no call is named after the patch at all.
     """
-    command = (
-        f"cd {cwd} && apply_patch <<'PATCH'\n{patch_envelope(paths)}\nPATCH"
-    )
+    command = f"cd {cwd} && apply_patch <<'PATCH'\n{patch_envelope(paths)}\nPATCH"
     return _command(call_id, event_id, command)
 
 
@@ -236,9 +234,11 @@ class FakeStore:
         self.hits = tuple(hits)
         self.status = status
         self.requests = []
+        self.deadlines = []
 
-    def search(self, request):
+    def search(self, request, *, deadline=None):
         self.requests.append(request)
+        self.deadlines.append(deadline)
         return SearchResult(self.status, hits=self.hits)
 
 
@@ -387,6 +387,10 @@ class FakeSSE:
         #: empty by default so a double that never lists keeps old behaviour.
         self.catalogue = tuple(catalogue or ())
         self.indexed = []
+        self.uploaded = []
+        #: The ``indexing_options`` of each indexed call, in order: a test can
+        #: see what chunking the worker sent with the documents.
+        self.indexing_options = []
         self.deleted = []
         self.deactivated = []
         self.created = []
@@ -423,9 +427,18 @@ class FakeSSE:
             raise RuntimeError("no such endpoint")
         return list(self.rerankers)
 
-    def index_documents(self, collection, documents):
+    def index_documents(self, collection, documents, indexing_options=None):
         self._maybe_fail("index_documents")
         self.indexed.append((collection, documents))
+        self.indexing_options.append(indexing_options)
+        return {}
+
+    def upload_files(
+        self, collection, files, *, indexing_options=None, file_metadata=None
+    ):
+        self._maybe_fail("upload_files")
+        self.uploaded.append((collection, files, file_metadata))
+        self.indexing_options.append(indexing_options)
         return {}
 
     def list_document_details(self, collection):

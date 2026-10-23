@@ -1,6 +1,9 @@
 {
-  "description": "Agentic knowledge layer — reads verified fixes, dead ends and the pre-compaction archive from the Semantic Search Engine and injects them into coding-agent requests, while mining new knowledge out of the traffic. A source may list the work phases it is read in (\"phases\": [\"test\"]) — an empty list reads every phase. Connection settings (SSE, Redis) come from the LLM_ROUTER_KNOWLEDGE_AGENTIC_* environment only; this file holds policy.",
-  "adapters": ["codex", "claude_code"],
+  "description": "Agentic knowledge layer — reads verified fixes, dead ends, the pre-compaction archive and this repository's own documentation from the Semantic Search Engine and injects them into coding-agent requests, while mining new knowledge out of the traffic. A source may list the work phases it is read in (\"phases\": [\"test\"]) — an empty list reads every phase. The doc source may list the documentation kinds it reads (\"doc_types\": [\"guide\"]) — readme, guide, changelog, contributing, security, license, agent, note; an empty list reads every kind, and the restriction belongs to the doc source alone. Documentation lives in <prefix>_<scope>_docs, apart from mined knowledge. The \"docs\" section decides whether a repository's markdown is scanned and published (by a request, or only by llm-router-agentic-kb-docs), and whether a short standing map of that documentation (\"context_*\") is injected on every request of a session. Connection settings (SSE, Redis) come from the LLM_ROUTER_KNOWLEDGE_AGENTIC_* environment only; this file holds policy.",
+  "adapters": [
+    "codex",
+    "claude_code"
+  ],
   "collection_prefix": "agentic_kb",
   "scope": {
     "strategy": "repo_basename",
@@ -19,49 +22,129 @@
     "debug": {
       "max_chars": 6000,
       "sources": [
-        {"category": "recipe", "weight": 1.0, "max_items": 3},
-        {"category": "deadend", "weight": 0.9, "max_items": 3},
-        {"category": "session_archive", "weight": 0.6, "max_items": 3}
+        {
+          "category": "recipe",
+          "weight": 1.0,
+          "max_items": 3
+        },
+        {
+          "category": "deadend",
+          "weight": 0.9,
+          "max_items": 3
+        },
+        {
+          "category": "session_archive",
+          "weight": 0.6,
+          "max_items": 3
+        }
       ],
       "escalation_model_name": "qwen/Qwen3.8-27B"
     },
     "test": {
       "max_chars": 5000,
       "sources": [
-        {"category": "recipe", "weight": 1.0, "max_items": 3},
-        {"category": "deadend", "weight": 0.9, "max_items": 3},
-        {"category": "session_archive", "weight": 0.5, "max_items": 2}
+        {
+          "category": "recipe",
+          "weight": 1.0,
+          "max_items": 3
+        },
+        {
+          "category": "deadend",
+          "weight": 0.9,
+          "max_items": 3
+        },
+        {
+          "category": "session_archive",
+          "weight": 0.5,
+          "max_items": 2
+        }
       ],
       "escalation_model_name": "qwen/Qwen3.8-27B"
     },
     "implement": {
       "max_chars": 5000,
       "sources": [
-        {"category": "recipe", "weight": 0.9, "max_items": 2},
-        {"category": "session_archive", "weight": 0.6, "max_items": 3},
-        {"category": "doc", "weight": 0.5, "max_items": 2}
+        {
+          "category": "recipe",
+          "weight": 0.9,
+          "max_items": 2
+        },
+        {
+          "category": "session_archive",
+          "weight": 0.6,
+          "max_items": 3
+        },
+        {
+          "category": "doc",
+          "weight": 0.5,
+          "max_items": 2,
+          "doc_types": [
+            "readme",
+            "guide",
+            "contributing"
+          ]
+        }
       ]
     },
     "plan": {
       "max_chars": 4000,
       "sources": [
-        {"category": "session_archive", "weight": 0.7, "max_items": 3},
-        {"category": "doc", "weight": 0.6, "max_items": 3}
+        {
+          "category": "session_archive",
+          "weight": 0.7,
+          "max_items": 3
+        },
+        {
+          "category": "doc",
+          "weight": 0.6,
+          "max_items": 3,
+          "doc_types": [
+            "readme",
+            "guide",
+            "changelog",
+            "note"
+          ]
+        }
       ]
     },
     "git_review": {
       "max_chars": 4000,
       "sources": [
-        {"category": "recipe", "weight": 0.7, "max_items": 2},
-        {"category": "deadend", "weight": 0.6, "max_items": 2},
-        {"category": "session_archive", "weight": 0.5, "max_items": 2}
+        {
+          "category": "recipe",
+          "weight": 0.7,
+          "max_items": 2
+        },
+        {
+          "category": "deadend",
+          "weight": 0.6,
+          "max_items": 2
+        },
+        {
+          "category": "session_archive",
+          "weight": 0.5,
+          "max_items": 2
+        }
       ]
     },
     "review": {
       "max_chars": 4000,
       "sources": [
-        {"category": "doc", "weight": 0.8, "max_items": 3},
-        {"category": "session_archive", "weight": 0.5, "max_items": 2}
+        {
+          "category": "doc",
+          "weight": 0.8,
+          "max_items": 3,
+          "doc_types": [
+            "guide",
+            "contributing",
+            "security"
+          ]
+        },
+        {
+          "category": "session_archive",
+          "weight": 0.5,
+          "max_items": 2
+        }
       ]
     }
   },
@@ -84,5 +167,44 @@
     "enabled": false,
     "loop_threshold": 3,
     "strong_recipe_score": 0.75
+  },
+  "docs": {
+    "enabled": true,
+    "auto_index": true,
+    "patterns": [
+      "*.md",
+      "*.markdown",
+      "*.mdx"
+    ],
+    "excluded_dirs": [
+      "node_modules",
+      "bower_components",
+      "dist",
+      "build",
+      "target",
+      "vendor",
+      "site-packages",
+      "__pycache__",
+      ".venv",
+      "venv",
+      "env",
+      ".tox",
+      ".mypy_cache",
+      ".pytest_cache",
+      ".ruff_cache",
+      "coverage",
+      "htmlcov",
+      "site",
+      ".idea",
+      ".vscode"
+    ],
+    "max_files": 200,
+    "max_file_bytes": 200000,
+    "max_total_bytes": 2000000,
+    "rescan_interval_seconds": 21600,
+    "state_ttl_seconds": 7776000,
+    "context_enabled": true,
+    "context_max_chars": 700,
+    "context_ttl_seconds": 86400
   }
 }

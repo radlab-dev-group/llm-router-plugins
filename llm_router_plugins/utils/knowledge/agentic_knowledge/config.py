@@ -39,7 +39,13 @@ JSON structure::
                 "archive": {"enabled": true, "max_chunk_chars": 2000,
                             "ttl_seconds": 1209600}},
       "escalation": {"enabled": false, "loop_threshold": 3,
-                     "strong_recipe_score": 0.75}
+                     "strong_recipe_score": 0.75},
+      "docs": {"enabled": true, "auto_index": true,
+               "patterns": ["*.md"], "excluded_dirs": ["node_modules"],
+               "max_files": 200, "max_file_bytes": 200000,
+               "max_total_bytes": 2000000,
+               "rescan_interval_seconds": 21600,
+               "state_ttl_seconds": 7776000}
     }
 """
 
@@ -49,7 +55,7 @@ import pathlib
 import re
 
 from dataclasses import dataclass, field, replace
-from typing import Any, ClassVar, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, ClassVar, Dict, Mapping, Optional, Tuple
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import (
     SCOPE_STRATEGIES,
@@ -67,6 +73,42 @@ __all__ = [
     "SourcePolicy",
     "WorkerSettings",
 ]
+
+#: Filename patterns the documentation scan picks up by default.  Markdown is
+#: the lingua franca of a repository's own documentation; an .rst tree is worth
+#: adding by an operator who has one.
+DEFAULT_DOC_PATTERNS: Tuple[str, ...] = ("*.md", "*.markdown", "*.mdx")
+
+#: Directories a documentation scan never descends into.  Everything here is
+#: either a dependency's documentation (retrieved as the team's own, which it
+#: is not), a build artifact, or a tool's cache — noise in all three cases, and
+#: in the first two a great deal of it.
+DEFAULT_DOC_EXCLUDED_DIRS: Tuple[str, ...] = (
+    ".git",
+    ".hg",
+    ".svn",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    ".env",
+    ".idea",
+    ".vscode",
+    "node_modules",
+    "bower_components",
+    "venv",
+    "env",
+    "dist",
+    "build",
+    "target",
+    "site-packages",
+    "__pycache__",
+    "vendor",
+    "coverage",
+    "htmlcov",
+    "site",
+)
 
 #: Prefix of every environment variable this plugin reads.
 AGENTIC_KNOWLEDGE_ENV_PREFIX = "LLM_ROUTER_KNOWLEDGE_AGENTIC_"
@@ -105,7 +147,16 @@ _DEFAULT_COLLECTION_PREFIX = _engine_collection_fragment(
 
 #: Ceiling of one read call, so a typo cannot stall a request.
 _MAX_SSE_TIMEOUT_SECONDS = 10.0
-_DEFAULT_READ_TIMEOUT_SECONDS = 1.5
+#: Ceiling of one call to the engine.  A hybrid search of a real collection
+#: measured a median of 1.7 s (engine and plugin on separate hosts), so a call
+#: allowed 1.5 s loses most of the searches it makes to its own timeout; 2 s is
+#: the shortest number that answers more often than it times out.
+_DEFAULT_SSE_TIMEOUT_SECONDS = 2.0
+#: Budget of the read path: what one request may spend on the engine in total.
+#: A mode asks the engine several questions (one per collection), and they are
+#: asked one after another, so the request's ceiling has to be a sum — two
+#: calls of :data:`_DEFAULT_SSE_TIMEOUT_SECONDS` is what the common mode does.
+_DEFAULT_READ_TIMEOUT_SECONDS = 4.0
 _DEFAULT_MIN_SIMILARITY = 0.35
 
 #: Both legs of the engine fused by Reciprocal Rank Fusion is what its
@@ -128,15 +179,41 @@ _DEFAULT_RETENTION_INTERVAL_SECONDS = 21_600
 _DEFAULT_MAX_PENDING = 1_000
 _DEFAULT_WORKER_BATCH = 32
 
-#: Chunking declared for a collection the worker creates.  The engine cuts the
-#: *embedded* text at 508 tokens however a collection is declared, so a chunk
-#: of 500 is truncated by the embedder while one of 400 is not: at 400 tokens
-#: with a 60-token overlap a chunk and its neighbour still share a sentence or
-#: two, which is what makes a recipe's failure and its fix retrieve together.
-#: ``0`` still means "declare nothing" and leaves the engine's own default.
+#: Chunking of a collection: declared when the worker **creates** one and
+#: repeated on every indexing call, because the engine only splits a document
+#: the way the call says, and a document indexed with different numbers than
+#: the collection declares is a document split unlike its neighbours.  The
+#: engine cuts the *embedded* text at 508 tokens however a collection is
+#: declared, so a chunk of 500 is truncated by the embedder while one of 400 is
+#: not: at 400 tokens with a 60-token overlap a chunk and its neighbour still
+#: share a sentence or two, which is what makes a recipe's failure and its fix
+#: retrieve together.  ``0`` means "say nothing" at creation and at indexing
+#: alike, which leaves the engine's own default on both sides.
 _DEFAULT_CHUNK_TOKENS = 400
 _DEFAULT_CHUNK_OVERLAP = 60
 _DEFAULT_WORKER_BLOCK_MS = 5_000
+
+#: Ceilings of the documentation scan.  They are budgets, not expectations: a
+#: scan that runs out of one stops and says so, because pruning against a
+#: partial listing would delete the documentation the scan never reached.
+_DEFAULT_DOC_MAX_FILES = 200
+_DEFAULT_DOC_MAX_FILE_BYTES = 200_000
+_DEFAULT_DOC_MAX_TOTAL_BYTES = 2_000_000
+
+#: How often one process looks at the repository's documentation again.
+_DEFAULT_DOC_RESCAN_INTERVAL_SECONDS = 21_600
+
+#: Lifetime of a scope's scan state.  It has to outlive a redeploy — losing it
+#: means re-publishing every document — while a scope that has gone quiet should
+#: not hold its listing in Redis forever.
+_DEFAULT_DOC_STATE_TTL_SECONDS = 7_776_000
+
+#: Budget of the stable documentation digest the session carries.  It is always
+#: present, so it must be short enough to pay for itself on every request of a
+#: long session; the deep chunks are what a matching query buys.
+_DEFAULT_DOC_CONTEXT_ENABLED = True
+_DEFAULT_DOC_CONTEXT_CHARS = 700
+_DEFAULT_DOC_CONTEXT_TTL_SECONDS = 86_400
 
 _INDEX_TYPES = ("HNSW", "IVF_FLAT")
 
@@ -158,6 +235,13 @@ class SourcePolicy:
         Work phases this source is read in; empty — the default — reads it in
         every phase.  A phase is the work the episode was doing (`test`,
         `implement`), the document kind is what it produced (`recipe`).
+    doc_types : Tuple[str, ...]
+        Documentation kinds this source reads; empty — the default — reads
+        every kind.  A second metadata dimension for the ``doc`` category,
+        which otherwise would have none: the engine unions several
+        ``metadata_filters`` with each other, so the list is the one that
+        is put in the slot.  Allowed on the ``doc`` source only, because
+        it is the only category whose documents carry a ``doc_type``.
     modes : Tuple[str, ...]
         Routing modes this source is read in; empty — the default — reads it in
         every mode.  Mutually exclusive with *phases* for sources retrieved by
@@ -171,6 +255,7 @@ class SourcePolicy:
     max_items: int = 3
     phases: Tuple[str, ...] = ()
     modes: Tuple[str, ...] = ()
+    doc_types: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -223,12 +308,14 @@ class WorkerSettings:
     index_type : str
         Vector index type for a new collection.
     chunk_tokens : int
-        Chunk size declared for a new collection; ``0`` leaves the server
-        default.  Applied when a collection is *created* only — changing it
-        never re-splits one that already exists.
+        Chunk size, in tokens: declared when a collection is created and sent
+        again on every indexing call, so a document is split the way the
+        collection says it is split.  Changing it never re-splits a collection
+        that already exists; ``0`` declares nothing on either side and leaves
+        the engine's own default.
     chunk_overlap : int
-        Chunk overlap declared for a new collection, in tokens, and smaller
-        than *chunk_tokens*.
+        Chunk overlap, in tokens, sent with the same two-sided rule and always
+        smaller than *chunk_tokens*.
     retention_interval_seconds : int
         Seconds between retention passes; ``0`` disables them.
     max_pending : int
@@ -270,8 +357,13 @@ class AgenticKnowledgeConfig:
 
     read_enabled: bool = True
     #: Budget of the read path: how long the knowledge layer may spend on the
-    #: engine for one request.  It drives the engine client's own timeout, so
-    #: the number the operator wrote is the number a request waits.
+    #: engine for **one request in total**.  A mode asks one question per
+    #: collection and the questions are asked one after another, so this is a
+    #: sum and :attr:`sse_timeout_seconds` is the share one of them may take:
+    #: a search is not started unless a whole call still fits before the budget
+    #: runs out.  The number the operator wrote is therefore the ceiling a
+    #: request actually waits, not a per-call figure multiplied by the number
+    #: of sources the mode reads.
     read_timeout_seconds: float = _DEFAULT_READ_TIMEOUT_SECONDS
     min_similarity: float = _DEFAULT_MIN_SIMILARITY
     #: Fuse the vector leg with the engine's full-text leg.
@@ -291,6 +383,29 @@ class AgenticKnowledgeConfig:
     archive_max_chunk_chars: int = _DEFAULT_ARCHIVE_CHUNK_CHARS
     archive_ttl_seconds: int = _DEFAULT_ARCHIVE_TTL_SECONDS
 
+    #: Whether the repository's own documentation belongs to the knowledge base.
+    docs_enabled: bool = True
+    #: Whether a request may trigger a documentation scan.  Off means the
+    #: documentation is indexed by hand, with the operator's own command.
+    docs_auto_index: bool = True
+    #: Filename patterns a scan picks up.
+    docs_patterns: Tuple[str, ...] = DEFAULT_DOC_PATTERNS
+    #: Directory names a scan does not descend into.
+    docs_excluded_dirs: Tuple[str, ...] = DEFAULT_DOC_EXCLUDED_DIRS
+    docs_max_files: int = _DEFAULT_DOC_MAX_FILES
+    docs_max_file_bytes: int = _DEFAULT_DOC_MAX_FILE_BYTES
+    docs_max_total_bytes: int = _DEFAULT_DOC_MAX_TOTAL_BYTES
+    docs_rescan_interval_seconds: int = _DEFAULT_DOC_RESCAN_INTERVAL_SECONDS
+    docs_state_ttl_seconds: int = _DEFAULT_DOC_STATE_TTL_SECONDS
+    #: Whether the session carries a stable digest of the repository's own
+    #: documentation, injected on every request of the session.
+    doc_context_enabled: bool = _DEFAULT_DOC_CONTEXT_ENABLED
+    #: Most characters the digest may occupy; the README's head and the
+    #: repository's top-level headings, trimmed to this.
+    doc_context_max_chars: int = _DEFAULT_DOC_CONTEXT_CHARS
+    #: How long a session's digest survives; a session, not a generation.
+    doc_context_ttl_seconds: int = _DEFAULT_DOC_CONTEXT_TTL_SECONDS
+
     escalation_enabled: bool = False
     loop_threshold: int = _DEFAULT_LOOP_THRESHOLD
     strong_recipe_score: float = _DEFAULT_STRONG_RECIPE_SCORE
@@ -306,8 +421,17 @@ class AgenticKnowledgeConfig:
     #: An empty password is no credential, and a token, when set, wins.
     sse_username: str = ""
     sse_password: str = ""
-    sse_timeout_seconds: float = _DEFAULT_READ_TIMEOUT_SECONDS
+    #: Ceiling of one call to the engine; always within the read budget.
+    sse_timeout_seconds: float = _DEFAULT_SSE_TIMEOUT_SECONDS
     sse_verify: bool = True
+    #: Ask the engine not to detect the language of the query.  The engine uses
+    #: what it detects twice: as a metadata filter on the vector leg, and as
+    #: the name of the PostgreSQL full-text configuration.  A knowledge base is
+    #: indexed in the language of the code and asked in the language of the
+    #: operator, so the first filters the answers away and the second asks the
+    #: cluster for a configuration it may not have — which is a 500, not an
+    #: empty result.
+    sse_ignore_language_detect: bool = True
 
     redis: RedisConnectionSettings = field(default_factory=RedisConnectionSettings)
     worker: WorkerSettings = field(default_factory=WorkerSettings)
@@ -376,6 +500,7 @@ class AgenticKnowledgeConfig:
         read = _section(data, "read")
         write = _section(data, "write")
         archive = _section(write, "archive")
+        docs = _section(data, "docs")
         escalation = _section(data, "escalation")
         scope = _section(data, "scope")
         claude = _section(data, "claude_code")
@@ -449,6 +574,50 @@ class AgenticKnowledgeConfig:
                 archive.get("ttl_seconds", _DEFAULT_ARCHIVE_TTL_SECONDS),
                 "write.archive.ttl_seconds",
             ),
+            docs_enabled=_boolean(docs.get("enabled", True), "docs.enabled"),
+            docs_auto_index=_boolean(
+                docs.get("auto_index", True), "docs.auto_index"
+            ),
+            docs_patterns=_string_list(
+                docs.get("patterns", DEFAULT_DOC_PATTERNS), "docs.patterns"
+            ),
+            docs_excluded_dirs=_string_list(
+                docs.get("excluded_dirs", DEFAULT_DOC_EXCLUDED_DIRS),
+                "docs.excluded_dirs",
+            ),
+            docs_max_files=_positive(
+                docs.get("max_files", _DEFAULT_DOC_MAX_FILES), "docs.max_files"
+            ),
+            docs_max_file_bytes=_positive(
+                docs.get("max_file_bytes", _DEFAULT_DOC_MAX_FILE_BYTES),
+                "docs.max_file_bytes",
+            ),
+            docs_max_total_bytes=_positive(
+                docs.get("max_total_bytes", _DEFAULT_DOC_MAX_TOTAL_BYTES),
+                "docs.max_total_bytes",
+            ),
+            docs_rescan_interval_seconds=_non_negative(
+                docs.get(
+                    "rescan_interval_seconds", _DEFAULT_DOC_RESCAN_INTERVAL_SECONDS
+                ),
+                "docs.rescan_interval_seconds",
+            ),
+            docs_state_ttl_seconds=_positive(
+                docs.get("state_ttl_seconds", _DEFAULT_DOC_STATE_TTL_SECONDS),
+                "docs.state_ttl_seconds",
+            ),
+            doc_context_enabled=_boolean(
+                docs.get("context_enabled", _DEFAULT_DOC_CONTEXT_ENABLED),
+                "docs.context_enabled",
+            ),
+            doc_context_max_chars=_positive(
+                docs.get("context_max_chars", _DEFAULT_DOC_CONTEXT_CHARS),
+                "docs.context_max_chars",
+            ),
+            doc_context_ttl_seconds=_positive(
+                docs.get("context_ttl_seconds", _DEFAULT_DOC_CONTEXT_TTL_SECONDS),
+                "docs.context_ttl_seconds",
+            ),
             escalation_enabled=_boolean(
                 escalation.get("enabled", False), "escalation.enabled"
             ),
@@ -510,13 +679,17 @@ class AgenticKnowledgeConfig:
                 continue
             setattr(self, target, cast(raw, f"{prefix}{name}"))
 
-        # Whether the operator pinned the transport timeout apart from the read
-        # budget; `SSE_API_TIMEOUT` is one name among many below, so the flag
-        # has to start false rather than appear with it.
-        sse_timeout_overridden = False
-        for name, target, cast in (
+        # One annotated tuple rather than a literal one: the casts differ in
+        # what they return, and unpacking a heterogeneous literal makes mypy
+        # hold the first entry's type for the whole loop.
+        casts: Tuple[Tuple[str, str, Callable[[Any, str], Any]], ...] = (
             ("SSE_API_TIMEOUT", "sse_timeout_seconds", _positive_float),
             ("READ_TIMEOUT_SECONDS", "read_timeout_seconds", _positive_float),
+            (
+                "SSE_IGNORE_LANGUAGE_DETECT",
+                "sse_ignore_language_detect",
+                _boolean,
+            ),
             ("MIN_SIMILARITY", "min_similarity", _fraction),
             ("HYBRID_SEARCH", "hybrid_search", _boolean),
             ("RERANK_RESULTS", "rerank_results", _boolean),
@@ -527,23 +700,39 @@ class AgenticKnowledgeConfig:
             ("MAX_PATCH_CHARS", "max_patch_chars", _positive),
             ("ARCHIVE_MAX_CHUNK_CHARS", "archive_max_chunk_chars", _positive),
             ("ARCHIVE_TTL_SECONDS", "archive_ttl_seconds", _positive),
+            ("DOCS_ENABLED", "docs_enabled", _boolean),
+            ("DOCS_AUTO_INDEX", "docs_auto_index", _boolean),
+            ("DOCS_MAX_FILES", "docs_max_files", _positive),
+            ("DOCS_MAX_FILE_BYTES", "docs_max_file_bytes", _positive),
+            ("DOCS_MAX_TOTAL_BYTES", "docs_max_total_bytes", _positive),
+            (
+                "DOCS_RESCAN_INTERVAL_SECONDS",
+                "docs_rescan_interval_seconds",
+                _non_negative,
+            ),
+            ("DOCS_STATE_TTL_SECONDS", "docs_state_ttl_seconds", _positive),
+            ("DOCS_CONTEXT_ENABLED", "doc_context_enabled", _boolean),
+            ("DOCS_CONTEXT_MAX_CHARS", "doc_context_max_chars", _positive),
+            (
+                "DOCS_CONTEXT_TTL_SECONDS",
+                "doc_context_ttl_seconds",
+                _positive,
+            ),
             ("LOOP_THRESHOLD", "loop_threshold", _positive),
             ("STRONG_RECIPE_SCORE", "strong_recipe_score", _fraction),
-        ):
+        )
+        for name, target, cast in casts:
             raw = _env_override(prefix, name)
             if raw is None:
                 continue
             setattr(self, target, cast(raw, f"{prefix}{name}"))
-            if name == "SSE_API_TIMEOUT":
-                sse_timeout_overridden = True
 
-        # The read budget is what a request waits for the engine; the transport
-        # timeout is the same number unless the operator said otherwise.  Left
-        # as two fields because the worker indexes with a far longer timeout
-        # than the proxy searches with, and shares this one.
-        if not sse_timeout_overridden:
-            self.sse_timeout_seconds = self.read_timeout_seconds
-        # A request path may not wait forever, whatever the operator set.
+        # A request path may not wait forever, whatever the operator set, and
+        # the two numbers mean different things: the budget is what a request
+        # waits, the timeout what one of its calls may take.  They used to be
+        # one number, which made a mode that reads three sources wait three
+        # times what the operator wrote — or, at the old 1.5 s default, lose
+        # every search to a timeout the engine cannot beat.
         self.sse_timeout_seconds = min(
             max(self.sse_timeout_seconds, 0.1), _MAX_SSE_TIMEOUT_SECONDS
         )
@@ -596,8 +785,44 @@ class AgenticKnowledgeConfig:
             raise ValueError(f"Unknown adapters: {sorted(unknown)}")
         if self.min_similarity < 0.0 or self.min_similarity > 1.0:
             raise ValueError("min_similarity must be in [0, 1]")
+        # One call has to fit the request's read budget, or the layer would
+        # read nothing at all and report it as an empty knowledge base.  This
+        # invariant belongs to the resolved policy, not to the environment
+        # path that happens to set the numbers, so it is checked here.
+        self.sse_timeout_seconds = min(
+            max(self.sse_timeout_seconds, 0.1), _MAX_SSE_TIMEOUT_SECONDS
+        )
+        self.read_timeout_seconds = min(
+            max(self.read_timeout_seconds, 0.1), _MAX_SSE_TIMEOUT_SECONDS
+        )
+        self.read_timeout_seconds = max(
+            self.read_timeout_seconds, self.sse_timeout_seconds
+        )
         if not 0.0 < self.strong_recipe_score <= 1.0:
             raise ValueError("strong_recipe_score must be in (0, 1]")
+        if self.docs_max_file_bytes < 1024:
+            raise ValueError("docs.max_file_bytes must be at least 1024 bytes")
+        if self.docs_max_total_bytes < self.docs_max_file_bytes:
+            raise ValueError(
+                "docs.max_total_bytes must not be below docs.max_file_bytes"
+            )
+        if not any(str(pattern).strip() for pattern in self.docs_patterns):
+            raise ValueError("docs.patterns must name at least one file pattern")
+        # The same pair the worker declares on a collection and repeats on every
+        # indexing call; the engine refuses ``overlap >= chunk`` and a policy
+        # that says so is a deployment that indexes nothing.
+        if self.worker.chunk_tokens and not (
+            0 <= self.worker.chunk_overlap < self.worker.chunk_tokens
+        ):
+            raise ValueError(
+                "worker.chunk_overlap must be at least 0 and below"
+                f" worker.chunk_tokens, got {self.worker.chunk_overlap} for"
+                f" {self.worker.chunk_tokens}"
+            )
+        if self.doc_context_max_chars < 120:
+            raise ValueError(
+                "docs.context_max_chars must be at least 120 characters"
+            )
         for policy in self.modes.values():
             if policy.max_chars < 200:
                 raise ValueError(
@@ -623,6 +848,25 @@ class AgenticKnowledgeConfig:
                         f"modes.{policy.name} source {source.category} "
                         f"weight must be in (0, 1], got {source.weight}"
                     )
+                if source.category == "doc" and (source.phases or source.modes):
+                    # The doc collection is searched with its own request
+                    # and its own doc_type filter; a phase or mode filter
+                    # would land on the mined-knowledge request the doc
+                    # source never rides on.
+                    raise ValueError(
+                        f"modes.{policy.name} source {source.category} is "
+                        "searched by doc_type and cannot restrict phases "
+                        "or modes"
+                    )
+                if source.doc_types and source.category != "doc":
+                    # doc_type is a field only the documentation header
+                    # writes; a mined recipe carries nothing to match it
+                    # against, so the filter would read as empty and the
+                    # source would silently return nothing.
+                    raise ValueError(
+                        f"modes.{policy.name} source {source.category} has "
+                        "doc_types but only the doc source carries them"
+                    )
                 if source.category == "session_archive" and (
                     source.phases or source.modes
                 ):
@@ -639,7 +883,7 @@ class AgenticKnowledgeConfig:
             shared = [
                 source
                 for source in policy.sources
-                if source.category != "session_archive"
+                if source.category not in ("session_archive", "doc")
             ]
             if any(source.phases for source in shared) and any(
                 source.modes for source in shared
@@ -667,6 +911,17 @@ class AgenticKnowledgeConfig:
         return bool(self.write_available and self.archive_enabled)
 
     @property
+    def docs_available(self) -> bool:
+        """
+        Whether the repository's documentation may be indexed.
+
+        Documentation is written through the same stream as mined knowledge:
+        the proxy reads files and publishes events, the worker masks and
+        indexes them — so no Redis means no documentation either.
+        """
+        return bool(self.write_available and self.docs_enabled)
+
+    @property
     def escalation_available(self) -> bool:
         """Whether a request's model may be escalated."""
         return bool(self.enabled and self.escalation_enabled)
@@ -692,7 +947,9 @@ class AgenticKnowledgeConfig:
         Return the collection one document kind lives in.
 
         Session archives are separated from mined knowledge because they age on
-        a different clock and outnumber everything else.
+        a different clock and outnumber everything else; the repository's own
+        documentation gets a third collection, for the same separation and so
+        a mode's ``doc_types`` restriction is one metadata request, not two.
 
         Parameters
         ----------
@@ -713,8 +970,20 @@ class AgenticKnowledgeConfig:
         # that differ only by punctuation are the same repository as far as a
         # collection name is concerned.
         fragment = _engine_collection_fragment(scope, "scope") if scope else ""
-        base = f"{self.collection_prefix}_{fragment}" if fragment else self.collection_prefix
-        return f"{base}_sessions" if kind == "session_archive" else base
+        base = (
+            f"{self.collection_prefix}_{fragment}"
+            if fragment
+            else self.collection_prefix
+        )
+        if kind == "session_archive":
+            return f"{base}_sessions"
+        if kind == "doc":
+            # Documentation lives apart from mined knowledge: it is written
+            # on a different clock (a human edits a README) and it is the
+            # only kind a mode restricts by doc_type, which is one metadata
+            # request the engine answers in one collection.
+            return f"{base}_docs"
+        return base
 
     @property
     def served_adapters(self) -> Tuple[str, ...]:
@@ -757,6 +1026,7 @@ _POLICY_KEYS = frozenset(
         "claude_code",
         "write",
         "escalation",
+        "docs",
     }
 )
 
@@ -837,6 +1107,7 @@ def _sources(raw: Any, mode: str) -> Tuple[SourcePolicy, ...]:
             "max_items",
             "phases",
             "modes",
+            "doc_types",
         }
         if unknown:
             raise ValueError(f"Unknown modes.{mode}.sources keys: {sorted(unknown)}")
@@ -852,6 +1123,10 @@ def _sources(raw: Any, mode: str) -> Tuple[SourcePolicy, ...]:
                 ),
                 modes=_phase_names(
                     entry.get("modes", ()), f"modes.{mode}.sources.modes"
+                ),
+                doc_types=_phase_names(
+                    entry.get("doc_types", ()),
+                    f"modes.{mode}.sources.doc_types",
                 ),
             )
         )

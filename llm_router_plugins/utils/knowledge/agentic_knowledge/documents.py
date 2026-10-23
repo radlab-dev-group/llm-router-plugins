@@ -126,6 +126,11 @@ class DocumentMeta:
         How many times the same failure was seen; ``0`` when unspecified.
     source : str
         Name the fragment came from, for the rendered citation.
+    doc_type : str
+        Kind of documentation file — ``readme``, ``guide``, ``changelog`` …;
+        ``""`` for a document the miner produced.
+    heading : str
+        Heading path a documentation section sits under, for the citation.
     """
 
     kind: str = ""
@@ -142,6 +147,8 @@ class DocumentMeta:
     attempts: int = 0
     source: str = ""
     phase: str = ""
+    doc_type: str = ""
+    heading: str = ""
 
 
 def _attribute(key: str, value: str) -> str:
@@ -166,6 +173,9 @@ def build_document_text(
     phase: str = "",
     test_command: str = "",
     attempts: int = 0,
+    source: str = "",
+    doc_type: str = "",
+    heading: str = "",
 ) -> str:
     """
     Return the text to index: one header line followed by *body*.
@@ -197,6 +207,13 @@ def build_document_text(
         Command that decided the outcome.
     attempts : int, optional
         Times the same failure was observed.
+    source : str, optional
+        File a documentation section came from, repository-relative.
+    doc_type : str, optional
+        What kind of documentation file that is; see
+        :func:`.docs_ingestor.classify_document`.
+    heading : str, optional
+        Heading path the section sits under, joined with ``>``.
 
     Returns
     -------
@@ -226,6 +243,12 @@ def build_document_text(
         fields.append(_attribute("mode", mode))
     if phase:
         fields.append(_attribute("phase", phase))
+    if source:
+        fields.append(_attribute("src", source))
+    if doc_type:
+        fields.append(_attribute("doc_type", doc_type))
+    if heading:
+        fields.append(_attribute("heading", heading))
     if test_command:
         fields.append(_attribute("test_command", test_command))
     if attempts:
@@ -303,6 +326,9 @@ def _meta_arguments(fields: dict) -> dict:
         ("mode", "mode"),
         ("test_command", "test_command"),
         ("phase", "phase"),
+        ("source", "src"),
+        ("doc_type", "doc_type"),
+        ("heading", "heading"),
     ):
         if fields.get(source):
             arguments[target] = fields[source]

@@ -8,20 +8,27 @@ is no failure yet and the user's sentence is all there is.  In ``git_review``
 the work is about files, so the files decide.
 
 The builder also does the bookkeeping the engine cannot: sources live in
-different collections (mined knowledge apart from the session archive), the
-archive is restricted to the current thread, and a mode's character budget is
-turned into a sane ``max_results`` so the search does not return fifty chunks
-that the assembler will throw away.
+different collections (mined knowledge apart from the session archive apart
+from the repository's documentation), the archive is restricted to the current
+thread, and a mode's character budget is turned into a sane ``max_results`` so
+the search does not return fifty chunks that the assembler will throw away.
+
+Documentation is searched with a query of its own.  A normalized stack trace
+retrieves a recipe written from the same failure and nothing else, while a
+conventions page matches the module the turn is editing and what the user asked
+for — so the documentation request is built from the user's text and the paths,
+and never carries the failure signature.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
     AgentTurn,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import ModePolicy
 from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+    KIND_DOC,
     KIND_SESSION_ARCHIVE,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import SearchRequest
@@ -33,6 +40,12 @@ _MAX_TEXT_CHARS = 600
 
 #: Ceiling of one query overall.
 _MAX_QUERY_CHARS = 900
+
+#: Most paths spelled out in a documentation query.  A documentation file is
+#: named after the module it documents, so the paths are the strongest term the
+#: turn has; past a large diff the list stops adding meaning and starts
+#: diluting the user's own words.
+_MAX_QUERY_PATHS = 8
 
 
 @dataclass(frozen=True)
@@ -85,6 +98,7 @@ class QueryBuilder:
         # asked to read.
         phase_limits: Dict[str, Optional[List[str]]] = {}
         mode_limits: Dict[str, Optional[List[str]]] = {}
+        doc_type_limits: Dict[str, Optional[List[str]]] = {}
         for source in policy.sources:
             kind = source.category
             archived = kind == KIND_SESSION_ARCHIVE
@@ -117,15 +131,29 @@ class QueryBuilder:
                 mode_limits[name] = list(
                     dict.fromkeys(mode_limits[name] + list(source.modes))
                 )
+            if not source.doc_types:
+                doc_type_limits[name] = None
+            elif name not in doc_type_limits:
+                doc_type_limits[name] = list(source.doc_types)
+            else:
+                known = doc_type_limits[name]
+                if known is not None:
+                    doc_type_limits[name] = list(
+                        dict.fromkeys(known + list(source.doc_types))
+                    )
         requests: List[SearchRequest] = []
         for name, categories in grouped.items():
             archived = KIND_SESSION_ARCHIVE in categories
+            documented = _is_documentation(categories)
             restricted = phase_limits.get(name)
             restricted_modes = mode_limits.get(name)
+            restricted_types = doc_type_limits.get(name)
             requests.append(
                 SearchRequest(
                     collection=name,
-                    query=query,
+                    # Documentation is retrieved on the turn's subject, not on
+                    # its failure; everything else keeps the mode-shaped query.
+                    query=self.docs_query_for(turn) if documented else query,
                     categories=tuple(dict.fromkeys(categories)),
                     max_results=max(1, limits.get(name, 3)),
                     thread_id=turn.thread_id if archived else "",
@@ -133,9 +161,39 @@ class QueryBuilder:
                     # the engine cannot intersect two metadata filters.
                     phases=() if archived else tuple(restricted or ()),
                     modes=() if archived else tuple(restricted_modes or ()),
+                    doc_types=() if archived else tuple(restricted_types or ()),
                 )
             )
         return tuple(requests)
+
+    def docs_query_for(self, turn: AgentTurn) -> str:
+        """
+        Return the query that retrieves documentation, not mined knowledge.
+
+        Documentation is prose about the code: it answers "how does this
+        repository do X" and is filed under the module and the concept, never
+        under a failure signature.  So the query is the user's own words plus
+        the paths of the turn — the whole path, because ``docs/export.md``
+        quotes ``src/export.py`` verbatim more often than not, and the stem,
+        because a file is usually named after the module it explains.
+
+        Parameters
+        ----------
+        turn : AgentTurn
+            The request's turn.
+
+        Returns
+        -------
+        str
+            The query; ``""`` when the turn says nothing about any file.
+        """
+        text = (turn.latest_user_text or "").strip()[:_MAX_TEXT_CHARS]
+        paths = [path for path in turn.touched_paths[:_MAX_QUERY_PATHS] if path]
+        stems = _stems(paths)
+        joined = " \n".join(
+            part for part in (text, " ".join(paths), " ".join(stems)) if part
+        )
+        return joined.strip()[:_MAX_QUERY_CHARS]
 
     def query_for(self, turn: AgentTurn) -> str:
         """
@@ -168,6 +226,30 @@ class QueryBuilder:
             parts = [text, paths, failure]
         joined = " \n".join(part for part in parts if part and part.strip())
         return joined.strip()[:_MAX_QUERY_CHARS]
+
+
+def _is_documentation(categories: Sequence[str]) -> bool:
+    """
+    Return whether one collection holds documentation only.
+
+    The ``doc`` category lives in its own collection, so a group that contains
+    it contains nothing else.  Anything unexpected is treated as mined
+    knowledge: a query carrying the failure signature is the older, safer
+    default.
+    """
+    return tuple(str(kind) for kind in categories) == (KIND_DOC,)
+
+
+def _stems(paths: Sequence[str]) -> List[str]:
+    """Return the file-name stems of *paths*, de-duplicated, order kept."""
+    stems: List[str] = []
+    for path in paths:
+        name = str(path).rsplit("/", 1)[-1]
+        stem = name.rsplit(".", 1)[0] if "." in name else name
+        stem = stem.strip()
+        if stem and stem not in stems:
+            stems.append(stem)
+    return stems
 
 
 def _failure_signature(turn: AgentTurn) -> str:

@@ -8,8 +8,7 @@ release tagged as `v<version>`.
 
 | Version | Changelog |
 | ------- | --------- |
-| 0.1.5 | **Added:** `agentic_knowledge` — a knowledge layer that runs behind the Codex router: per-work-mode retrieval of verified fixes, dead ends and the pre-compaction archive from the Semantic Search Engine, a masked learn-from-traffic write path through a Redis Stream and an indexing worker, and optional knowledge-or-escalate model selection. Adapters for Codex (full) and Claude Code (read-only), plus offline counterfactual evaluation. **Fix:** the `agentic_knowledge` collection names are reduced to the engine's character set at configuration time, so a repository scope that would produce a hyphen can no longer make every indexing attempt fail with a 500 at collection creation; the retention pass still sweeps the legacy `prefix-<scope>-sessions` archives; the repository of a request is read from the leading messages, so a compaction (which re-sends the whole window) is filed under its own project instead of into a scope-less prefix, and a request with no known repository publishes nothing; a search of a repository that has not been indexed yet is an empty answer, not a failed search **Added:** engine login for a Semantic Search Engine that authenticates by username and password rather than by a pre-issued token (`SSE_API_USERNAME`/`SSE_API_PASSWORD`); every mined episode now carries the work **phase** its evidence names (`test`, `implement`, …) in its header and in `metadata_json.phase`, and a retrieval source can be restricted in its policy to phases (`"phases": ["test"]`) or to routing modes (`"modes": ["debug"]`) — the filter is engine-side, unions across names, intersects the source's categories, never touches the archived window whose `thread_id` owns the single metadata slot, and a policy cannot mix the two dimensions in one request. |
-| 0.1.4 | **Fix:** the Codex routing record follows the phase that was actually routed with instead of the last signal it could rebuild, so an interleaved command no longer freezes the record and repeats a conflict on every request of the turn (captured-session replay: 11 conflicts -> 0). **Added:** `RememberResult` carries why a memory write was skipped; the log names the real cause instead of an undifferentiated `version conflict`. |
+| 0.1.4 | **Added:** `agentic_knowledge` — a knowledge layer that runs behind the Codex router: per-work-mode retrieval of verified fixes, dead ends and the pre-compaction archive from the Semantic Search Engine, a masked learn-from-traffic write path through a Redis Stream and an indexing worker, and optional knowledge-or-escalate model selection. Adapters for Codex (full) and Claude Code (read-only), plus offline counterfactual evaluation. **Fix:** the `agentic_knowledge` collection names are reduced to the engine's character set at configuration time, so a repository scope that would produce a hyphen can no longer make every indexing attempt fail with a 500 at collection creation; the retention pass still sweeps the legacy `prefix-<scope>-sessions` archives; the repository of a request is read from the leading messages, so a compaction (which re-sends the whole window) is filed under its own project instead of into a scope-less prefix, and a request with no known repository publishes nothing; a search of a repository that has not been indexed yet is an empty answer, not a failed search **Added:** engine login for a Semantic Search Engine that authenticates by username and password rather than by a pre-issued token (`SSE_API_USERNAME`/`SSE_API_PASSWORD`); every mined episode now carries the work **phase** its evidence names (`test`, `implement`, …) in its header and in `metadata_json.phase`, and a retrieval source can be restricted in its policy to phases (`"phases": ["test"]`) or to routing modes (`"modes": ["debug"]`) — the filter is engine-side, unions across names, intersects the source's categories, never touches the archived window whose `thread_id` owns the single metadata slot, and a policy cannot mix the two dimensions in one request. **Added:** `agentic_knowledge` indexes the repository's own documentation — a heading-aware scan of its `*.md` files published as `doc` documents, republished on content change, superseded documents retired through a `docs_prune` control message (never on a truncated scan), plus the `llm-router-agentic-kb-docs` command and the `docs` policy section. Documentation now lives in `<prefix>_<scope>_docs`, is read per work mode through `doc_types`, is searched on the turn's subject rather than its failure signature, and a guide about a file the turn edits outranks one that is not. On top of retrieval a session carries a **standing documentation map** — structural, stable per repository, budgeted first — and every mined fix or dead end points at the page that documents the module it touched. **Fix:** the Codex routing record follows the phase that was actually routed with instead of the last signal it could rebuild, so an interleaved command no longer freezes the record and repeats a conflict on every request of the turn (captured-session replay: 11 conflicts -> 0). **Added:** `RememberResult` carries why a memory write was skipped; the log names the real cause instead of an undifferentiated `version conflict`. |
 | 0.1.3 | **Added:** an accepted semantic decision can be carried across one command generation (`MEMORY_CARRY_DECISIONS`). **Changed:** semantic rankings are read against their own scale; the phase layer separates work states from shell noise; CLI-injected context is kept out of the intent text. |
 | 0.1.2 | **Added:** optional Redis-backed shared session memory with `MEMORY_MAX_RETRIES`; offline routing evaluation with calibration replay; a configurable `phase` layer reading assistant actions and tool activity; heuristic `negation_pattern` / `min_margin` / `weights`; `per_target_top_k` aggregation. **Changed:** mode definitions refined; semantic context built from the latest assistant utterance only. |
 | 0.1.1 | **Added:** `ClaudeCodeRoutingPlugin` (tier-to-model mapping); `lint_signals` start-up validation; `classify_max_chars` budget. **Changed:** `agentic_routing` consolidated into `CodexRoutingPlugin`; word-boundary heuristic matching; similarity threshold lowered to `0.51`; sliding-window encoding for over-length queries. |
@@ -19,7 +18,7 @@ release tagged as `v<version>`.
 | 0.0.2 | **Added:** PII masking plugin, dynamic pseudonym generation with de-anonymization in `FastMasker`, LangChain RAG plugin with CLI, `SojkaGuardPlugin`, lint/format/type/security configuration. **Changed:** `mask()` returns `(masked_text, mappings)`; `numpy` loaded only when LangChain RAG is enabled. |
 | 0.0.1 | **Added:** `fast_masker` plugin (IP, KRS, JWT, NRB, NIP, URL, SSN and other rules), packaging (`setup.py`) with the initial `.version`, License section in the README. |
 
-## [0.1.5] - 2026-10-17
+## [0.1.4] - 2026-10-21
 
 ### Added
 - `agentic_knowledge` — an **agentic knowledge layer** for coding agents
@@ -56,13 +55,11 @@ release tagged as `v<version>`.
   feature — the socket closed first and the loop never actually blocked.  The
   worker now raises only its own socket timeout over its own block (plus a
   margin); an operator-set socket timeout that already covers it is kept.
-- **Added:** `scripts/run-agentic-kb-worker.sh` starts the indexing worker with
-  the environment of the router's own run script — it reads that script's
-  assignments rather than executing it, so no second server starts — and
-  `scripts/run-agentic-kb-worker-pk.sh` the same over the personal
-  `run-rest-api-gunicorn-pk.sh`.  A `--once` run now also logs how many events
-  the batch drained, so a cron worker is not indistinguishable from one that
-  never ran.
+- **Added:** `scripts/plugins/agentic_knowledge/run-agentic-kb-worker.sh` in the `llm-router` checkout
+  starts the indexing worker with the environment of the router's own run script — it reads that
+  script's assignments rather than executing it, so no second server starts.
+  A `--once` run now also logs how many events the batch drained, so a cron
+  worker is not indistinguishable from one that never ran.
 - **Fix:** a search for a repository whose knowledge has not been indexed yet
   stops being a per-request failure.  The engine answers a missing collection
   with an error code in a 200 body rather than with an empty list, so every
@@ -122,8 +119,140 @@ release tagged as `v<version>`.
   only events mined *before* the request under evaluation, and reports `recipe_hit_rate`, `turns_potentially_saved`,
   `missed_saves`, loop-detection precision/recall, `escalations` and `injected_chars_per_turn` for the `no_kb`, `read`
   and `read_escalate` variants; `scripts/agentic-kb-eval.sh` runs it.
-- `knowledge` pip extra (`sse-lib`, `redis>=5`) and `llm_router_plugins/resources/knowledge/agentic_knowledge.json`,
+- `agentic-knowledge` pip extra (`sse-lib`, `redis>=5`) and `llm_router_plugins/resources/knowledge/agentic_knowledge.json`,
   the reviewable policy — connection settings come exclusively from `LLM_ROUTER_KNOWLEDGE_AGENTIC_*`.
+- `agentic_knowledge` indexes **the repository's own documentation**. `docs_ingestor.py` scans the directory a request
+  declared for its `*.md` files, splits each one at its headings (a section keeps its heading path, cut at
+  `docs.max_section_chars`), and publishes one `doc` event per section to the stream the miner already uses — so the
+  worker masks and indexes documentation exactly as it does a mined recipe, into `category=doc` of
+  `<prefix>_<scope>`, which `plan`, `implement` and `review` already ask for and which rendered nothing before.
+- A file is republished when its **content** changes, not when it is looked at: the digest of the whole file feeds every
+  section's fingerprint, and a scan state in Redis (`<key_prefix>:docs:<scope>`, one key per scope) compares digests, so
+  a `touch` or a branch checkout over unchanged files publishes nothing. A changed file gets new document names and the
+  scan publishes a `docs_prune` control message retiring the names it superseded, which is also what removes the
+  documents of a deleted file. **A scan that ran out of `docs.max_files` or `docs.max_total_bytes` publishes no
+  retirement at all** — pruning against a partial listing would delete documentation the scan never reached.
+- The scan runs on the request path, bounded by `docs.rescan_interval_seconds` per process and by its byte and file
+  ceilings, and is **fail-open** like the rest of the layer: a repository the router cannot see is
+  `skipped: no-such-directory`, never an error. Where the router does not run next to the agents, the new
+  `llm-router-agentic-kb-docs` command (`--path`, `--scope`, `--dry-run`, `--no-prune`, `--json`) does the same scan
+  against the same policy from a machine that can; it publishes to the stream and never talks to the engine.
+- Policy: a `docs` section (`enabled`, `auto_index`, `patterns`, `excluded_dirs`, `max_files`, `max_file_bytes`,
+  `max_total_bytes`, `max_section_chars`, `rescan_interval_seconds`, `state_ttl_seconds`) and the matching
+  `LLM_ROUTER_KNOWLEDGE_AGENTIC_DOCS_*` environment overrides. `payload["routing"]["knowledge"]` carries a `docs`
+  outcome (`status`, `files`, `published`, `pruned`, `reason`, `truncated`) — no paths and no document names.
+- Documentation is **its own collection**, `<prefix>_<scope>_docs`, apart from mined knowledge. One search request
+  carries one metadata dimension, so a mode can narrow a search by `doc_type` only when nothing else shares the request;
+  giving the documentation a collection of its own is what buys that, and it lets a repository's prose be re-indexed and
+  pruned as a set. The scan state records the collection a listing was written for, so a policy that moves the
+  documentation republishes it where it now belongs instead of believing a listing of files indexed where nobody reads.
+- **`SourcePolicy.doc_types`** — which documentation kinds a work mode reads (`readme`, `guide`, `changelog`,
+  `contributing`, `security`, `license`, `agent`, `note`), sent as engine-side `metadata_filters` on `doc_type`, one
+  `eq` per kind, unioned. It is the `doc` source's own dimension: a `doc` source restricting phases or modes, or
+  `doc_types` on any other source, is a configuration error. The shipped policy reads `readme`/`guide`/`contributing`
+  when implementing, adds `changelog` and `note` when planning, and `guide`/`contributing`/`security` when reviewing;
+  an `AGENTS.md` is in no list, because the agent already has that file in its context.
+- A session carries a **standing documentation context** (`doc_context.py`): a short map of what the repository has
+  written down — its documentation files, their kinds, and their heading outlines — injected on every request a mode
+  reads documentation in, whether or not this turn's query matched anything. It answers what the project is and where
+  its documentation lives, which is what an agent otherwise rediscovers with `ls` and `find` once per command. The map
+  is **structural and carries no prose**: the write path masks a document before indexing it, and a digest of README
+  sentences built on the request path would carry them unmasked to a model. `docs.context_enabled`,
+  `docs.context_max_chars` (default `700`) and `docs.context_ttl_seconds`, with the matching `…_DOCS_CONTEXT_*`
+  environment overrides.
+- The digest is **stable per repository, not per request**: it is refreshed by the scan that already runs and by
+  `llm-router-agentic-kb-docs`, kept in Redis (`<key_prefix>:docs:context:<scope>`), and read with one `GET` by every
+  other request of the session. Its text moves when the documentation's outline moves and not when a paragraph is
+  reworded, so the prompt under the provider's cache does not move either; its fingerprint records the revisions it was
+  drawn from. It is charged against `modes.<mode>.max_chars` **before** anything is retrieved, and a digest too big for
+  the mode is not injected at all. `payload["routing"]["knowledge"]["doc_context"]` reports `level`, `chars` and
+  `source_files`.
+- Documentation is **searched with a query of its own**: the user's words plus the touched paths and their stems, never
+  the failure signature. A recipe is filed under the error it fixed and a guide is filed under the module it explains;
+  asking the second with the first was retrieval noise. `ContextAssembler` adds a bonus when a retrieved document
+  **documents a file the turn is touching** (`docs/export.md` for an edited `src/export.py`) — a link no retrieval leg
+  sees — drops a document whose declared kind the mode does not read, and cites what it quotes by file and heading
+  (`[doc · guide · docs/export.md › Export helpers]`).
+- **A mined entry points at the page that documents the module it changed.** A
+  verified fix says what worked; the repository's own page about that module
+  says what it has to keep doing, and neither search connects the two: a recipe
+  is filed under a failure, a page under a module. The link is resolved on the
+  reader side against the documentation map the request already carries: a named
+  page matches by file stem (`src/export.py` → `docs/export.md`), a generic page
+  (`README.md`, `AGENTS.md`) by the directory it documents, and never a second
+  time for a path the entry already cites — so a recipe or dead end renders with
+  a ` → docs/export.md` tail whether or not the query retrieved the page. The
+  same rule now drives the documentation ranking bonus, which previously matched
+  generic stems too: a root `README.md` is not documentation of everything. Two deliberate limits: the link
+  is not written into the document's metadata, because the engine never returns
+  document metadata on a search hit — a field nothing could read would be
+  write-only — and a documentation page never counts toward
+  `best_recipe_score`, because a README is not a verified fix and must not
+  push a mode past its escalation threshold.
+- `RememberResult` — the outcome of `remember_decision` now carries a log-safe
+  reason for a conflict (`state` still compares equal to the outcome string).
+
+### Changed
+- **The worker says on the console what it is doing, and follows the router's
+  debug switch.** On start it writes its configuration block (engine, stream,
+  group, consumer, chunking, retention, and which switch chose the log level);
+  during a run it reports each batch's read/indexed/dropped counts and elapsed
+  time, names a created collection, reports what retention and a docs prune
+  removed, and beats an idle heartbeat every five minutes. `DEBUG` adds the
+  per-event line — kind, scope, thread, fingerprint. The level resolves from
+  `--log-level`, else `LLM_ROUTER_IN_DEBUG` (the router's own debug switch,
+  which the operator's wrapper already exports), else `LLM_ROUTER_LOG_LEVEL`,
+  else `INFO`, so a deployment the operator turned debug on gets a debug worker
+  without repeating the switch. A failure is logged with the engine's own
+  message, not only the exception's class, and credentials are reported by kind
+  (`auth=token`), never by value.
+- **The knowledge extra and its CLI package are named after the plugin.** `pip install
+  radlab-llm-router-plugins[knowledge]` is now `…[agentic-knowledge]`, so an operator installing
+  the extra sees the same name the pipeline does, and the console commands are built from
+  `llm_router_plugins.cli.plugins.utils.agentic_knowledge` — `utils.knowledge` named a directory
+  of two commands and said nothing about which layer they belonged to. The commands themselves,
+  `llm-router-agentic-kb-worker` and `llm-router-agentic-kb-docs`, are unchanged.
+- **The operator's knowledge scripts moved to the `llm-router` checkout, and the worker stopped
+  fishing for `sse_lib` in a sibling checkout.** The `run-agentic-kb-{worker,docs}.sh` wrappers now
+  live in `scripts/plugins/agentic_knowledge/` of that checkout, next to the plugin they operate,
+  with their configuration still in the `run-rest-api-gunicorn.sh` script they read.
+  The `sse-lib` dependency of the `knowledge` extra is pinned to `>=0.1.0` — the first
+  published release with `ignore_question_lang_detect` on `SSEClient.search` — and the
+  wrappers no longer prepend a sibling `semantic-search-engine/sse_lib/src` to
+  `PYTHONPATH`: the interpreter the script runs with (default `python3`, override with
+  `PYTHON=`) must have the package installed from the extra.
+- **The read path stopped losing every search to its own timeout, and stopped asking the engine to
+  guess the query's language.** Two independent faults made the knowledge base invisible in
+  production, measured against a real engine on another host:
+  `sse_api.engine.controllers.search.semantic` detects the language of the *question* and applies it
+  twice — as a metadata filter on the vector leg (`text_language == <lang>`), and as the name of the
+  PostgreSQL full-text configuration (`pl` → `polish`).  A knowledge base is indexed in the language
+  of the code and asked in the language of the operator, so the first filter throws the answers away
+  and, on a cluster without a `polish` text search configuration, the second answers a Polish
+  question with `ProgrammingError: text search configuration "polish" does not exist` — an HTTP 500,
+  which this layer can only read as an unavailable engine.  The plugin now sends
+  `ignore_question_lang_detect` (`…_SSE_IGNORE_LANGUAGE_DETECT`, on by default; a client too old to
+  take the keyword is detected and asked without it), so the engine drops the filter and falls back
+  to the `simple` configuration.
+  Separately: one number used to be both the per-call transport timeout and the read budget, so a
+  mode reading three sources waited three times what the operator wrote, while the 1.5 s default was
+  below the 1.7 s median a hybrid search actually takes — five of five searches timed out.  They are
+  two numbers now: `…_SSE_API_TIMEOUT` (default `2.0`) ceilings one call, `…_READ_TIMEOUT_SECONDS`
+  (default `4.0`) ceilings the request, a search starts only while a whole call fits before that
+  deadline, and the budget is never allowed below one call.  A budget spent mid-request skips the
+  remaining sources and warns once, naming the scope and the number skipped.
+
+- The knowledge generation cache entry grew a schema version (`2`): a hit now keeps `source`, `doc_type` and `heading`,
+  and an entry keeps the standing documentation digest it was built with, so a cache hit reports the same context the
+  first request of the generation reported. Entries written under schema `1` are ignored rather than misread — one
+  rebuilt block per generation, then normal service.
+- A skipped Codex routing memory write is logged with the actual cause instead
+  of one undifferentiated `version conflict`:
+  - `expected version N, record is M` — a concurrent writer moved first;
+  - `incomparable history` / `stale history` / `reordered history` /
+    `context changed` — the continuity proof failed;
+  - `mode disagreement`, `generation changed`, `write` — the other refusal
+    paths.
 
 ### Fixed
 - `agentic_knowledge`: collection names are now reduced to the engine's
@@ -135,23 +264,6 @@ release tagged as `v<version>`.
   The prefix and the collection names are now one engine-safe spelling
   (`agentic_kb_<scope>` / `agentic_kb_<scope>_sessions`), and the retention
   pass still sweeps the legacy `agentic-kb-<scope>-sessions` archives.
-
-## [0.1.4] - 2026-10-13
-
-### Added
-- `RememberResult` — the outcome of `remember_decision` now carries a log-safe
-  reason for a conflict (`state` still compares equal to the outcome string).
-
-### Changed
-- A skipped Codex routing memory write is logged with the actual cause instead
-  of one undifferentiated `version conflict`:
-  - `expected version N, record is M` — a concurrent writer moved first;
-  - `incomparable history` / `stale history` / `reordered history` /
-    `context changed` — the continuity proof failed;
-  - `mode disagreement`, `generation changed`, `write` — the other refusal
-    paths.
-
-### Fixed
 - The Codex routing record now follows the phase the cascade actually routed
   with instead of the last signal it could rebuild from the history. The
   cascade names the phase dominating the recent window, so an edit interleaved

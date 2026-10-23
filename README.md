@@ -290,13 +290,29 @@ restricted to phases in its policy, so a mode can read only what was learned whi
 of work. The retrieval result is a routing signal: an agent looping on one error signature with no
 known fix is moved to a configured, stronger model (*knowledge-or-escalate*, **off by default**).
 
+The repository's own documentation joins the same knowledge base: a scan reads the `*.md` files below
+the directory the request declared, splits them at their headings, and publishes them as `doc`
+documents in a collection of their own (`<prefix>_<scope>_docs`), searched on the turn's subject
+rather than on its failure signature. Each work mode reads the kinds it wants — `implement` the
+readme, guides and contributing, `plan` those plus the changelog and notes, `review` the guides,
+contributing and security — and a guide that documents a file the turn is editing outranks one that
+does not. On top of retrieval the session carries a **standing map** of that documentation — which
+files exist and what they cover, structural only (paths, kinds, headings), stable per repository and
+budgeted before anything is retrieved — so an agent stops spending commands rediscovering what a
+project has written down, and a mined fix or dead end points at the page that documents the module
+it touched (`src/export.py` → `docs/export.md`), so a recipe arrives with the rule it has to keep.
+A file is republished when its content changes and the document it
+superseded is retired; a scan that ran out of its ceilings publishes no retirement at all.
+`llm-router-agentic-kb-docs` does the same scan on demand (`--dry-run` to see what would be
+published), which is also how a repository whose router runs on another machine gets documentation.
+
 The engine may be reached by a pre-issued token or by a username/password login
 (`SSE_API_USERNAME`/`SSE_API_PASSWORD`; the client logs in on its first call).
 
-The worker is a separate process the operator starts — `scripts/run-agentic-kb-worker.sh` (and the personal
-`scripts/run-agentic-kb-worker-pk.sh`) take its environment from the router's own run script. It creates a
-repository's collection on that repository's first event; a project that has produced nothing yet simply has an
-empty knowledge base.
+The worker is a separate process the operator starts —
+`scripts/plugins/agentic_knowledge/run-agentic-kb-worker.sh` in the `llm-router` checkout takes its
+environment from the router's own run script. It creates a repository's collection on that repository's
+first event; a project that has produced nothing yet simply has an empty knowledge base.
 
 Connection settings (SSE and Redis) come only from `LLM_ROUTER_KNOWLEDGE_AGENTIC_*`; the policy
 (adapters, per-mode sources, weights and budgets, escalation models, retention) is

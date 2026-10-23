@@ -14,7 +14,9 @@ The worker owns the whole writing lifecycle:
   knowledge base is read by models, and re-identification is not on its path;
 * it creates the target collection on first use, with the embedder, reranker
   and chunking the operator configured for *this* process (the proxy needs none
-  of them);
+  of them), and repeats that same chunking on every indexing call, because a
+  document is split the way the call says rather than the way the collection
+  was declared;
 * it retires old documents: archived windows expire on their own clock.
 
 Masking has one rule the rest of the layer depends on: a value the reader
@@ -24,16 +26,23 @@ masker turned into a token matches nothing — with ``status: ok`` and no hits,
 which is the worst way to fail.  See :meth:`KnowledgeIndexWorker._mask_metadata`
 and :meth:`KnowledgeIndexWorker._prepare`.
 
-Chunking is worth stating before it surprises anyone.  With
-``…_WORKER_CHUNK_TOKENS`` left at its default of ``0`` the worker declares no
-chunking and the engine applies its own default (500 tokens per chunk); it also
-truncates the *embedded* text at 508 tokens
+Chunking is worth stating before it surprises anyone.  The default is 400
+tokens with a 60-token overlap, declared when a collection is created and sent
+again on every indexing call: the engine splits what the call tells it to, and
+the two numbers have to agree or a document is split unlike the collection it
+lives in.  With ``…_WORKER_CHUNK_TOKENS`` set to ``0`` the worker says nothing
+on either side and the engine applies its own default (500 tokens per chunk); it
+also truncates the *embedded* text at 508 tokens
 (``DBSemanticSearchController.max_tokens_in_text``), so a chunk can be stored in
 full and embedded only in part.  One knowledge document is therefore often
 several chunks — and because the metadata header is the first line of the
 document, it rides on the first chunk only; for the rest the reader falls back
 to the fields in the document name (see
 :mod:`llm_router_plugins.utils.knowledge.agentic_knowledge.documents`).
+
+A read is indexed in as few engine calls as it has collections, not as many as
+it has events: a batch of a repository's documentation is one request, and one
+request is one thing to time out, to retry, and to have the engine load once.
 
 Every external call is optional-by-construction: the libraries import lazily,
 so ``--help`` and the unit tests need neither Redis nor ``sse_lib`` installed.
@@ -50,15 +59,20 @@ import time
 
 from datetime import date, timedelta
 from dataclasses import replace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
     KnowledgeEvent,
+)
+from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
+    CONTROL_DOCS_PRUNE,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+    ENGINE_NAME_SUFFIX,
+    KIND_DOC,
     KIND_SESSION_ARCHIVE,
     build_document_text,
     document_body,
@@ -86,6 +100,16 @@ BLOCK_SOCKET_MARGIN_SECONDS = 2.0
 #: group, so after this many failures it is acknowledged with a log.
 DEFAULT_MAX_ATTEMPTS = 3
 
+#: How often an idle worker says so on the console, in seconds.  A process
+#: waiting for events and a process that died look the same from outside, and
+#: "is it running at all" is the first question an operator asks of it.
+HEARTBEAT_SECONDS = 300
+
+#: How much of an exception's own message reaches the log, in characters.  The
+#: engine's error body names the collection and the constraint that failed,
+#: which is actionable; a page of HTML from a proxy in front of it is not.
+_ERROR_DETAIL_CHARS = 200
+
 #: How long an entry may sit unacknowledged before this worker claims it back
 #: for another attempt, in milliseconds.  Without a reclaim pass a message that
 #: fails once is never read again — ``XREADGROUP ``>`` hands out new messages
@@ -102,6 +126,9 @@ _TRIES_TTL_SECONDS = 86_400
 #: Description of a collection this worker creates; the engine rejects an
 #: empty one, and an operator who wants a different description pre-creates it.
 _COLLECTION_DESCRIPTION = "Agentic knowledge base (auto-created by llm-router)."
+
+#: Plain text keeps markdown and the machine-readable header intact in SSE.
+_DOC_FILE_SUFFIX = ".txt"
 
 #: Metadata fields a reader filters on, written verbatim and never masked.
 #: They are the join between the two halves of the layer: the search asks
@@ -160,6 +187,16 @@ class KnowledgeIndexWorker:
         self._group_ready = False
         self._masker = None
         self._scopes: set = set()
+        #: Collections this process has seen the engine confirm.  A name is
+        #: dropped from it whenever an indexing call into that collection
+        #: fails, so a collection deleted underneath the worker is created
+        #: again rather than stayed missing.
+        self._collections: set = set()
+        # Counted per process so the heartbeat and the exit line can say what
+        # the worker did while nobody was watching it.
+        self._indexed = 0
+        self._dropped = 0
+        self._last_heartbeat = time.monotonic()
 
     # ----------------------------------------------------------- lifecycle -
     def run(self) -> None:
@@ -187,13 +224,34 @@ class KnowledgeIndexWorker:
                     # earlier are claimed back for another attempt.
                     self._reclaim_due()
                     self._maybe_retain()
+                    self._heartbeat()
             except Exception as exc:  # a read failure must not end the loop
                 self._log(
-                    "warning", "knowledge worker read failed: %s", type(exc).__name__
+                    "warning", "knowledge worker read failed: %s", _describe(exc)
                 )
                 time.sleep(1.0)
                 continue
-        self._log("info", "knowledge worker stopped")
+        self._log(
+            "info",
+            "knowledge worker stopped (%d indexed, %d dropped)",
+            self._indexed,
+            self._dropped,
+        )
+
+    def _heartbeat(self) -> None:
+        """Say that an idle worker is alive, on the heartbeat clock."""
+        now = time.monotonic()
+        if now - self._last_heartbeat < HEARTBEAT_SECONDS:
+            return
+        self._last_heartbeat = now
+        self._log(
+            "info",
+            "knowledge worker idle (indexed=%d dropped=%d stream=%s group=%s)",
+            self._indexed,
+            self._dropped,
+            self._stream,
+            self._group,
+        )
 
     def run_once(self, block_ms: Optional[int] = None) -> int:
         """
@@ -214,13 +272,19 @@ class KnowledgeIndexWorker:
             Messages processed (indexed or dropped) in this batch.
         """
         self._ensure_group()
+        started = time.monotonic()
         messages = self._read(block_ms)
-        processed = 0
-        for entry_id, fields in messages:
-            if self._stop:
-                break
-            self._process_entry(entry_id, fields)
-            processed += 1
+        self._log("debug", "knowledge read returned %d entr(y|ies)", len(messages))
+        processed, indexed = self._process_batch(messages)
+        if processed:
+            self._log(
+                "info",
+                "knowledge batch: %d read, %d indexed, %d dropped in %.1fs",
+                processed,
+                indexed,
+                processed - indexed,
+                time.monotonic() - started,
+            )
         return processed
 
     def stop(self) -> None:
@@ -228,21 +292,149 @@ class KnowledgeIndexWorker:
         self._stop = True
 
     # ---------------------------------------------------------- processing -
+    def _process_batch(
+        self, messages: List[Tuple[Any, Dict[str, Any]]]
+    ) -> Tuple[int, int]:
+        """
+        Index one read: everything of a collection in one call to the engine.
+
+        Thirty-two events of one repository are one upload of thirty-two
+        documents, not thirty-two uploads; the engine accepts a list, and a
+        repository's documentation arrives as a list.  A control message is
+        answered on its own, because it asks for deletions rather than writing.
+
+        Returns
+        -------
+        Tuple[int, int]
+            Entries settled, and how many of them were indexed.
+        """
+        processed = 0
+        indexed = 0
+        pending: List[Tuple[Any, KnowledgeEvent]] = []
+        for entry_id, fields in messages:
+            if self._stop:
+                break
+            processed += 1
+            event = self._decode(fields)
+            if event is None or not self._supported(event):
+                self._log(
+                    "info",
+                    "knowledge entry %s skipped (version this worker reads is %d)",
+                    entry_id,
+                    EVENT_VERSION,
+                )
+                self._ack(entry_id)
+                self._dropped += 1
+                continue
+            self._log(
+                "debug",
+                "knowledge entry %s: kind=%s scope=%s thread=%s fingerprint=%s",
+                entry_id,
+                event.kind,
+                event.scope,
+                event.thread_id,
+                event.fingerprint,
+            )
+            if event.kind == CONTROL_DOCS_PRUNE:
+                # Not a document: a request to retire documents.  It is
+                # answered alone, and never travels in an upload.
+                if self._index_one(entry_id, event):
+                    indexed += 1
+                continue
+            self._scopes.add(event.scope)
+            pending.append((entry_id, event))
+        return processed, indexed + self._index_documents_of(pending)
+
     def _process_entry(self, entry_id: Any, fields: Dict[str, Any]) -> bool:
         """Index one stream message, acknowledging it when done or dropped."""
         event = self._decode(fields)
         if event is None or not self._supported(event):
+            self._log(
+                "info",
+                "knowledge entry %s skipped (version this worker reads is %d)",
+                entry_id,
+                EVENT_VERSION,
+            )
             self._ack(entry_id)
+            self._dropped += 1
             return False
+        return self._index_one(entry_id, event)
+
+    def _index_one(self, entry_id: Any, event: KnowledgeEvent) -> bool:
+        """Index one event on its own and settle its entry either way."""
         try:
             self.index_event(event)
         except Exception as exc:
-            if self._drop_if_exhausted(entry_id, event, exc):
-                self._forget(entry_id)
+            self._settle_failure(entry_id, event, exc)
             return False
+        self._settle(entry_id)
+        return True
+
+    def _index_documents_of(
+        self, pending: Sequence[Tuple[Any, KnowledgeEvent]]
+    ) -> int:
+        """
+        Mask and upload *pending*, once per collection.
+
+        An event whose own preparation fails is settled on its own and is not
+        allowed to hold up its neighbours; an upload that fails settles every
+        document it carried, each on its own attempt counter, which is the
+        price of a batch and the reason the counter is per entry.
+        """
+        groups: Dict[str, List[Tuple[Any, KnowledgeEvent, Dict[str, Any]]]] = {}
+        for entry_id, event in pending:
+            collection = self._config.collection(event.scope, event.kind)
+            try:
+                document = self._document(self._prepare(event), event)
+            except Exception as exc:  # masking is per document; so is its failure
+                self._settle_failure(entry_id, event, exc)
+                continue
+            groups.setdefault(collection, []).append((entry_id, event, document))
+        return sum(
+            self._upload(collection, items) for collection, items in groups.items()
+        )
+
+    def _upload(
+        self,
+        collection: str,
+        items: Sequence[Tuple[Any, KnowledgeEvent, Dict[str, Any]]],
+    ) -> int:
+        """Send one collection's documents in one call; settle them either way."""
+        documents = [document for _entry_id, _event, document in items]
+        try:
+            self._ensure_collection(collection)
+            self._write_documents(collection, documents)
+        except Exception as exc:
+            self._collections.discard(collection)
+            self._log(
+                "warning",
+                "knowledge upload of %d document(s) to %s failed: %s",
+                len(documents),
+                collection,
+                _describe(exc),
+            )
+            for entry_id, event, _document in items:
+                self._settle_failure(entry_id, event, exc)
+            return 0
+        for entry_id, _event, _document in items:
+            self._settle(entry_id)
+        self._last_heartbeat = time.monotonic()
+        return len(items)
+
+    def _settle(self, entry_id: Any) -> None:
+        """An entry is written: count it, acknowledge it, forget its attempts."""
         self._forget(entry_id)
         self._ack(entry_id)
-        return True
+        self._indexed += 1
+        self._last_heartbeat = time.monotonic()
+
+    def _settle_failure(
+        self, entry_id: Any, event: KnowledgeEvent, exc: Exception
+    ) -> None:
+        """Count one failed attempt of an entry and drop it when they run out."""
+        if self._drop_if_exhausted(entry_id, event, exc):
+            self._forget(entry_id)
+            self._dropped += 1
 
     def _drop_if_exhausted(
         self, entry_id: Any, event: KnowledgeEvent, exc: Exception
@@ -265,14 +457,14 @@ class KnowledgeIndexWorker:
                 event.fingerprint,
                 tries,
                 self._max_attempts,
-                type(exc).__name__,
+                _describe(exc),
             )
             return False
         self._log(
             "error",
             "knowledge index failed, dropping (fingerprint=%s, %s)",
             event.fingerprint,
-            type(exc).__name__,
+            _describe(exc),
         )
         self._ack(entry_id)
         return True
@@ -352,10 +544,7 @@ class KnowledgeIndexWorker:
             )
             return 0
         entries = _claimed_entries(claimed)
-        for entry_id, fields in entries:
-            if self._stop:
-                break
-            self._process_entry(entry_id, fields)
+        self._process_batch(entries)
         return len(entries)
 
     def _warn_backlog(self) -> None:
@@ -391,12 +580,60 @@ class KnowledgeIndexWorker:
         -------
         None
         """
+        if event.kind == CONTROL_DOCS_PRUNE:
+            # A control message, not a document: it asks for documents to be
+            # retired.  An older worker indexes it as an empty document, which
+            # is why its text is empty and why it carries no signature.
+            self.prune_documents(event)
+            return
         self._scopes.add(event.scope)
         text = self._prepare(event)
         document = self._document(text, event)
         collection = self._config.collection(event.scope, event.kind)
         self._ensure_collection(collection)
-        self._sse_client().index_documents(collection, [document])
+        # The same chunking the collection was created with: the engine splits
+        # what this call tells it to, and a document indexed with other numbers
+        # is a document split unlike its neighbours.
+        self._write_documents(collection, [document])
+
+    def _write_documents(
+        self, collection: str, documents: Sequence[Dict[str, Any]]
+    ) -> None:
+        """Upload whole documentation files; mined events remain structured texts.
+
+        The snapshots came through the stream, so the worker does not reopen
+        repository paths.  Attachments are masked UTF-8 held in memory, with
+        metadata carried separately through the SSE library's file contract.
+        Repeated deliveries share one attachment but keep their own ACKs.
+        """
+        client = self._sse_client()
+        texts = []
+        files = {}
+        file_metadata = {}
+        for document in documents:
+            if document["category"] != KIND_DOC:
+                texts.append(document)
+                continue
+            name = document["filepath"] + _DOC_FILE_SUFFIX
+            content = document["pages"][0]["page_content"].encode("utf-8")
+            metadata = {"category": KIND_DOC, "options": document["options"]}
+            if name in files and (
+                files[name] != content or file_metadata[name] != metadata
+            ):
+                raise ValueError("conflicting documentation attachments")
+            files[name] = content
+            file_metadata[name] = metadata
+        if files:
+            client.upload_files(
+                collection,
+                [(name, content, "text/plain") for name, content in files.items()],
+                indexing_options=self._chunking(),
+                file_metadata=file_metadata,
+            )
+        if texts:
+            client.index_documents(
+                collection, texts, indexing_options=self._chunking()
+            )
 
     def _prepare(self, event: KnowledgeEvent) -> str:
         """
@@ -434,6 +671,9 @@ class KnowledgeIndexWorker:
             agent=event.agent,
             mode=event.mode,
             test_command=self._mask(str(metadata.get("test_command") or "")),
+            source=str(metadata.get("source_file") or ""),
+            doc_type=str(metadata.get("doc_type") or ""),
+            heading=str(metadata.get("heading") or ""),
         )
 
     # ---------------------------------------------------------- collections -
@@ -465,9 +705,10 @@ class KnowledgeIndexWorker:
         """
         Create *name* if the engine does not have it yet.
 
-        Chunking is declared here and only here: changing it never re-splits a
-        collection that already exists, so a deployment that changes the numbers
-        has to drop and re-index.  The default pair is 400 tokens with a 60
+        Chunking is declared here and repeated on every indexing call (see
+        :meth:`_chunking`): changing it never re-splits a collection that
+        already exists, so a deployment that changes the numbers has to drop and
+        re-index.  The default pair is 400 tokens with a 60
         overlap — under the 508 tokens the embedder cuts at, and wide enough
         that a recipe keeps its failure and its fix in one chunk.  With
         ``chunk_tokens`` set to ``0`` nothing is declared and the engine splits
@@ -485,16 +726,14 @@ class KnowledgeIndexWorker:
         — so the only thing to tolerate here is a concurrent worker that
         created the same name a moment earlier.
         """
+        if name in self._collections:
+            return
         client = self._sse_client()
         if client.collection_exists(name):
+            self._collections.add(name)
             return
         worker = self._config.worker
-        chunking = None
-        if worker.chunk_tokens:
-            chunking = {
-                "max_tokens_in_chunk": int(worker.chunk_tokens),
-                "number_of_overlap_tokens": int(worker.chunk_overlap),
-            }
+        chunking = self._chunking()
         try:
             client.create_collection(
                 name,
@@ -504,13 +743,48 @@ class KnowledgeIndexWorker:
                 index_type=worker.index_type,
                 chunking=chunking,
             )
+            self._log(
+                "info",
+                "knowledge collection created: %s (embedder=%s reranker=%s"
+                " index=%s chunking=%s)",
+                name,
+                worker.embedder,
+                worker.reranker,
+                worker.index_type,
+                (
+                    f"{worker.chunk_tokens}+{worker.chunk_overlap}"
+                    if chunking
+                    else "engine default"
+                ),
+            )
+            self._collections.add(name)
         except Exception:
             # A concurrent worker may have created it a moment before; that is
             # not a failure, but anything else must surface so the message
             # stays pending and is retried.
             if client.collection_exists(name):
+                self._collections.add(name)
                 return
             raise
+
+    def _chunking(self) -> Optional[Dict[str, int]]:
+        """
+        The collection's chunking, as an indexing call states it.
+
+        One source for the two numbers, because they have to be the same pair at
+        creation and at indexing: the engine takes the split from the request,
+        and a document indexed with a chunk size of its own is retrieved as
+        though the collection had been configured that way.  ``None`` — what
+        ``chunk_tokens`` of ``0`` produces — says nothing on either side and
+        leaves the engine's default in force twice rather than once.
+        """
+        worker = self._config.worker
+        if not worker.chunk_tokens:
+            return None
+        return {
+            "max_tokens_in_chunk": int(worker.chunk_tokens),
+            "number_of_overlap_tokens": int(worker.chunk_overlap),
+        }
 
     # ------------------------------------------------------------- masking -
     def _get_masker(self) -> Any:
@@ -524,15 +798,21 @@ class KnowledgeIndexWorker:
         return self._masker
 
     def _mask(self, text: str) -> str:
-        """Mask a document's text; the reverse mappings are discarded."""
+        """Mask text or fail closed; the reverse mappings are discarded."""
         if not text:
             return text
         try:
-            masked, _mappings = self._get_masker().mask_payload(text)
-        except Exception as exc:  # a masking failure must not skip indexing
-            self._log("warning", "knowledge masking failed: %s", type(exc).__name__)
-            return text
-        return masked
+            result = self._get_masker().mask_payload(text)
+            if (
+                not isinstance(result, tuple)
+                or len(result) != 2
+                or not isinstance(result[0], str)
+                or not isinstance(result[1], dict)
+            ):
+                raise ValueError("invalid masker result")
+        except Exception:
+            raise RuntimeError("knowledge masking failed") from None
+        return result[0]
 
     def _mask_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -554,20 +834,83 @@ class KnowledgeIndexWorker:
         source = dict(metadata or {})
         identity = {key: source.pop(key) for key in IDENTITY_KEYS if key in source}
         try:
-            masked, _mappings = self._get_masker().mask_payload(source)
-        except Exception as exc:  # a masking failure must not skip indexing
-            self._log(
-                "warning",
-                "knowledge metadata masking failed: %s",
-                type(exc).__name__,
-            )
-            masked = source
-        if not isinstance(masked, dict):
-            masked = dict(source)
+            result = self._get_masker().mask_payload(source)
+            if (
+                not isinstance(result, tuple)
+                or len(result) != 2
+                or not isinstance(result[0], dict)
+                or not isinstance(result[1], dict)
+            ):
+                raise ValueError("invalid masker result")
+        except Exception:
+            raise RuntimeError("knowledge metadata masking failed") from None
+        masked = result[0]
         masked.update(identity)
         return masked
 
     # ------------------------------------------------------------ retention -
+    def prune_documents(self, event: KnowledgeEvent) -> int:
+        """
+        Retire the documentation documents a scope no longer has.
+
+        The proxy names the documents it superseded; the engine knows them under
+        a name with its own suffix, so the request is resolved against the
+        collection's listing before anything is deleted.  Asking for a document
+        the engine does not have is not an error — it is what happens when a
+        prune is replayed after the document was already deleted.
+
+        Parameters
+        ----------
+        event : KnowledgeEvent
+            A :data:`CONTROL_DOCS_PRUNE` event naming documents to forget.
+
+        Returns
+        -------
+        int
+            Documents deleted.
+        """
+        names = {
+            str(name)
+            for name in (event.metadata or {}).get("names") or ()
+            if str(name)
+        }
+        if not names or not event.scope:
+            return 0
+        collection = self._config.collection(event.scope, KIND_DOC)
+        wanted = {name for name in names} | {
+            f"{name}{ENGINE_NAME_SUFFIX}" for name in names
+        } | {
+            f"{name}{_DOC_FILE_SUFFIX}" for name in names
+        }
+        client = self._sse_client()
+        try:
+            details = client.list_document_details(collection)
+        except Exception as exc:
+            # A collection that does not exist yet has nothing to retire; any
+            # other failure is reported and retried by the next scan.
+            self._log(
+                "warning",
+                "knowledge docs prune could not list %s: %s",
+                collection,
+                type(exc).__name__,
+            )
+            return 0
+        stale = [
+            str(ref.name)
+            for ref in details or ()
+            if getattr(ref, "name", None) and str(ref.name) in wanted
+        ]
+        if not stale:
+            return 0
+        client.delete_documents(collection, documents=stale)
+        self._log(
+            "info",
+            "knowledge docs retired %d superseded document(s) in %s",
+            len(stale),
+            collection,
+        )
+        return len(stale)
+
     def _maybe_retain(self) -> None:
         """Run a retention pass if the interval has elapsed."""
         interval = int(self._config.worker.retention_interval_seconds)
@@ -638,11 +981,9 @@ class KnowledgeIndexWorker:
                 for entry in lister() or ():
                     name = getattr(entry, "name", "") or str(entry)
                     if (
-                        name.startswith(f"{prefix}_")
-                        and name.endswith("_sessions")
+                        name.startswith(f"{prefix}_") and name.endswith("_sessions")
                     ) or (
-                        name.startswith(f"{prefix}-")
-                        and name.endswith("-sessions")
+                        name.startswith(f"{prefix}-") and name.endswith("-sessions")
                     ):
                         found.add(name)
             except Exception as exc:  # a listing failure narrows, never crashes
@@ -671,6 +1012,14 @@ class KnowledgeIndexWorker:
         if not stale:
             return 0
         self._sse.delete_documents(collection, documents=stale)
+        self._log(
+            "info",
+            "knowledge retention deleted %d archived document(s) older than"
+            " %s from %s",
+            len(stale),
+            cutoff.isoformat(),
+            collection,
+        )
         return len(stale)
 
     # --------------------------------------------------------- redis plumbing -
@@ -893,6 +1242,124 @@ def _default_consumer() -> str:
     return f"worker-{int(time.time())}-{os.getpid()}"
 
 
+#: Values an operator writes for "on" in the router's run script.
+_ON_VALUES: Tuple[str, ...] = ("1", "true", "yes", "on")
+
+
+def _describe(exc: BaseException) -> str:
+    """
+    Name a failure the way an operator can act on it.
+
+    The exception's class alone says that a call failed; the engine's own
+    message says which collection and which constraint, which is the difference
+    between a fix and a restart.  Whitespace is folded and the text clipped,
+    because a proxy in front of the engine answers with a whole HTML page.
+    """
+    text = " ".join(str(exc).split())
+    if len(text) > _ERROR_DETAIL_CHARS:
+        text = text[:_ERROR_DETAIL_CHARS].rstrip() + "…"
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def _log_level(explicit: Optional[str]) -> Tuple[int, str]:
+    """
+    Resolve the logging level from the command line and the router's switches.
+
+    The router's own run script exports ``LLM_ROUTER_IN_DEBUG`` and
+    ``LLM_ROUTER_LOG_LEVEL``, and the worker wrapper reads those assignments,
+    so an operator who turns debug on for the router gets a debug worker
+    without repeating the switch.  An explicit ``--log-level`` still wins: it
+    is the narrower statement.
+
+    Parameters
+    ----------
+    explicit : str, optional
+        The ``--log-level`` value, or ``None``/``""`` when the operator did
+        not name one.
+
+    Returns
+    -------
+    Tuple[int, str]
+        The level and the plain-language reason for it, so the startup line can
+        name which of the three knobs won.
+    """
+    for value, reason in (
+        (explicit, "command line"),
+        (
+            (
+                "DEBUG"
+                if str(os.environ.get("LLM_ROUTER_IN_DEBUG", "")).strip().lower()
+                in _ON_VALUES
+                else None
+            ),
+            "LLM_ROUTER_IN_DEBUG",
+        ),
+        (os.environ.get("LLM_ROUTER_LOG_LEVEL"), "LLM_ROUTER_LOG_LEVEL"),
+    ):
+        name = str(value or "").strip().upper()
+        if not name:
+            continue
+        level = logging.getLevelName(name)
+        if isinstance(level, int):
+            return level, reason
+    return logging.INFO, "default"
+
+
+def _log_startup(
+    logger: Any, config: AgenticKnowledgeConfig, level: int, reason: str
+) -> None:
+    """
+    Write down what this worker is wired to, before it touches anything.
+
+    A worker that indexes into the wrong place is worse than one that refuses
+    to start, so the host, the stream it reads and the collection names it will
+    create are all on the console before the first event.  Credentials are not:
+    the presence of a secret is configuration worth confirming, its value is
+    not a log line.
+    """
+    worker = config.worker
+    logger.info(
+        "knowledge worker configuration: engine=%s prefix=%s auth=%s",
+        config.sse_host,
+        config.sse_prefix or "(client default)",
+        (
+            "token"
+            if config.sse_token
+            else (
+                "username" if config.sse_username and config.sse_password else "none"
+            )
+        ),
+    )
+    logger.info(
+        "  stream=%s group=%s consumer=%s batch=%d block_ms=%d",
+        config.stream_key,
+        worker.group,
+        config.worker.consumer or "(this process)",
+        worker.batch,
+        worker.block_ms,
+    )
+    logger.info(
+        "  collections=%s_<scope>[_docs|_sessions] embedder=%s reranker=%s",
+        config.collection_prefix,
+        worker.embedder,
+        worker.reranker,
+    )
+    logger.info(
+        "  chunking=%s retention=%ds redis=%s:%s/%s keys=%s",
+        (
+            f"{worker.chunk_tokens}+{worker.chunk_overlap}"
+            if worker.chunk_tokens
+            else "engine default"
+        ),
+        worker.retention_interval_seconds,
+        config.redis.host,
+        config.redis.port,
+        config.redis.db,
+        config.key_prefix,
+    )
+    logger.info("  logging at %s (from %s)", logging.getLevelName(level), reason)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Create the command-line parser."""
     parser = argparse.ArgumentParser(
@@ -919,8 +1386,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--log-level",
-        default="INFO",
-        help="Logging level (DEBUG, INFO, WARNING, ...).",
+        default=None,
+        help=(
+            "Logging level (DEBUG, INFO, WARNING, ...). Defaults to DEBUG "
+            "when LLM_ROUTER_IN_DEBUG is on and to LLM_ROUTER_LOG_LEVEL "
+            "otherwise, both of which the router's run script exports."
+        ),
     )
     return parser
 
@@ -954,11 +1425,16 @@ def _build_worker(args: argparse.Namespace) -> KnowledgeIndexWorker:
         from dataclasses import replace
 
         config.worker = replace(config.worker, retention_interval_seconds=0)
+    level, level_reason = _log_level(getattr(args, "log_level", None))
     logger = logging.getLogger("agentic-kb-worker")
+    # The root gets INFO and this logger the requested level: raising the root
+    # would turn every library the worker imports — Redis sockets, the HTTP
+    # client — loose at once, and the operator asked about the worker.
     logging.basicConfig(
-        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
+        level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    logger.setLevel(level)
     _require_settings(config)
     try:
         client = _engine_client(config)
@@ -967,6 +1443,7 @@ def _build_worker(args: argparse.Namespace) -> KnowledgeIndexWorker:
             "The knowledge worker needs the SSE client library installed "
             f"({exc})."
         ) from exc
+    _log_startup(logger, config, level, level_reason)
     _verify_model_names(client, config, logger)
     return KnowledgeIndexWorker(config=config, logger=logger, sse_client=client)
 
@@ -1106,9 +1583,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             processed = worker.run_once(block_ms=0)
         except Exception as exc:
-            logger.error(
-                "knowledge worker batch failed: %s", type(exc).__name__
-            )
+            logger.error("knowledge worker batch failed: %s", type(exc).__name__)
             return 1
         # A drained batch is the only evidence a cron-driven worker leaves
         # behind; silence and "it worked" would be indistinguishable.

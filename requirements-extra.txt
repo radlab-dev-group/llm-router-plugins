@@ -3,7 +3,7 @@
 #   pip install .[ml-gpu]   — CUDA FAISS + sentence-transformers (pick ONE faiss build!)
 #   pip install .[rag]      — langchain + Pillow (RAG utilities)
 #   pip install .[memory]   — redis (shared Codex session memory; optional)
-#   pip install .[knowledge] — sse-lib + redis (agentic knowledge layer; also needs ../semantic-search-engine/sse_lib in dev)
+#   pip install .[agentic-knowledge] — sse-lib>=0.1.0 + redis (agentic knowledge layer)
 #
 # Manual install:
 langchain
@@ -14,4 +14,4 @@ numpy
 scipy
 Pillow
 redis
-# sse-lib   # agentic knowledge layer client; in dev: pip install ../semantic-search-engine/sse_lib
+sse-lib
