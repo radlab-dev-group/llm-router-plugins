@@ -214,3 +214,11 @@ __marimo__/
 # Workdir and its subdirs
 /workdir/
 /workdir*
+
+# Generated Codex routing evaluation artifacts
+# (recovered corpora and per-request documents written by
+#  scripts/plugins/auto_codex/{eval,payload_parser}). They are derived from the
+#  recorded logs in agents-conversation/ and are hundreds of MB.
+agents-conversation/codex/payloads/
+codex-corpus.jsonl
+codex-decisions.jsonl
