@@ -1106,6 +1106,44 @@ def collect_phase_evidence(
     return tuple(evidence)
 
 
+def _action_ages(
+    activity: Tuple[CodexActivity, ...], rules: CodexPhaseConfig
+) -> Tuple[Dict[str, int], int]:
+    """
+    Map each event to how many executed actions the turn had reached.
+
+    Only a command or a patch is an executed action; an assistant utterance
+    does not advance the clock, and a result is dated by the call it answers.
+
+    Parameters
+    ----------
+    activity : Tuple[CodexActivity, ...]
+        The assistant and tool events of the active turn.
+    rules : CodexPhaseConfig
+        Validated phase rules naming the tools that execute.
+
+    Returns
+    -------
+    (Dict[str, int], int)
+        Event identifier to action index, and the total actions of the turn.
+    """
+    ages: Dict[str, int] = {}
+    step = 0
+    for item in activity:
+        if item.kind == "function_call":
+            executes = (
+                item.name in rules.command_tools or item.name in rules.patch_tools
+            )
+            if not executes:
+                continue
+            step += 1
+            if item.event_id:
+                ages[item.event_id] = step
+        elif item.kind == "function_call_output" and item.event_id:
+            ages[item.event_id] = step
+    return ages, step
+
+
 def detect_phase_evidence(
     activity: Tuple[CodexActivity, ...],
     rules: CodexPhaseConfig,
@@ -1138,6 +1176,20 @@ def detect_phase_evidence(
     evidence = collect_phase_evidence(activity, rules)
     if not evidence:
         return None
+    if rules.signal_ttl is not None:
+        # A command describes the moment it ran.  Once the turn has moved on by
+        # more than the TTL without another executed signal, it is no longer
+        # doing that work, so the aged signal is dropped and the cascade answers
+        # from the instruction instead of from a step that has become history.
+        ages, step = _action_ages(activity, rules)
+        evidence = tuple(
+            held
+            for held in evidence
+            if held.kind == EVIDENCE_ANNOUNCEMENT
+            or step - ages.get(held.event_id, step) <= rules.signal_ttl
+        )
+        if not evidence:
+            return None
     strong = [item for item in evidence if item.strength == STRENGTH_STRONG]
     pool = strong or evidence
     return _dominant_recent(pool, max(1, rules.evidence_window))

@@ -15,6 +15,7 @@ OPTIONAL_FIELDS = frozenset(
         "implement_write_patterns",
         "activity_description_limit",
         "evidence_window",
+        "signal_ttl",
     }
 )
 
@@ -59,6 +60,7 @@ class CodexPhaseConfig:
     implement_write_patterns: Tuple[Pattern[str], ...] = ()
     activity_description_limit: int = 6
     evidence_window: int = 1
+    signal_ttl: Optional[int] = None
 
     @staticmethod
     def _followup_budget(value):
@@ -86,6 +88,17 @@ class CodexPhaseConfig:
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(
                 "settings.phase.evidence_window must be a positive integer"
+            )
+        return value
+
+    @staticmethod
+    def _ttl(value):
+        """Actions a signal stays authoritative for; ``None`` keeps it forever."""
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(
+                "settings.phase.signal_ttl must be a positive integer or null"
             )
         return value
 
@@ -220,6 +233,7 @@ class CodexPhaseConfig:
                 data.get("activity_description_limit", 6)
             ),
             evidence_window=cls._window(data.get("evidence_window", 1)),
+            signal_ttl=cls._ttl(data.get("signal_ttl", None)),
         )
         if mode_names is not None:
             references = set()
