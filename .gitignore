@@ -220,5 +220,7 @@ __marimo__/
 #  scripts/plugins/auto_codex/{eval,payload_parser}). They are derived from the
 #  recorded logs in agents-conversation/ and are hundreds of MB.
 agents-conversation/codex/payloads/
+agents-conversation/codex/payloads-gold/*
+
 codex-corpus.jsonl
 codex-decisions.jsonl
