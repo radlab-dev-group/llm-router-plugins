@@ -18,6 +18,7 @@ from agentic_knowledge_support import knowledge_config
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AGENTIC_KNOWLEDGE_ENV_PREFIX,
+    WILDCARD_MODE,
     AgenticKnowledgeConfig,
     ModePolicy,
     SourcePolicy,

@@ -78,6 +78,13 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
 
 __all__ = ["AgenticKnowledgePlugin"]
 
+#: How often one repository is told that its read budget starved its searches.
+_BUDGET_WARNING_INTERVAL_SECONDS = 300.0
+
+#: How many repositories that note is remembered for, so a proxy serving many
+#: repositories cannot grow the table without bound.
+_BUDGET_WARNING_SCOPES = 512
+
 #: Request classes the plugin does not enrich.
 _REQUEST_CLASS_AUX = "aux_title"
 _REQUEST_CLASS_COMPACTION = "compaction"
@@ -136,6 +143,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._escalation: Optional[EscalationPolicy] = None
         self._limiter: Optional[LookupLimiter] = None
         self._docs: Optional[DocsIndexer] = None
+        self._budget_warnings: Dict[str, float] = {}
         self._wire(self._config)
 
     # -------------------------------------------------------------- wiring -
@@ -423,14 +431,14 @@ class AgenticKnowledgePlugin(PluginInterface):
             results.append((result, request.categories))
         if skipped:
             # The reads the operator will otherwise conclude never happened.
-            self._warn(
-                "knowledge read budget of %.1fs spent: %d search(es) of %s not "
-                "started (raise READ_TIMEOUT_SECONDS or shorten the mode's "
-                "sources)",
-                self._config.read_timeout_seconds,
-                skipped,
-                turn.scope or "?",
-            )
+            # Both numbers go in the line because the usual cause is not a
+            # small budget: it is a per-call timeout the budget cannot hold
+            # more than one of, which looks like an idle engine and an empty
+            # knowledge base at once.  Rate-limited per repository, because a
+            # starved configuration starves every request of every session,
+            # and a warning that prints on every request is a warning nobody
+            # reads.
+            self._warn_budget(turn.scope, skipped, len(results) + skipped)
         status = _status_of(statuses)
 
         assembler = ContextAssembler(
@@ -684,6 +692,37 @@ class AgenticKnowledgePlugin(PluginInterface):
         except Exception as exc:
             self._warn("knowledge doc context read failed: %s", type(exc).__name__)
             return None
+
+    def _warn_budget(self, scope: str, skipped: int, total: int) -> None:
+        """
+        Report searches the read budget could not start, once per interval.
+
+        The first line of a starved deployment is the only one that carries
+        information; the thousandth is noise that hides the rest of the log.
+        """
+        logger = self._logger
+        if logger is None:
+            return
+        now = time.monotonic()
+        key = scope or "?"
+        last = self._budget_warnings.get(key)
+        if last is not None and now - last < _BUDGET_WARNING_INTERVAL_SECONDS:
+            return
+        if len(self._budget_warnings) > _BUDGET_WARNING_SCOPES:
+            self._budget_warnings.clear()
+        self._budget_warnings[key] = now
+        logger.warning(
+            "knowledge read budget of %.1fs spent before %d of %d search(es) of"
+            " %s could start (one call is allowed %.1fs): raise"
+            " READ_TIMEOUT_SECONDS above SSE_API_TIMEOUT, or lower"
+            " SSE_API_TIMEOUT — a budget equal to one call leaves room for no"
+            " search at all",
+            self._config.read_timeout_seconds,
+            skipped,
+            total,
+            key,
+            self._config.sse_timeout_seconds,
+        )
 
     def _warn(self, message: str, *args: Any) -> None:
         """Report one failure when a logger was given."""

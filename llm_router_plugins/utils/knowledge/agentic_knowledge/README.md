@@ -535,6 +535,10 @@ built-in defaults**. A value present but malformed is an error, except connectio
 means the feature is unavailable.  `read.timeout_seconds` is the budget a whole request may spend on the engine, and a
 search starts only while a whole call — `SSE_API_TIMEOUT` — still fits before it ends.  It is therefore a *sum* of
 calls, not a per-call number: the shipped policy reads up to three collections per mode and budgets three calls of the
+two-second default.  A budget that equals one call is raised at validation by a small margin, because the deadline is
+read from the clock a moment before a call is made and a budget with no room over it would start no search of any
+request.  When the budget cannot hold every call of a mode, the later ones are not started and the plugin says so once
+per repository, naming both numbers.
 
 ```jsonc
 {

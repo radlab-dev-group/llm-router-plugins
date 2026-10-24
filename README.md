@@ -316,6 +316,10 @@ The worker is a separate process the operator starts —
 environment from the router's own run script. It creates a repository's collection on that repository's
 first event; a project that has produced nothing yet simply has an empty knowledge base.
 
+A mode routing did not resolve falls back to the `"*"` policy rather than to no search at all, and
+the read budget (`read.timeout_seconds`) is a *sum* of engine calls — one per collection a mode
+reads — not a per-call timeout, which is set apart by `SSE_API_TIMEOUT`.
+
 Connection settings (SSE and Redis) come only from `LLM_ROUTER_KNOWLEDGE_AGENTIC_*`; the policy
 (adapters, per-mode sources, weights and budgets, escalation models, retention) is
 [agentic_knowledge.json](llm_router_plugins/resources/knowledge/agentic_knowledge.json). No SSE
