@@ -291,6 +291,11 @@ Phase signals live in `settings.phase` in `agentic_routing_codex.json`, not in P
 - `evidence_window` (optional, default `1`): how many of the most recent strong signals the phase is the mode of;
   the most recent action breaks a tie. Larger windows keep one interleaved commit between edits from flipping the
   whole turn to `git_review`.
+- `signal_ttl` (optional, default `null` = never): how many executed actions a command signal stays authoritative
+  for. An executed command describes the moment it ran, so after `signal_ttl` further executed actions with no new
+  signal of its own it stops deciding and the cascade answers from the instruction instead — a turn that ran one test
+  and then read sources for fifty steps is no longer testing. Announcements are never aged out, and a test failure is
+  as fresh as the call that failed.
 - `neutral_executables` (optional): executables that carry no phase of their own (`echo`, `ls`, `rg`, …). They do not
   silence a recognized command beside them, and an executable the table does not name at all is skipped rather than
   treated as a veto.
