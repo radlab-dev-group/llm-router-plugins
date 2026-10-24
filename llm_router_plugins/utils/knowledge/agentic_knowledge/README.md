@@ -207,6 +207,7 @@ metadata in `metadata_json`, filtered by `eq`/`in`.
 | `implement`       | latest user text + touched paths                                              |
 | `plan`            | latest user text                                                              |
 | `git_review`, `review` | paths from patches                                                       |
+| `*` (fallback)    | the general composition: user text + paths + failure, for a mode routing did not resolve |
 
 Each mode has a policy — the sources it reads, their weights, `max_items`, and a character budget:
 
@@ -216,11 +217,24 @@ Each mode has a policy — the sources it reads, their weights, `max_items`, and
   "sources": [
     {"category": "recipe",          "weight": 1.0, "max_items": 3},
     {"category": "deadend",         "weight": 0.9, "max_items": 3},
-    {"category": "session_archive", "weight": 0.6, "max_items": 3}
+    {"category": "playbook",        "weight": 0.5, "max_items": 2},
+    {"category": "session_archive", "weight": 0.6, "max_items": 3},
+    {"category": "doc", "weight": 0.4, "max_items": 2, "doc_types": ["guide", "note"]}
   ],
   "escalation_model_name": "qwen/Qwen3.8-27B"
 }
 ```
+
+A mode with no policy of its own — routing resolved none, or a name this policy
+does not know — falls back to the one named `*`, so the request is asked of the
+base rather than served empty.  An explicit policy always wins; a configuration
+without a `*` entry behaves as before (such a request is mined, but not read).
+The shipped policy reads every kind the miner can write — including
+`playbook`, where the mode is about doing rather than un-breaking — and reads
+documentation in the modes that previously read none of it: `debug` asks for the
+guide and the notes about the module the failure sits in, `test` for the guide
+and the contributing rules the change has to keep, and `implement` for the
+dead ends it would otherwise walk back into.
 
 A source may also restrict the **phases** it is read in — the work the episode was
 doing (`test`, `implement`, …), which is *not* the document kind: a `recipe` mined
@@ -518,7 +532,9 @@ flaky test looks exactly like a loop. The "already tried" list comes from the cu
 
 Policy is JSON (reviewable, versionable, no secrets); every connection is ENV only. Precedence: **ENV → JSON →
 built-in defaults**. A value present but malformed is an error, except connection settings, where a missing host just
-means the feature is unavailable.
+means the feature is unavailable.  `read.timeout_seconds` is the budget a whole request may spend on the engine, and a
+search starts only while a whole call — `SSE_API_TIMEOUT` — still fits before it ends.  It is therefore a *sum* of
+calls, not a per-call number: the shipped policy reads up to three collections per mode and budgets three calls of the
 
 ```jsonc
 {

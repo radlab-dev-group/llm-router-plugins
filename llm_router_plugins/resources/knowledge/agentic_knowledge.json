@@ -11,7 +11,7 @@
   },
   "read": {
     "enabled": true,
-    "timeout_seconds": 1.5,
+    "timeout_seconds": 6.0,
     "min_similarity": 0.35,
     "hybrid_search": true,
     "rerank_results": false,
@@ -33,9 +33,23 @@
           "max_items": 3
         },
         {
+          "category": "playbook",
+          "weight": 0.5,
+          "max_items": 2
+        },
+        {
           "category": "session_archive",
           "weight": 0.6,
           "max_items": 3
+        },
+        {
+          "category": "doc",
+          "weight": 0.4,
+          "max_items": 2,
+          "doc_types": [
+            "guide",
+            "note"
+          ]
         }
       ],
       "escalation_model_name": "qwen/Qwen3.8-27B"
@@ -54,9 +68,23 @@
           "max_items": 3
         },
         {
+          "category": "playbook",
+          "weight": 0.7,
+          "max_items": 3
+        },
+        {
           "category": "session_archive",
           "weight": 0.5,
           "max_items": 2
+        },
+        {
+          "category": "doc",
+          "weight": 0.4,
+          "max_items": 2,
+          "doc_types": [
+            "guide",
+            "contributing"
+          ]
         }
       ],
       "escalation_model_name": "qwen/Qwen3.8-27B"
@@ -67,6 +95,16 @@
         {
           "category": "recipe",
           "weight": 0.9,
+          "max_items": 2
+        },
+        {
+          "category": "playbook",
+          "weight": 0.9,
+          "max_items": 3
+        },
+        {
+          "category": "deadend",
+          "weight": 0.7,
           "max_items": 2
         },
         {
@@ -89,6 +127,16 @@
     "plan": {
       "max_chars": 4000,
       "sources": [
+        {
+          "category": "playbook",
+          "weight": 0.8,
+          "max_items": 3
+        },
+        {
+          "category": "recipe",
+          "weight": 0.6,
+          "max_items": 2
+        },
         {
           "category": "session_archive",
           "weight": 0.7,
@@ -121,6 +169,11 @@
           "max_items": 2
         },
         {
+          "category": "playbook",
+          "weight": 0.5,
+          "max_items": 2
+        },
+        {
           "category": "session_archive",
           "weight": 0.5,
           "max_items": 2
@@ -141,7 +194,42 @@
           ]
         },
         {
+          "category": "deadend",
+          "weight": 0.6,
+          "max_items": 2
+        },
+        {
+          "category": "playbook",
+          "weight": 0.5,
+          "max_items": 2
+        },
+        {
           "category": "session_archive",
+          "weight": 0.5,
+          "max_items": 2
+        }
+      ]
+    },
+    "*": {
+      "max_chars": 3000,
+      "sources": [
+        {
+          "category": "recipe",
+          "weight": 0.9,
+          "max_items": 2
+        },
+        {
+          "category": "playbook",
+          "weight": 0.8,
+          "max_items": 2
+        },
+        {
+          "category": "deadend",
+          "weight": 0.7,
+          "max_items": 2
+        },
+        {
+          "category": "doc",
           "weight": 0.5,
           "max_items": 2
         }

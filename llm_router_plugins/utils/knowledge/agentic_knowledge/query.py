@@ -207,7 +207,7 @@ class QueryBuilder:
         Returns
         -------
         str
-            The query; ``""`` when there is nothing to search for.
+            The query; ``""`` when the turn says nothing at all.
         """
         failure = _failure_signature(turn)
         text = (turn.latest_user_text or "").strip()[:_MAX_TEXT_CHARS]
@@ -215,7 +215,7 @@ class QueryBuilder:
         mode = turn.mode
 
         if mode == "debug":
-            parts = [failure, text]
+            parts: list = [failure, text]
         elif mode == "test":
             parts = [_test_command(turn), paths, text]
         elif mode == "implement":
@@ -224,8 +224,24 @@ class QueryBuilder:
             parts = [paths, text]
         else:
             parts = [text, paths, failure]
-        joined = " \n".join(part for part in parts if part and part.strip())
-        return joined.strip()[:_MAX_QUERY_CHARS]
+        joined = _join(parts)
+        if not joined:
+            # A mode's own shape can come up empty — a review of a turn that
+            # named no path, a test run with neither a command nor a word from
+            # the user — and an empty query is a request that never asked the
+            # knowledge base anything at all.  What it then asks with is the
+            # composition every other mode already uses: the same three facts,
+            # none of them invented, just not ordered for a mode that had
+            # nothing to order.
+            joined = _join([text, paths, failure])
+        return joined[:_MAX_QUERY_CHARS]
+
+
+def _join(parts: Sequence[str]) -> str:
+    """Join the pieces of a query, dropping the ones that are empty."""
+    return " \n".join(part.strip() for part in parts if part and part.strip())[
+        :_MAX_QUERY_CHARS
+    ]
 
 
 def _is_documentation(categories: Sequence[str]) -> bool:
