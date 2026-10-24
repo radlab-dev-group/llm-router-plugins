@@ -73,6 +73,30 @@ def test_a_policy_without_a_fallback_serves_no_unknown_mode():
     assert config.policy_for("does-not-exist") is None
 
 
+def test_a_budget_equal_to_one_call_is_raised_to_hold_it():
+    """A budget that equals one call must be lifted to cover it.
+
+    The store will not start a search whose whole call does not fit before
+    the deadline, and the deadline is read off the clock a moment before the
+    call is made.  So a configuration with
+    ``read_timeout_seconds == sse_timeout_seconds`` would never start any
+    search of any request.  Validation closes that hole.
+    """
+    config = knowledge_config()
+    config.sse_timeout_seconds = 2.0
+    config.read_timeout_seconds = 2.0
+    config.validate()
+    assert config.read_timeout_seconds > config.sse_timeout_seconds
+
+
+def test_a_budget_bigger_than_one_call_is_kept():
+    config = knowledge_config()
+    config.sse_timeout_seconds = 2.0
+    config.read_timeout_seconds = 6.0
+    config.validate()
+    assert config.read_timeout_seconds == 6.0
+
+
 def test_collection_names_separate_the_session_archive():
     config = knowledge_config()
     assert config.collection("webapp", "recipe") == "agentic_kb_webapp"

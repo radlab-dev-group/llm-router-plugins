@@ -44,7 +44,9 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.signature import (
     signature_of,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+    REASON_READ_BUDGET,
     STATUS_UNAVAILABLE,
+    SearchResult,
 )
 
 MARKER = "<agentic_knowledge>"
@@ -224,6 +226,78 @@ def test_an_unknown_mode_without_a_fallback_is_still_mined():
 
 
 # ------------------------------------------------------------------ write --
+class _BudgetStarvedStore:
+    """A store that refuses every search: the budget holds none of them.
+
+    This is what a deployment meets when ``read_timeout_seconds`` and
+    ``sse_timeout_seconds`` are equal — the deadline is read from the clock a
+    moment before a call is made, and a call that cannot finish before the
+    deadline is not started.
+    """
+
+    def search(self, request, *, deadline=None):
+        return SearchResult(STATUS_UNAVAILABLE, reason=REASON_READ_BUDGET)
+
+
+def test_a_starved_read_budget_warns_once_per_interval(caplog, monkeypatch):
+    """A budget that starts no search says so, without saying it every time.
+
+    A starved configuration starves every request of every session, so the
+    note that names the two numbers must not print on every one of them.
+    """
+    import logging
+
+    import llm_router_plugins.utils.knowledge.agentic_knowledge.plugin as plugin_module
+
+    monkeypatch.setattr(plugin_module, "_BUDGET_WARNING_INTERVAL_SECONDS", 300.0)
+    logger = logging.getLogger("test_starved_budget")
+    logger.setLevel("WARNING")
+    config = knowledge_config()
+    store = _BudgetStarvedStore()
+    plugin = AgenticKnowledgePlugin(
+        config=config,
+        logger=logger,
+        store=store,
+        cache=InMemoryContextCache(),
+        publisher=FakePublisher(),
+    )
+    payload = codex_payload(
+        base_items(cwd="/repo/webapp"),
+        mode="debug",
+        turn_id="turn-1",
+        root_turn_id="gen-1",
+    )
+    with caplog.at_level("WARNING", logger=plugin._logger.name):
+        plugin.apply(payload)
+        first = [line for line in caplog.messages if "read budget" in line]
+        plugin.apply(
+            codex_payload(
+                base_items(cwd="/repo/webapp"),
+                mode="debug",
+                turn_id="turn-2",
+                root_turn_id="gen-2",
+            )
+        )
+        second = [line for line in caplog.messages if "read budget" in line]
+    assert len(first) == 1
+    # The line carries both numbers, because the operator has to be able to
+    # tell a too-small budget from a too-big per-call timeout.
+    assert str(config.read_timeout_seconds) in first[0]
+    assert str(config.sse_timeout_seconds) in first[0]
+    # The second request of the same starved configuration stays quiet.
+    assert len(second) == 1
+
+
+def test_a_starved_read_budget_does_not_change_what_is_served():
+    config = knowledge_config()
+    store = _BudgetStarvedStore()
+    plugin = make_plugin(config, store=store)
+    out = plugin.apply(codex_payload(base_items(cwd="/repo/webapp"), mode="debug"))
+    # The request is served as if the knowledge base were empty.
+    assert out is not None
+    assert "knowledge" in out["routing"]
+
+
 def test_recipe_turn_publishes_a_recipe_event():
     config = knowledge_config()
     publisher = FakePublisher()
