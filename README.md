@@ -282,9 +282,11 @@ learned, **without the agent cooperating**. It reads the routing decision (`rout
 `agent_mode`, `model`), searches the **Semantic Search Engine** for verified fixes, dead ends and
 the pre-compaction archive of the current scope, and injects the result as a separate, removable
 context block. It also learns from the traffic: the miner turns a `test_failure → patch → test
-pass` episode into a `recipe` and a repeated failure into a `deadend`, publishes them to a Redis
-Stream, and an indexing worker masks them with `FastMasker` before indexing; the window a
-`compaction` request is about to summarize is archived whole. Every mined episode also carries the
+pass` episode into a `recipe`, a `patch → test pass` episode that no failure opened into a
+`playbook` — the correct steps of a task are knowledge too, and without this kind a turn that went
+right from the first try wrote nothing at all — and a repeated failure into a `deadend`, publishes
+them to a Redis Stream, and an indexing worker masks them with `FastMasker` before indexing; the
+window a `compaction` request is about to summarize is archived whole. Every mined episode also carries the
 work **phase** its evidence names (`test`, `implement`, …), and a retrieval source can be
 restricted to phases in its policy, so a mode can read only what was learned while doing its kind
 of work. The retrieval result is a routing signal: an agent looping on one error signature with no
