@@ -182,8 +182,10 @@ def test_noncurrent_uncertain_or_quoted_announcements(text, rules):
         ("git add -A && git commit -m msg", "git_review"),
         ("git mv a.py b.py", "git_review"),
         ("git ls-files", "git_review"),
-        ("cd repo && echo \"=== git ===\" && git log --oneline 2>/dev/null | cat",
-         "git_review"),
+        (
+            'cd repo && echo "=== git ===" && git log --oneline 2>/dev/null | cat',
+            "git_review",
+        ),
         ("for f in *.py; do echo $f; done", None),
         ("sed -i 's/a/b/' src/app.py", "implement"),
         ("flake8 src", "review"),
@@ -693,7 +695,6 @@ def test_patch_evidence_names_the_envelope(rules):
     assert evidence.reason.startswith("patch ")
 
 
-
 # --- evidence window, strengths and activity naming -------------------------
 
 
@@ -752,7 +753,12 @@ def test_a_weak_signal_carries_the_turn_when_no_strong_one_exists(rules):
 def test_an_invalid_rule_strength_is_rejected():
     raw = phase_raw()
     raw["commands"] = [
-        {"executable": "ruff", "args_prefix": [], "mode": "review", "strength": "loud"}
+        {
+            "executable": "ruff",
+            "args_prefix": [],
+            "mode": "review",
+            "strength": "loud",
+        }
     ]
     with pytest.raises(ValueError, match="strength"):
         CodexPhaseConfig.from_raw(raw)
@@ -782,7 +788,10 @@ def test_a_quoted_operator_is_data_not_a_command_separator(rules):
 def test_neutral_executables_are_not_a_phase_of_their_own(rules):
     # The shipped table names echo and friends neutral: they do not silence a
     # recognized command beside them, and they are no evidence on their own.
-    assert detect_phase((command("ls src && git log --oneline"),), rules) == "git_review"
+    assert (
+        detect_phase((command("ls src && git log --oneline"),), rules)
+        == "git_review"
+    )
     assert detect_phase((command("ls src"),), rules) is None
 
 

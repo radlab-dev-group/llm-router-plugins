@@ -290,7 +290,9 @@ def test_fallback_and_ambiguous_rates_are_reported():
         id="d",
         cascade=dict(record["cascade"], source="phase"),
     )
-    fell_back = dict(record, id="f", cascade=dict(record["cascade"], reason="no layer answered"))
+    fell_back = dict(
+        record, id="f", cascade=dict(record["cascade"], reason="no layer answered")
+    )
     uncertain = dict(record, id="u", ambiguous=True)
     report = summarize([decided, fell_back, uncertain], "cascade")
     assert report["fallback_rate"] == pytest.approx(0.5)

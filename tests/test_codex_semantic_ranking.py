@@ -751,16 +751,15 @@ def _scores(winner, second, winner_score, second_score, **rest):
     scores.update(rest)
     scores[winner] = winner_score
     scores[second] = second_score
-    return [
-        {"target": name, "similarity": score}
-        for name, score in scores.items()
-    ]
+    return [{"target": name, "similarity": score} for name, score in scores.items()]
 
 
 def test_assess_accepts_when_the_margin_reaches_the_relative_floor(
     mode_by_name,
 ):
-    layer = _make_layer(mode_by_name, min_margin=0.002, min_margin_relative=0.004, threshold=0.44)
+    layer = _make_layer(
+        mode_by_name, min_margin=0.002, min_margin_relative=0.004, threshold=0.44
+    )
     result = {
         "target_name": "implement",
         "similarity": 0.56,
@@ -776,7 +775,9 @@ def test_assess_relative_margin_tracks_the_runner_up_score(mode_by_name):
     # A 0.03 lead passes at a 0.56 band (required 0.028) but fails at a 0.9
     # band, where 0.05 of the runner-up (0.045) is required: the rule travels
     # with the scale of the scores instead of one absolute number.
-    high = _make_layer(mode_by_name, min_margin=0.002, min_margin_relative=0.05, threshold=0.1)
+    high = _make_layer(
+        mode_by_name, min_margin=0.002, min_margin_relative=0.05, threshold=0.1
+    )
     low_result = {
         "target_name": "plan",
         "similarity": 0.59,
@@ -792,7 +793,9 @@ def test_assess_relative_margin_tracks_the_runner_up_score(mode_by_name):
 
 
 def test_assess_accepts_when_the_runner_up_is_the_fallback_mode(mode_by_name):
-    layer = _make_layer(mode_by_name, min_margin=0.005, min_margin_relative=0.05, threshold=0.44)
+    layer = _make_layer(
+        mode_by_name, min_margin=0.005, min_margin_relative=0.05, threshold=0.44
+    )
     result = {
         "target_name": "test",
         "similarity": 0.55,

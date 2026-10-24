@@ -251,7 +251,11 @@ class KnowledgeEventPublisher:
                     # inclusive ID instead, retaining Redis 5 compatibility.
                     milliseconds, sequence = map(
                         int,
-                        (last.decode("ascii") if isinstance(last, bytes) else str(last)).split("-"),
+                        (
+                            last.decode("ascii")
+                            if isinstance(last, bytes)
+                            else str(last)
+                        ).split("-"),
                     )
                     if sequence == 2**64 - 1:
                         start = f"{milliseconds + 1}-0"
@@ -263,7 +267,8 @@ class KnowledgeEventPublisher:
         except Exception as exc:
             self._warn(
                 "knowledge docs stream replacement failed: %s: %s",
-                type(exc).__name__, exc,
+                type(exc).__name__,
+                exc,
             )
             return PublishStatus(STATUS_UNAVAILABLE, errors=1, reason="replace")
         return self.publish(events)

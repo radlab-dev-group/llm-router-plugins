@@ -833,9 +833,7 @@ def test_record_follows_the_decided_phase_not_the_last_signal(config, policy):
     # The record rebuilt from the last signal disagrees with that decision.
     assert resolve_memory(None, request, config.phase, policy).state.mode == "test"
 
-    outcome = remember_decision(
-        store, policy, request, decision, rules=config.phase
-    )
+    outcome = remember_decision(store, policy, request, decision, rules=config.phase)
     assert outcome == "written"
     stored = store.read(key)[0]
     assert stored.mode == "implement"
@@ -1215,9 +1213,7 @@ def _stub_ranking(winner, runner_up, winner_score, runner_score):
                 "similarity": (
                     winner_score
                     if name == winner
-                    else runner_score
-                    if name == runner_up
-                    else 0.2
+                    else runner_score if name == runner_up else 0.2
                 ),
             }
             for name in _WORK_MODES
@@ -1300,18 +1296,26 @@ def test_carry_switches_only_beyond_the_switch_margin(carry_config):
         0.62,
         0.62 - carry_config.memory.decision_switch_margin - 0.002,
     )
-    assert _carry_apply(plugin, payload(user="Zrób zadanie.", turn="turn-1")).mode == "git_review"
+    assert (
+        _carry_apply(plugin, payload(user="Zrób zadanie.", turn="turn-1")).mode
+        == "git_review"
+    )
 
 
 def test_carry_does_not_survive_a_new_user_command(carry_config):
     store = InMemoryRoutingStateStore(carry_config.memory)
     plugin, router = _carry_plugin(carry_config, store)
     router.ranking = _stub_ranking("test", "implement", 0.60, 0.50)
-    assert _carry_apply(plugin, payload(user="Zrób zadanie.", turn="turn-1")).mode == "test"
+    assert (
+        _carry_apply(plugin, payload(user="Zrób zadanie.", turn="turn-1")).mode
+        == "test"
+    )
 
     # A new command generation starts from its own merits; the hint is gone.
     router.ranking = _stub_ranking("test", "implement", 0.55, 0.547)
-    decision = _carry_apply(plugin, payload(user="Przejrzyj commity.", turn="turn-2"))
+    decision = _carry_apply(
+        plugin, payload(user="Przejrzyj commity.", turn="turn-2")
+    )
     assert decision.mode != "test" or decision.source != SOURCE_MEMORY
 
 
@@ -1341,7 +1345,10 @@ def test_carry_gives_up_after_the_request_budget(carry_config):
     assert _carry_apply(plugin, payload(user="Zrób zadanie.")).mode == "test"
     # The hint was written at the first request; this second one carries it
     # and spends one of the two allowed requests.
-    assert _carry_apply(plugin, payload(user="Zrób zadanie.", turn="turn-1")).mode == "test"
+    assert (
+        _carry_apply(plugin, payload(user="Zrób zadanie.", turn="turn-1")).mode
+        == "test"
+    )
     # The budget is spent; the next request is decided on its own merits.
     router.ranking = _stub_ranking("test", "implement", 0.55, 0.547)
     decision = _carry_apply(plugin, payload(user="Zrób zadanie.", turn="turn-2"))
@@ -1385,14 +1392,14 @@ def test_carry_never_beats_fresh_phase_evidence(carry_config):
     # Observed activity outranks the remembered decision.
     router.ranking = _stub_ranking("test", "implement", 0.55, 0.547)
     decision = _carry_apply(
-        plugin, payload(command("git log --oneline"), user="Zrób zadanie.", turn="turn-1")
+        plugin,
+        payload(command("git log --oneline"), user="Zrób zadanie.", turn="turn-1"),
     )
     assert decision.source == SOURCE_PHASE
     assert decision.mode == "git_review"
 
 
 # --- plugin -------------------------------------------------------------------
-
 
 
 def build_plugin(config, store):

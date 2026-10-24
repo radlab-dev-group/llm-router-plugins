@@ -143,7 +143,9 @@ def test_the_first_declaration_wins_over_a_later_quoted_one():
     payload = {
         "input": [
             _message("user", _context("/home/u/dev/webapp")),
-            _message("user", "and in another checkout: " + _context("/home/u/other")),
+            _message(
+                "user", "and in another checkout: " + _context("/home/u/other")
+            ),
         ]
     }
     assert declared_working_directory(payload) == "/home/u/dev/webapp"

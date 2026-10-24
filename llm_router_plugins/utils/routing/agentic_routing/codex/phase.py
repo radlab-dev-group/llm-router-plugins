@@ -526,9 +526,7 @@ def _split_command(text: str, rules: CodexPhaseConfig) -> Optional[List[List[str
     return segments or None
 
 
-def _names_other_phase(
-    words: List[str], rules: CodexPhaseConfig, mode: str
-) -> bool:
+def _names_other_phase(words: List[str], rules: CodexPhaseConfig, mode: str) -> bool:
     """Whether one pipeline segment names a phase other than *mode*."""
     signal = _segment_signal(words, rules)
     return signal is not None and signal[0] != mode
@@ -740,6 +738,8 @@ def _here_document_phase(
         ):
             return rules.implement_mode, REASON_SCRIPTED_EDIT
     return None, ""
+
+
 def _test_path(path: str, rules: CodexPhaseConfig) -> bool:
     """Whether *path* names a test file under the configured test layout."""
     parts = PurePosixPath(path).parts
@@ -1195,9 +1195,7 @@ def detect_phase_evidence(
     return _dominant_recent(pool, max(1, rules.evidence_window))
 
 
-def _dominant_recent(
-    evidence: List[PhaseEvidence], window: int
-) -> PhaseEvidence:
+def _dominant_recent(evidence: List[PhaseEvidence], window: int) -> PhaseEvidence:
     """
     Return the evidence of the phase dominating the recent end of a turn.
 
@@ -1256,7 +1254,10 @@ def detect_phase(
 _ACTION_NAMES: Tuple[Tuple[Pattern[str], str], ...] = (
     (re.compile(r"^(?:rg|ag|ack|grep|egrep|fgrep)$"), "searched code"),
     (re.compile(r"^(?:find|fd|ls|tree|du)$"), "listed files"),
-    (re.compile(r"^(?:cat|head|tail|less|more|sed|awk|jq|column|wc)$"), "read files"),
+    (
+        re.compile(r"^(?:cat|head|tail|less|more|sed|awk|jq|column|wc)$"),
+        "read files",
+    ),
     (
         re.compile(r"^(?:ruff|flake8|mypy|pyright|pylint|black|isort|bandit)$"),
         "linted",

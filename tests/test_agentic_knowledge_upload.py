@@ -38,7 +38,9 @@ class UploadSSE(FakeSSE):
         self.creation_options.append(kwargs)
         return super().create_collection(name, **kwargs)
 
-    def upload_files(self, collection, files, *, indexing_options=None, file_metadata=None):
+    def upload_files(
+        self, collection, files, *, indexing_options=None, file_metadata=None
+    ):
         self._maybe_fail("upload_files")
         self.uploads.append((collection, files, indexing_options, file_metadata))
 
@@ -46,20 +48,31 @@ class UploadSSE(FakeSSE):
 def make_worker(sse, redis=None, chunk_tokens=400, chunk_overlap=60):
     config = knowledge_config()
     config.worker = dataclasses.replace(
-        config.worker, embedder="embed", reranker="rerank",
-        chunk_tokens=chunk_tokens, chunk_overlap=chunk_overlap,
+        config.worker,
+        embedder="embed",
+        reranker="rerank",
+        chunk_tokens=chunk_tokens,
+        chunk_overlap=chunk_overlap,
     )
     return KnowledgeIndexWorker(
-        config=config, redis_client=redis or FakeRedis(), sse_client=sse,
+        config=config,
+        redis_client=redis or FakeRedis(),
+        sse_client=sse,
     )
 
 
 @pytest.mark.parametrize("entrypoint", ["batch", "single"])
-@pytest.mark.parametrize("chunk_tokens,chunk_overlap", [(400, 60), (900, 120), (0, 0)])
-def test_full_file_upload_uses_collection_chunking(tmp_path, entrypoint, chunk_tokens, chunk_overlap):
+@pytest.mark.parametrize(
+    "chunk_tokens,chunk_overlap", [(400, 60), (900, 120), (0, 0)]
+)
+def test_full_file_upload_uses_collection_chunking(
+    tmp_path, entrypoint, chunk_tokens, chunk_overlap
+):
     text = "# Guide\n\n" + "## Detail\n\nZażółć gęślą jaźń.\n\n" * 500
     (tmp_path / "guide.md").write_text(text, encoding="utf-8")
-    events = doc_events(scan_repository(str(tmp_path), scope="demo").records, scope="demo")
+    events = doc_events(
+        scan_repository(str(tmp_path), scope="demo").records, scope="demo"
+    )
     assert len(events) == 1
     sse = UploadSSE()
     redis = FakeRedis()
@@ -85,19 +98,30 @@ def test_full_file_upload_uses_collection_chunking(tmp_path, entrypoint, chunk_t
     assert metadata[name]["options"]["source_file"] == "guide.md"
     assert metadata[name]["options"]["scope"] == "demo"
     assert options == sse.creation_options[0]["chunking"]
-    assert options == ({"max_tokens_in_chunk": chunk_tokens,
-                        "number_of_overlap_tokens": chunk_overlap} if chunk_tokens else None)
+    assert options == (
+        {
+            "max_tokens_in_chunk": chunk_tokens,
+            "number_of_overlap_tokens": chunk_overlap,
+        }
+        if chunk_tokens
+        else None
+    )
 
 
 def test_multiple_files_share_one_upload_per_collection():
-    events = [knowledge_event(kind="doc", fingerprint=str(i), scope=scope)
-              for i, scope in enumerate(("alpha", "alpha", "beta"))]
+    events = [
+        knowledge_event(kind="doc", fingerprint=str(i), scope=scope)
+        for i, scope in enumerate(("alpha", "alpha", "beta"))
+    ]
     sse = UploadSSE()
     redis = FakeRedis()
     worker = make_worker(sse, redis)
-    assert worker._process_batch([(str(i), stream_message(e)) for i, e in enumerate(events)]) == (3, 3)
+    assert worker._process_batch(
+        [(str(i), stream_message(e)) for i, e in enumerate(events)]
+    ) == (3, 3)
     assert [(call[0], len(call[1])) for call in sse.uploads] == [
-        ("agentic_kb_alpha_docs", 2), ("agentic_kb_beta_docs", 1),
+        ("agentic_kb_alpha_docs", 2),
+        ("agentic_kb_beta_docs", 1),
     ]
     assert redis.acked == ["0", "1", "2"]
     assert sse.indexed == []
@@ -106,10 +130,17 @@ def test_multiple_files_share_one_upload_per_collection():
 def test_documents_and_mined_events_use_their_own_endpoints():
     sse = UploadSSE()
     worker = make_worker(sse)
-    events = [knowledge_event(kind=kind) for kind in ("doc", "recipe", "session_archive")]
-    assert worker._process_batch([(str(i), stream_message(e)) for i, e in enumerate(events)]) == (3, 3)
+    events = [
+        knowledge_event(kind=kind) for kind in ("doc", "recipe", "session_archive")
+    ]
+    assert worker._process_batch(
+        [(str(i), stream_message(e)) for i, e in enumerate(events)]
+    ) == (3, 3)
     assert len(sse.uploads) == 1
-    assert [call[0] for call in sse.indexed] == ["agentic_kb_webapp", "agentic_kb_webapp_sessions"]
+    assert [call[0] for call in sse.indexed] == [
+        "agentic_kb_webapp",
+        "agentic_kb_webapp_sessions",
+    ]
 
 
 def test_duplicate_deliveries_do_not_duplicate_attachments():
@@ -126,7 +157,9 @@ def test_duplicate_deliveries_do_not_duplicate_attachments():
 @pytest.mark.parametrize("target", ["text", "metadata"])
 def test_conflicting_attachments_are_not_uploaded_or_acknowledged(target):
     event = knowledge_event(kind="doc")
-    replacement = "different content" if target == "text" else {"source_file": "other.md"}
+    replacement = (
+        "different content" if target == "text" else {"source_file": "other.md"}
+    )
     conflicting = dataclasses.replace(event, **{target: replacement})
     sse = UploadSSE()
     redis = FakeRedis()
@@ -154,7 +187,10 @@ def test_upload_failure_retries_all_files():
     sse = UploadSSE(fail_methods=("upload_files",))
     redis = FakeRedis()
     worker = make_worker(sse, redis)
-    entries = [(str(i), stream_message(knowledge_event(kind="doc", fingerprint=str(i)))) for i in range(2)]
+    entries = [
+        (str(i), stream_message(knowledge_event(kind="doc", fingerprint=str(i))))
+        for i in range(2)
+    ]
     assert worker._process_batch(entries) == (2, 0)
     assert redis.acked == []
     assert all(redis.kv[worker._tries_key(entry_id)] == 1 for entry_id, _ in entries)
@@ -193,11 +229,18 @@ def test_upload_masks_body_and_metadata():
     sse = UploadSSE()
     make_worker(sse).index_event(event)
     assert "jane@example.com" not in repr(sse.uploads)
-    assert sse.uploads[0][3][sse.uploads[0][1][0][0]]["options"]["thread_id"] == "thread-1"
+    assert (
+        sse.uploads[0][3][sse.uploads[0][1][0][0]]["options"]["thread_id"]
+        == "thread-1"
+    )
 
 
 def test_prune_recognizes_uploaded_and_legacy_document_names():
-    names = ["doc:20261010:old.txt", "doc:20261010:old.input_text", "doc:20261010:keep.txt"]
+    names = [
+        "doc:20261010:old.txt",
+        "doc:20261010:old.input_text",
+        "doc:20261010:keep.txt",
+    ]
     sse = UploadSSE(names={"agentic_kb_webapp_docs": names})
     make_worker(sse).index_event(prune_event("webapp", ["doc:20261010:old"]))
     assert sse.deleted == [("agentic_kb_webapp_docs", names[:2])]

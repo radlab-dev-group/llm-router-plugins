@@ -255,9 +255,7 @@ def test_memory_conflict_log_names_the_actual_cause(monkeypatch, caplog):
     monkeypatch.setattr(
         module,
         "remember_decision",
-        lambda *args, **kwargs: RememberResult(
-            "conflict", "incomparable history"
-        ),
+        lambda *args, **kwargs: RememberResult("conflict", "incomparable history"),
     )
     with caplog.at_level(logging.INFO, logger=__name__):
         plugin.apply(

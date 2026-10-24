@@ -39,7 +39,8 @@ def runner(tmp_path):
     # A process-boundary fixture: controllable scores test Bash selection,
     # argument forwarding and failure handling without loading an ML model.
     interpreter = tmp_path / "fixture interpreter"
-    interpreter.write_text("""#!/usr/bin/env bash
+    interpreter.write_text(
+        """#!/usr/bin/env bash
 set -euo pipefail
 shift 2
 config=""; split=""; baseline=""
@@ -62,7 +63,8 @@ jq --arg split "$split" --arg tie "${TIE:-0}" '
         mode_accuracy: $t,
         mode_transitions: {missed_switches: 0, unnecessary_switches: 0}}}
     | if $tie == "1" then .cascade.mode_accuracy = 0.7 else . end' "$config"
-""")
+"""
+    )
     interpreter.chmod(0o755)
     output = tmp_path / "output reports"
     calls = tmp_path / "calls"

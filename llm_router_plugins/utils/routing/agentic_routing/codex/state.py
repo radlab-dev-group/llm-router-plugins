@@ -555,9 +555,7 @@ def _fraction(value: Any, label: str) -> float:
             f"settings.memory.{label} must be a number between 0 and 1"
         ) from exc
     if not math.isfinite(number) or not 0 <= number < 1:
-        raise ValueError(
-            f"settings.memory.{label} must be a number between 0 and 1"
-        )
+        raise ValueError(f"settings.memory.{label} must be a number between 0 and 1")
     return number
 
 
@@ -1977,7 +1975,6 @@ def resolve_memory(
     )
 
 
-
 def decision_hint(
     record: Optional[SessionRoutingState],
     generation: str,
@@ -2165,10 +2162,7 @@ def _remember_hint(
             return _result("skipped", "other decision")
         record = replace(base, decision_requests=base.decision_requests + 1)
     else:
-        if (
-            base.decision_mode == mode
-            and base.decision_seq >= seq
-        ):
+        if base.decision_mode == mode and base.decision_seq >= seq:
             return _result("skipped", "newer decision")
         record = replace(
             base,

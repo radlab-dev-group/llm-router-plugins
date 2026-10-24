@@ -400,7 +400,9 @@ def scan_repository(
         skipped += 1
 
     for directory, dirnames, filenames in os.walk(
-        root, followlinks=False, onerror=walk_error,
+        root,
+        followlinks=False,
+        onerror=walk_error,
     ):
         relative = directory[len(root) :]
         if relative.count(os.sep) >= _MAX_SCAN_DEPTH:

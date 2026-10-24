@@ -160,16 +160,21 @@ class CodexPhaseConfig:
         compiled_commands = []
         for index, rule in enumerate(commands):
             label = f"commands[{index}]"
-            if not isinstance(rule, dict) or not {
-                "executable",
-                "args_prefix",
-                "mode",
-            }.issubset(rule) or set(rule) - {
-                "executable",
-                "args_prefix",
-                "mode",
-                "strength",
-            }:
+            if (
+                not isinstance(rule, dict)
+                or not {
+                    "executable",
+                    "args_prefix",
+                    "mode",
+                }.issubset(rule)
+                or set(rule)
+                - {
+                    "executable",
+                    "args_prefix",
+                    "mode",
+                    "strength",
+                }
+            ):
                 raise ValueError(
                     f"settings.phase.{label} requires executable, args_prefix and mode"
                 )

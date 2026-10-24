@@ -2052,7 +2052,7 @@ class TestPayloadRobustness:
 
     def test_injected_goal_context_stays_out_of_the_intent(self):
         goal = (
-            "<codex_internal_context source=\"goal\">\n"
+            '<codex_internal_context source="goal">\n'
             "Continue working toward the active thread goal.\n"
             "<objective>Refactor the engine and commit.</objective>\n"
             "</codex_internal_context>"
@@ -2065,7 +2065,7 @@ class TestPayloadRobustness:
 
     def test_goal_block_attached_to_a_command_keeps_the_command(self):
         goal = (
-            "<codex_internal_context source=\"goal\">\n"
+            '<codex_internal_context source="goal">\n'
             "<objective>Refactor the engine and commit.</objective>\n"
             "</codex_internal_context>\n"
             "Popraw README"

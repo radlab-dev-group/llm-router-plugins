@@ -43,11 +43,16 @@ class StreamRedis(FakeRedis):
     def xrange(self, key, min="-", max="+", count=None):
         self._maybe_fail("xrange")
         if min.startswith("("):
-            raise ResponseError("Invalid stream ID specified as stream command argument")
+            raise ResponseError(
+                "Invalid stream ID specified as stream command argument"
+            )
         lower = tuple(map(int, min.split("-"))) if min != "-" else (0, 0)
-        upper = tuple(map(int, max.split("-"))) if max != "+" else (2**64 - 1, 2**64 - 1)
+        upper = (
+            tuple(map(int, max.split("-"))) if max != "+" else (2**64 - 1, 2**64 - 1)
+        )
         return [
-            (entry_id, fields) for entry_id, fields in self.entries.items()
+            (entry_id, fields)
+            for entry_id, fields in self.entries.items()
             if lower <= tuple(map(int, entry_id.split("-"))) <= upper
         ][:count]
 
@@ -64,8 +69,10 @@ def setup_indexer(tmp_path):
     config = knowledge_config()
     redis = StreamRedis()
     publisher = KnowledgeEventPublisher(
-        connection=config.redis, stream_key=config.stream_key,
-        key_prefix=config.key_prefix, client=redis,
+        connection=config.redis,
+        stream_key=config.stream_key,
+        key_prefix=config.key_prefix,
+        client=redis,
     )
     state = DocsScanState(key_prefix=config.key_prefix, client=redis)
     service = DocsIndexer(config=config, publisher=publisher, state=state)
@@ -73,7 +80,9 @@ def setup_indexer(tmp_path):
 
 
 def test_cli_force_republishes_unchanged_files_and_replaces_old_stream_entries(
-    tmp_path, monkeypatch, capsys,
+    tmp_path,
+    monkeypatch,
+    capsys,
 ):
     service, publisher, redis = setup_indexer(tmp_path)
     monkeypatch.setattr(docs, "_load_config", lambda *args: service.config)
@@ -113,8 +122,14 @@ def test_force_replaces_docs_and_prunes_but_preserves_other_events(tmp_path):
     # More than one page, and undecodable entries must not break cleanup.
     for _ in range(205):
         redis.xadd(service.config.stream_key, {b"event": b"not json"})
-    last = redis.xadd(service.config.stream_key, {b"event": json.dumps(old.to_dict()).encode()})
-    retained = {key: value for key, value in redis.entries.items() if key not in ("1-0", "2-0", last)}
+    last = redis.xadd(
+        service.config.stream_key, {b"event": json.dumps(old.to_dict()).encode()}
+    )
+    retained = {
+        key: value
+        for key, value in redis.entries.items()
+        if key not in ("1-0", "2-0", last)
+    }
     outcome = service.index("demo", str(tmp_path), force=True, republish=True)
     assert outcome.status == "ok" and outcome.published == 1
     assert set(redis.deleted) == {"1-0", "2-0", last}
@@ -135,7 +150,9 @@ def test_force_clears_dedup_even_when_old_stream_was_trimmed(tmp_path):
 
 @pytest.mark.parametrize("binary", [False, True])
 @pytest.mark.parametrize("overflow", [False, True])
-def test_force_legacy_redis_pagination_handles_sequence_and_overflow(tmp_path, binary, overflow):
+def test_force_legacy_redis_pagination_handles_sequence_and_overflow(
+    tmp_path, binary, overflow
+):
     service, publisher, redis = setup_indexer(tmp_path)
     old = knowledge_event(kind="doc", scope="demo", fingerprint="old")
     other = knowledge_event(kind="doc", scope="other", fingerprint="other")
@@ -153,9 +170,12 @@ def test_force_legacy_redis_pagination_handles_sequence_and_overflow(tmp_path, b
     }
     if binary:
         reverse, forward, delete = redis.xrevrange, redis.xrange, redis.xdel
-        redis.xrevrange = lambda *a, **kw: [(k.encode(), v) for k, v in reverse(*a, **kw)]
+        redis.xrevrange = lambda *a, **kw: [
+            (k.encode(), v) for k, v in reverse(*a, **kw)
+        ]
         redis.xrange = lambda key, min, max, count: [
-            (k.encode(), v) for k, v in forward(key, min=min, max=max.decode(), count=count)
+            (k.encode(), v)
+            for k, v in forward(key, min=min, max=max.decode(), count=count)
         ]
         redis.xdel = lambda key, entry_id: delete(key, entry_id.decode())
     outcome = service.index("demo", str(tmp_path), republish=True)
@@ -169,7 +189,9 @@ def test_force_logs_redis_error_details(tmp_path, caplog):
     publisher._logger = logging.getLogger("force-test")
 
     def failed_range(*args, **kwargs):
-        raise ResponseError("WRONGTYPE Operation against a key holding the wrong kind of value")
+        raise ResponseError(
+            "WRONGTYPE Operation against a key holding the wrong kind of value"
+        )
 
     redis.xrevrange = failed_range
     with caplog.at_level(logging.WARNING, logger="force-test"):
@@ -179,7 +201,9 @@ def test_force_logs_redis_error_details(tmp_path, caplog):
     assert redis.deleted == []
 
 
-@pytest.mark.parametrize("failure", ["xrevrange", "xrange", "xdel", "delete", "xadd"])
+@pytest.mark.parametrize(
+    "failure", ["xrevrange", "xrange", "xdel", "delete", "xadd"]
+)
 def test_force_failure_is_reported_and_can_be_retried(tmp_path, failure):
     service, publisher, redis = setup_indexer(tmp_path)
     service.index("demo", str(tmp_path), force=True)
@@ -189,27 +213,39 @@ def test_force_failure_is_reported_and_can_be_retried(tmp_path, failure):
     assert outcome.status == "unavailable"
     assert redis.get(service.state.key("demo")) == previous
     redis.fail_on.clear()
-    assert service.index("demo", str(tmp_path), force=True, republish=True).published == 1
+    assert (
+        service.index("demo", str(tmp_path), force=True, republish=True).published
+        == 1
+    )
 
 
 @pytest.mark.parametrize("incomplete", ["truncated", "skipped"])
-def test_force_does_not_remove_stream_after_incomplete_scan(tmp_path, monkeypatch, incomplete):
+def test_force_does_not_remove_stream_after_incomplete_scan(
+    tmp_path, monkeypatch, incomplete
+):
     from llm_router_plugins.utils.knowledge.agentic_knowledge import docs_ingestor
 
     service, publisher, redis = setup_indexer(tmp_path)
     service.index("demo", str(tmp_path), force=True)
     original = dict(redis.entries)
     report = docs_ingestor.ScanReport(**{incomplete: True})
-    monkeypatch.setattr(docs_ingestor, "scan_repository", lambda *args, **kwargs: report)
+    monkeypatch.setattr(
+        docs_ingestor, "scan_repository", lambda *args, **kwargs: report
+    )
     outcome = service.index("demo", str(tmp_path), force=True, republish=True)
     assert outcome.status == "unavailable"
     assert redis.entries == original
     assert redis.deleted == []
 
 
-@pytest.mark.parametrize("ceiling", ["max_files", "max_file_bytes", "max_total_bytes"])
+@pytest.mark.parametrize(
+    "ceiling", ["max_files", "max_file_bytes", "max_total_bytes"]
+)
 def test_cli_force_reads_full_files_beyond_automatic_scan_limits(
-    tmp_path, monkeypatch, capsys, ceiling,
+    tmp_path,
+    monkeypatch,
+    capsys,
+    ceiling,
 ):
     service, publisher, redis = setup_indexer(tmp_path)
     service.index("demo", str(tmp_path), force=True)
@@ -238,13 +274,21 @@ def test_cli_force_reads_full_files_beyond_automatic_scan_limits(
     assert outcome["files"] == outcome["published"] == 3
     assert redis.deleted == list(original)
     events = [json.loads(fields["event"]) for fields in redis.entries.values()]
-    changelog = next(event for event in events if event["metadata"]["source_file"] == "CHANGELOG.md")
+    changelog = next(
+        event
+        for event in events
+        if event["metadata"]["source_file"] == "CHANGELOG.md"
+    )
     assert text in changelog["text"]
-    assert service.config.docs_max_file_bytes == (1 if ceiling == "max_file_bytes" else 200000)
+    assert service.config.docs_max_file_bytes == (
+        1 if ceiling == "max_file_bytes" else 200000
+    )
 
 
 @pytest.mark.parametrize("failure", ["read", "stat", "walk"])
-def test_force_read_errors_leave_stream_and_state_untouched(tmp_path, monkeypatch, failure):
+def test_force_read_errors_leave_stream_and_state_untouched(
+    tmp_path, monkeypatch, failure
+):
     from llm_router_plugins.utils.knowledge.agentic_knowledge import docs_ingestor
 
     service, publisher, redis = setup_indexer(tmp_path)
@@ -304,14 +348,19 @@ def test_force_partial_publish_does_not_save_complete_scan(tmp_path):
     assert outcome.status == "unavailable"
     assert service.state.load("demo") == {}
     redis.xadd = append
-    assert service.index("demo", str(tmp_path), force=True, republish=True).published == 2
+    assert (
+        service.index("demo", str(tmp_path), force=True, republish=True).published
+        == 2
+    )
 
 
 def test_force_empty_repository_removes_only_previous_docs(tmp_path):
     service, publisher, redis = setup_indexer(tmp_path)
     service.index("demo", str(tmp_path), force=True)
     (tmp_path / "README.md").unlink()
-    outcome = service.index("demo", str(tmp_path), force=True, republish=True, allow_prune=False)
+    outcome = service.index(
+        "demo", str(tmp_path), force=True, republish=True, allow_prune=False
+    )
     assert outcome.status == "ok" and outcome.published == 0
     assert redis.entries == {}
     assert service.state.load("demo") == {}
@@ -337,14 +386,19 @@ def test_force_rebuilds_deleted_database_through_worker(tmp_path, monkeypatch):
     service, publisher, redis = setup_indexer(tmp_path)
     service.index("demo", str(tmp_path), force=True)
     original = UploadSSE()
-    assert make_worker(original)._process_batch(list(redis.entries.items())) == (1, 1)
+    assert make_worker(original)._process_batch(list(redis.entries.items())) == (
+        1,
+        1,
+    )
     assert len(original.uploads) == 1
 
     # SSE was rebuilt while Redis still remembers the successful first scan.
     empty_database = UploadSSE()
     outcome = service.index("demo", str(tmp_path), republish=True)
     assert outcome.published == 1
-    assert make_worker(empty_database)._process_batch(list(redis.entries.items())) == (1, 1)
+    assert make_worker(empty_database)._process_batch(
+        list(redis.entries.items())
+    ) == (1, 1)
     assert empty_database.created == [("agentic_kb_demo_docs", "embed", "rerank")]
     assert empty_database.uploads == original.uploads
 
@@ -369,12 +423,16 @@ def test_replacement_supports_binary_stream_ids(tmp_path):
     reverse_range, forward_range, delete = redis.xrevrange, redis.xrange, redis.xdel
 
     def binary_reverse(*args, **kwargs):
-        return [(key.encode(), fields) for key, fields in reverse_range(*args, **kwargs)]
+        return [
+            (key.encode(), fields) for key, fields in reverse_range(*args, **kwargs)
+        ]
 
     def binary_forward(key, min, max, count):
         return [
             (entry_id.encode(), fields)
-            for entry_id, fields in forward_range(key, min=min, max=max.decode(), count=count)
+            for entry_id, fields in forward_range(
+                key, min=min, max=max.decode(), count=count
+            )
         ]
 
     redis.xrevrange = binary_reverse

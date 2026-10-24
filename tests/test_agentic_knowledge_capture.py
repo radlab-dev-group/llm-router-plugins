@@ -86,13 +86,11 @@ def test_parser_accounts_for_every_tool_call(path):
     """A tool call in the payload must appear in the parsed activity."""
     payload = _payload(path)
     turn = _adapter().parse(payload)
-    seen = {
-        item.name for item in turn.activity if item.kind == "function_call"
-    }
+    seen = {item.name for item in turn.activity if item.kind == "function_call"}
     missing = {name for name in _raw_call_names(payload) if name not in seen}
-    assert not missing, (
-        "payload carried %s but the parser saw only %s"
-        % (sorted(set(_raw_call_names(payload)) or ["-"]), sorted(seen) or ["-"])
+    assert not missing, "payload carried %s but the parser saw only %s" % (
+        sorted(set(_raw_call_names(payload)) or ["-"]),
+        sorted(seen) or ["-"],
     )
 
 

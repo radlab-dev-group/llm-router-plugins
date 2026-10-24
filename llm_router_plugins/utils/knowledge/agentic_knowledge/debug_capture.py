@@ -97,7 +97,9 @@ def capture_payload(payload: Any, logger: Any = None) -> Optional[Path]:
             return None
         directory.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        target = directory / f"kb-{stamp}-{os.getpid()}-{int(time.time() * 1000)}.json"
+        target = (
+            directory / f"kb-{stamp}-{os.getpid()}-{int(time.time() * 1000)}.json"
+        )
         target.write_text(text, encoding="utf-8")
         _prune(directory, _dump_max())
         return target
@@ -184,7 +186,10 @@ def replay(path: Path) -> str:
         ),
     ]
     shapes = _item_shapes(payload)
-    lines.append("items: " + (",".join(f"{k}:{v}" for k, v in sorted(shapes.items())) or "none"))
+    lines.append(
+        "items: "
+        + (",".join(f"{k}:{v}" for k, v in sorted(shapes.items())) or "none")
+    )
     turn = adapter.parse(payload)
     if turn is None:
         lines.append("parse: None (no work mode, no activity)")

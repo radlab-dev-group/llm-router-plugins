@@ -171,9 +171,13 @@ def _report_scan(config: Any, root: str, scope: str, *, force: bool = False) -> 
             where = f"{where} [{record.heading}]"
         print(f"{record.doc_type:<13} {where}  {len(record.text)} chars")
     if report.skipped:
-        print(f"{report.skipped} file(s)/directory(s) skipped (unreadable or too large)")
+        print(
+            f"{report.skipped} file(s)/directory(s) skipped (unreadable or too large)"
+        )
         if force:
-            print("force would abort: unreadable files/directories; stream unchanged")
+            print(
+                "force would abort: unreadable files/directories; stream unchanged"
+            )
     if report.truncated:
         print(
             "scan truncated by the configured ceilings: superseded documents "

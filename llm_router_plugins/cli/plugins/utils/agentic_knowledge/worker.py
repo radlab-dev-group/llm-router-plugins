@@ -877,11 +877,11 @@ class KnowledgeIndexWorker:
         if not names or not event.scope:
             return 0
         collection = self._config.collection(event.scope, KIND_DOC)
-        wanted = {name for name in names} | {
-            f"{name}{ENGINE_NAME_SUFFIX}" for name in names
-        } | {
-            f"{name}{_DOC_FILE_SUFFIX}" for name in names
-        }
+        wanted = (
+            {name for name in names}
+            | {f"{name}{ENGINE_NAME_SUFFIX}" for name in names}
+            | {f"{name}{_DOC_FILE_SUFFIX}" for name in names}
+        )
         client = self._sse_client()
         try:
             details = client.list_document_details(collection)

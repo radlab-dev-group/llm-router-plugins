@@ -324,7 +324,9 @@ class CodexModeClassifier:
             return RoutingDecision("plan", SOURCE_COLLABORATION_MODE, 1.0, 1.0)
 
         evidence = detect_phase_evidence(request.activity, config.phase)
-        remembered, memory_status, memory_version, stored_record = self._remembered(request)
+        remembered, memory_status, memory_version, stored_record = self._remembered(
+            request
+        )
         if remembered is not None and remembered.evidence is not None:
             evidence = remembered.evidence
         if evidence is not None and evidence.mode in modes:
@@ -402,7 +404,9 @@ class CodexModeClassifier:
                 semantic=OUTCOME_ACCEPTED,
                 carry_mode=assessment.mode.name,
             )
-        semantic_outcome = assessment.outcome or self._semantic_availability(semantic)
+        semantic_outcome = assessment.outcome or self._semantic_availability(
+            semantic
+        )
 
         fallback_similarity = 0.0
         if semantic is not None:
@@ -432,9 +436,7 @@ class CodexModeClassifier:
             memory_version=memory_version,
         )
 
-    def _remembered(
-        self, request: CodexRequest
-    ) -> Tuple[
+    def _remembered(self, request: CodexRequest) -> Tuple[
         Optional[MemoryResolution],
         Optional[MemoryStatus],
         Optional[int],
@@ -480,10 +482,7 @@ class CodexModeClassifier:
         version = stored.version if stored is not None else 0
         if status.state not in ("hit", "miss", "expired"):
             return None, status, None, None
-        if (
-            self._config.phase is None
-            or not self._config.phase.enabled
-        ):
+        if self._config.phase is None or not self._config.phase.enabled:
             return None, status, version, stored
         resolved = resolve_memory(
             stored,

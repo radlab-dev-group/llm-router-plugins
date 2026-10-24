@@ -139,7 +139,9 @@ def test_document_text_and_metadata_are_masked():
 
 @pytest.mark.parametrize("target", ["body", "signature", "test_command", "metadata"])
 @pytest.mark.parametrize("entrypoint", ["batch", "single"])
-def test_masking_failure_stays_pending_and_reclaim_retries(target, entrypoint, caplog):
+def test_masking_failure_stays_pending_and_reclaim_retries(
+    target, entrypoint, caplog
+):
     secret = "jane@example.com"
     event = dataclasses.replace(
         knowledge_event(text=secret if target == "body" else "safe body"),
@@ -154,7 +156,9 @@ def test_masking_failure_stays_pending_and_reclaim_retries(target, entrypoint, c
 
     class FailingMasker:
         def mask_payload(self, payload):
-            if (target == "metadata" and isinstance(payload, dict)) or payload == secret:
+            if (
+                target == "metadata" and isinstance(payload, dict)
+            ) or payload == secret:
                 raise RuntimeError(secret)
             return masker.mask_payload(payload)
 
@@ -186,11 +190,20 @@ def test_masking_failure_stays_pending_and_reclaim_retries(target, entrypoint, c
         (target, result)
         for target in ("text", "metadata")
         for result in (
-            None, "ab", {"a": 1, "b": 2}, (), ("safe",),
-            ("safe", {}, "extra"), (None, {}), (123, {}), ([], {}),
-            ("safe", None), ({}, None),
+            None,
+            "ab",
+            {"a": 1, "b": 2},
+            (),
+            ("safe",),
+            ("safe", {}, "extra"),
+            (None, {}),
+            (123, {}),
+            ([], {}),
+            ("safe", None),
+            ({}, None),
         )
-    ] + [("text", ({}, {})), ("metadata", ("safe", {}))],
+    ]
+    + [("text", ({}, {})), ("metadata", ("safe", {}))],
 )
 def test_invalid_masker_result_is_not_indexed(target, result):
     redis = FakeRedis()
@@ -254,9 +267,12 @@ def test_masking_failure_does_not_block_other_documents_in_batch():
     work._masker = SelectiveMasker()
     bad = knowledge_event(text="jane@example.com", fingerprint="bad")
     good = knowledge_event(text="safe body", fingerprint="good")
-    assert work._process_batch([
-        ("1-0", stream_message(bad)), ("2-0", stream_message(good)),
-    ]) == (2, 1)
+    assert work._process_batch(
+        [
+            ("1-0", stream_message(bad)),
+            ("2-0", stream_message(good)),
+        ]
+    ) == (2, 1)
     assert redis.acked == ["2-0"]
     assert len(sse.indexed) == 1
     assert len(sse.indexed[0][1]) == 1

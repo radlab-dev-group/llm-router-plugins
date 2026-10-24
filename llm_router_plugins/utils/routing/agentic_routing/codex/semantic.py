@@ -428,9 +428,7 @@ class CodexSemanticLayer:
                 similarity,
                 self._threshold,
             )
-            return SemanticDecision(
-                **shape, outcome=OUTCOME_BELOW_THRESHOLD
-            )
+            return SemanticDecision(**shape, outcome=OUTCOME_BELOW_THRESHOLD)
         if mode is None:
             return SemanticDecision(**shape, outcome=OUTCOME_INCOMPLETE)
         if margin is None:
@@ -443,9 +441,7 @@ class CodexSemanticLayer:
         if margin >= required or math.isclose(
             margin, required, rel_tol=0, abs_tol=1e-12
         ):
-            return SemanticDecision(
-                **shape, mode=mode, outcome=OUTCOME_ACCEPTED
-            )
+            return SemanticDecision(**shape, mode=mode, outcome=OUTCOME_ACCEPTED)
         if fallback_mode and runner_up == fallback_mode:
             return SemanticDecision(
                 **shape,
