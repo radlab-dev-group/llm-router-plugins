@@ -8,13 +8,16 @@ together, those three are a verified fix, and a verified fix is worth more than
 anything an offline extractor would dream up, because the agent's own test run
 proved it.
 
-Three episodes are recognizable from the phase evidence of one turn:
+Four episodes are recognizable from the phase evidence of one turn:
 
 * **recipe** — a failure, a change, and a test run that passed; recorded once,
   with the failure it fixed, the files it touched and the command that proved
   it;
 * **dead end** — the same failure again after a change; recorded so the next
   attempt in this repository does not walk into the same wall;
+* **playbook** — a change whose tests passed with no failure in between; the
+  correct steps of a task are knowledge too, and a turn that went right from
+  the first try would otherwise teach this repository nothing;
 * **window archive** — for a compaction request, the conversation that is about
   to be summarized, chunked along message boundaries so an exact error message
   survives the summarization.
@@ -33,7 +36,16 @@ import re
 import shlex
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Dict,
+    FrozenSet,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
     AgentTurn,
@@ -41,6 +53,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     KIND_DEADEND,
+    KIND_PLAYBOOK,
     KIND_RECIPE,
     KIND_SESSION_ARCHIVE,
     build_document_text,
@@ -145,6 +158,17 @@ class _Failure:
         return _verifies(self.command, self.green_command)
 
 
+@dataclass
+class _Procedure:
+    """One stretch of work between two green runs, with what it contains."""
+
+    patches: List[PhaseEvidence] = field(default_factory=list)
+    items: List[PhaseEvidence] = field(default_factory=list)
+    failures: int = 0
+    verified_by: Optional[PhaseEvidence] = None
+    verified_at: int = -1
+
+
 class EpisodeMiner:
     """
     Turn phase evidence into knowledge events.
@@ -205,6 +229,10 @@ class EpisodeMiner:
                     self._deadend(turn, attempt)
                     for item in failures
                     for attempt in item.failed_attempts
+                ),
+                *(
+                    self._playbook(turn, window)
+                    for window in self._procedures(turn, _verified_patches(failures))
                 ),
             )
             if event is not None
@@ -268,9 +296,9 @@ class EpisodeMiner:
                                 command=_command_line(
                                     commands.get(previous.call_id) or ""
                                 ),
-                                patches=known.patches[known.attempt_start:],
+                                patches=known.patches[known.attempt_start :],
                                 patch_positions=known.patch_positions[
-                                    known.attempt_start:
+                                    known.attempt_start :
                                 ],
                                 later_failures=[evidence],
                             )
@@ -303,6 +331,122 @@ class EpisodeMiner:
                     commands.get(evidence.call_id) or ""
                 )
         return episodes
+
+    def _procedures(
+        self, turn: AgentTurn, covered: Optional[FrozenSet[str]] = None
+    ) -> List["_Procedure"]:
+        """
+        Split the turn into stretches of work that a green run just accepted.
+
+        A stretch is the evidence between two green runs, so a turn that
+        implemented, tested, then extended and tested again yields two
+        procedures rather than one document describing the whole turn.  A
+        stretch that holds a test failure belongs to a recipe instead — that
+        failure and its fix are already recorded, with the failure as the
+        entry point — and a stretch without a patch proves nothing a document
+        could repeat.
+
+        *covered* names the patches a verified recipe has already published.
+        An episode keeps every patch that followed its failure, so the change
+        of a last, wider test run is usually inside that recipe's diff
+        already; writing a procedure for it too would spend a mode's budget
+        saying the same thing twice.
+
+        The green run is the whole epistemics of this kind: a change nobody
+        ran is an intention, and an intention indexed as a verified procedure
+        is a guess the next session will trust.
+        """
+        already = covered or frozenset()
+        procedures: List[_Procedure] = []
+        current = _Procedure()
+        for position, evidence in enumerate(turn.evidence):
+            if evidence.kind == EVIDENCE_TEST_FAILURE:
+                current.failures += 1
+                current.items.append(evidence)
+                continue
+            if evidence.kind == EVIDENCE_PATCH:
+                current.patches.append(evidence)
+                current.items.append(evidence)
+                continue
+            if self._is_green_test(evidence):
+                recorded = {
+                    item.call_id or item.event_id or "" for item in current.patches
+                }
+                if (
+                    current.patches
+                    and not current.failures
+                    and not recorded <= already
+                ):
+                    current.verified_by = evidence
+                    current.verified_at = position
+                    current.items.append(evidence)
+                    procedures.append(current)
+                current = _Procedure()
+                continue
+            current.items.append(evidence)
+        return procedures
+
+    def _playbook(
+        self, turn: AgentTurn, procedure: "_Procedure"
+    ) -> Optional[KnowledgeEvent]:
+        """
+        Build the document of a change this turn made and its tests accepted.
+
+        A recipe is read back in `debug`, where a failure is the question; a
+        procedure is read back in `implement`, where the question is how this
+        repository does the thing that has not gone wrong yet.  So the body
+        leads with what was asked for, then what was changed, then the command
+        that proved the change — the same three facts, in the order a task
+        arrives in.
+        """
+        patches = procedure.patches
+        if not patches or procedure.verified_by is None:
+            return None
+        patch_text = self._patch_text(turn, patches)
+        if not patch_text.strip():
+            return None
+        command = self._command_text(turn, procedure.verified_by)[:200]
+        paths = _merge_paths(_patched_paths(patch_text), ())
+        task = (turn.latest_user_text or "").strip().splitlines()
+        body = "\n".join(
+            part
+            for part in (
+                f"Task: {task[0][:200]}" if task else "",
+                f"Changed: {', '.join(paths) or 'unknown files'}",
+                f"Verified by: {command or 'a test run of this turn'}",
+                "",
+                "Steps that worked:",
+                patch_text,
+            )
+            if part
+        )
+        return self._event(
+            turn,
+            KIND_PLAYBOOK,
+            body,
+            signature=None,
+            parts=self._procedure_parts(turn, procedure),
+            test_command=command,
+            paths=paths,
+            phase=_phase_of_items(turn, procedure.items),
+        )
+
+    @staticmethod
+    def _procedure_parts(
+        turn: AgentTurn, procedure: "_Procedure"
+    ) -> Tuple[str, ...]:
+        """
+        The fingerprint parts of one accepted stretch of work.
+
+        The identity of the first patch names the stretch and never changes
+        while Codex replays the turn, which is what keeps one document per
+        procedure rather than one per request; the green run is not part of
+        it, because the run that closes a procedure is decided by where the
+        turn happens to be when it is replayed.
+        """
+        first = procedure.patches[0] if procedure.patches else None
+        identity = (first.call_id or first.event_id or "") if first else ""
+        return tuple(part for part in ("playbook", turn.scope, identity) if part)
 
     def _failure_evidence(self, turn: AgentTurn) -> List[PhaseEvidence]:
         """Every test failure of this turn, including repeats."""
@@ -389,13 +533,7 @@ class EpisodeMiner:
         if not failure.patches or failure.signature is None:
             return None
         patch_text = self._patch_text(turn, failure.patches)
-        paths = _deduplicated(
-            re.findall(
-                r"^\*\*\* (?:(?:Update|Add|Delete) File|Move to): (.+)$",
-                patch_text,
-                re.MULTILINE,
-            )
-        )
+        paths = _patched_paths(patch_text)
         body = "\n".join(
             (
                 f"Failure: {failure.signature.signature}",
@@ -711,6 +849,53 @@ def _verifies(failing: str, green: str) -> bool:
     return left is not None and left == right
 
 
+def _verified_patches(failures: Sequence[_Failure]) -> FrozenSet[str]:
+    """
+    Return the patches that a verified recipe already stands for.
+
+    Parameters
+    ----------
+    failures : Sequence[_Failure]
+        The turn's failure episodes, verified or not.
+
+    Returns
+    -------
+    FrozenSet[str]
+        Identities of the patches of every episode that a test run closed.
+    """
+    return frozenset(
+        patch.call_id or patch.event_id or ""
+        for failure in failures
+        if failure.verified()
+        for patch in failure.patches
+    )
+
+
+def _patched_paths(patch_text: str) -> Tuple[str, ...]:
+    """Return the file paths one rendered patch touches, in order."""
+    found = re.findall(
+        r"^\*\*\* (?:(?:Update|Add|Delete) File|Move to): (.+)$",
+        patch_text,
+        re.MULTILINE,
+    )
+    return _deduplicated(found)
+
+
+def _phase_of_items(turn: AgentTurn, items: Sequence[PhaseEvidence]) -> str:
+    """Return the work phase a stretch of evidence happened in."""
+    counted: Dict[str, int] = {}
+    for item in items:
+        if item.mode:
+            counted[item.mode] = counted.get(item.mode, 0) + 1
+    if not counted:
+        return turn.mode
+    best = max(counted.values())
+    for item in reversed(items):
+        if counted.get(item.mode, 0) == best:
+            return item.mode
+    return turn.mode
+
+
 def _episode_phase(turn: AgentTurn, failure: _Failure) -> str:
     """
     Return the work phase one episode happened in.
@@ -725,17 +910,7 @@ def _episode_phase(turn: AgentTurn, failure: _Failure) -> str:
     items = [failure.evidence, *failure.patches, *failure.later_failures]
     if failure.resolved_by is not None:
         items.append(failure.resolved_by)
-    counted: Dict[str, int] = {}
-    for item in items:
-        if item.mode:
-            counted[item.mode] = counted.get(item.mode, 0) + 1
-    if not counted:
-        return turn.mode
-    best = max(counted.values())
-    for item in reversed(items):
-        if counted.get(item.mode, 0) == best:
-            return item.mode
-    return turn.mode
+    return _phase_of_items(turn, items)
 
 
 def _merge_paths(

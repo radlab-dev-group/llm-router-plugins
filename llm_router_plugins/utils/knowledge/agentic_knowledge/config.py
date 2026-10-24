@@ -71,8 +71,15 @@ __all__ = [
     "AgenticKnowledgeConfig",
     "ModePolicy",
     "SourcePolicy",
+    "WILDCARD_MODE",
     "WorkerSettings",
 ]
+
+#: Mode key of the policy that serves every mode without one of its own.
+#: Routing falls back to ``implement`` rather than to nothing, so a request
+#: reaches this plugin with an empty mode only when routing did not run at
+#: all — a mode this policy cannot name, and a reason not to skip the search.
+WILDCARD_MODE = "*"
 
 #: Filename patterns the documentation scan picks up by default.  Markdown is
 #: the lingua franca of a repository's own documentation; an .rst tree is worth
@@ -157,6 +164,13 @@ _DEFAULT_SSE_TIMEOUT_SECONDS = 2.0
 #: asked one after another, so the request's ceiling has to be a sum — two
 #: calls of :data:`_DEFAULT_SSE_TIMEOUT_SECONDS` is what the common mode does.
 _DEFAULT_READ_TIMEOUT_SECONDS = 4.0
+#: Room the budget keeps over a single call.  A search starts only while a
+#: whole call still fits before the deadline, and the deadline is read from
+#: the clock a moment before the call is — so a budget *equal* to one call is
+#: spent by the microseconds between those two readings, and every search of
+#: every request comes back "not started".  This is the difference between a
+#: deployment that reads its knowledge base and one that only warns about it.
+_MIN_READ_MARGIN_SECONDS = 0.25
 _DEFAULT_MIN_SIMILARITY = 0.35
 
 #: Both legs of the engine fused by Reciprocal Rank Fusion is what its
@@ -785,10 +799,15 @@ class AgenticKnowledgeConfig:
             raise ValueError(f"Unknown adapters: {sorted(unknown)}")
         if self.min_similarity < 0.0 or self.min_similarity > 1.0:
             raise ValueError("min_similarity must be in [0, 1]")
-        # One call has to fit the request's read budget, or the layer would
-        # read nothing at all and report it as an empty knowledge base.  This
-        # invariant belongs to the resolved policy, not to the environment
-        # path that happens to set the numbers, so it is checked here.
+        # One whole call has to fit the request's read budget *with room to
+        # spare*, or the layer reads nothing at all and reports it as an empty
+        # knowledge base: the store refuses a call that cannot finish before
+        # the deadline, and a deadline equal to one call never leaves room for
+        # it.  An operator who sets ``SSE_API_TIMEOUT`` and
+        # ``READ_TIMEOUT_SECONDS`` to the same number hits exactly that, which
+        # is why the budget is raised here rather than trusted.  This invariant
+        # belongs to the resolved policy, not to the environment path that
+        # happens to set the numbers, so it is enforced here.
         self.sse_timeout_seconds = min(
             max(self.sse_timeout_seconds, 0.1), _MAX_SSE_TIMEOUT_SECONDS
         )
@@ -796,7 +815,8 @@ class AgenticKnowledgeConfig:
             max(self.read_timeout_seconds, 0.1), _MAX_SSE_TIMEOUT_SECONDS
         )
         self.read_timeout_seconds = max(
-            self.read_timeout_seconds, self.sse_timeout_seconds
+            self.read_timeout_seconds,
+            self.sse_timeout_seconds + _MIN_READ_MARGIN_SECONDS,
         )
         if not 0.0 < self.strong_recipe_score <= 1.0:
             raise ValueError("strong_recipe_score must be in (0, 1]")
@@ -930,6 +950,12 @@ class AgenticKnowledgeConfig:
         """
         Return the policy of *mode*, or ``None`` when the mode has none.
 
+        A mode with no policy of its own falls back to the one named
+        :data:`WILDCARD_MODE`, when the configuration provides one, so a
+        request whose mode routing did not resolve is still asked of the
+        knowledge base instead of being served empty.  A mode's own policy
+        always wins over the fallback.
+
         Parameters
         ----------
         mode : str
@@ -940,7 +966,7 @@ class AgenticKnowledgeConfig:
         ModePolicy or None
             The policy, or ``None`` when this mode is not served.
         """
-        return self.modes.get(mode or "")
+        return self.modes.get(mode or "") or self.modes.get(WILDCARD_MODE)
 
     def collection(self, scope: str, kind: str) -> str:
         """

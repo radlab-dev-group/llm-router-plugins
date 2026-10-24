@@ -48,6 +48,10 @@ KIND_RECIPE = "recipe"
 #: A change that did not fix the error — recorded so it is not repeated.
 KIND_DEADEND = "deadend"
 
+#: A verified procedure: a change whose tests passed, whether or not a failure
+#: preceded it; the record of the steps that are known to work here.
+KIND_PLAYBOOK = "playbook"
+
 #: A fragment of a conversation window archived around compaction.
 KIND_SESSION_ARCHIVE = "session_archive"
 
@@ -55,7 +59,12 @@ KIND_SESSION_ARCHIVE = "session_archive"
 KIND_DOC = "doc"
 
 #: Kinds the miner may publish.
-KNOWLEDGE_KINDS: Tuple[str, ...] = (KIND_RECIPE, KIND_DEADEND, KIND_SESSION_ARCHIVE)
+KNOWLEDGE_KINDS: Tuple[str, ...] = (
+    KIND_RECIPE,
+    KIND_DEADEND,
+    KIND_PLAYBOOK,
+    KIND_SESSION_ARCHIVE,
+)
 
 #: All kinds a reader may ask for.
 DOCUMENT_KINDS: Tuple[str, ...] = KNOWLEDGE_KINDS + (KIND_DOC,)
