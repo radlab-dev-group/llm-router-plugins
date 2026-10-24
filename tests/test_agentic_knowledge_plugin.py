@@ -187,14 +187,40 @@ def test_aux_title_is_never_enriched():
     assert MARKER not in json.dumps(out)
 
 
-def test_unknown_mode_is_not_read_but_still_mined():
+def test_an_unknown_mode_is_read_with_the_fallback_policy():
+    """A mode without a policy of its own is asked of the base, not skipped.
+
+    Routing falls back to a named mode rather than to none, so an empty mode
+    reaches the plugin only when routing did not run — and that is still a
+    request whose repository may have something to say about it.
+    """
     config = knowledge_config()
     store = FakeStore(hits=(store_hit("recipe"),))
     publisher = FakePublisher()
     plugin = make_plugin(config, store=store, publisher=publisher)
-    out = plugin.apply(main_payload(mode="implement"))
-    # 'implement' is served, so this is a read; use a mode with no policy.
+    out = plugin.apply(main_payload(mode=""))
     assert "knowledge" in out["routing"]
+    # The fallback policy served it: its collections were searched.
+    assert store.requests
+
+
+def test_an_unknown_mode_without_a_fallback_is_still_mined():
+    config = knowledge_config()
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        WILDCARD_MODE,
+    )
+
+    config.modes = {
+        name: policy
+        for name, policy in config.modes.items()
+        if name != WILDCARD_MODE
+    }
+    store = FakeStore()
+    publisher = FakePublisher()
+    plugin = make_plugin(config, store=store, publisher=publisher)
+    out = plugin.apply(main_payload(mode=""))
+    assert "knowledge" in out["routing"]
+    assert store.requests == []
 
 
 # ------------------------------------------------------------------ write --

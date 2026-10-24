@@ -36,6 +36,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     DOCUMENT_KINDS,
     KIND_DEADEND,
     KIND_DOC,
+    KIND_PLAYBOOK,
     KIND_RECIPE,
     KIND_SESSION_ARCHIVE,
     DocumentMeta,
@@ -94,6 +95,7 @@ _INTRO = (
 
 _SECTIONS: Tuple[Tuple[str, str], ...] = (
     (KIND_RECIPE, "## Verified fixes in this repo"),
+    (KIND_PLAYBOOK, "## Verified procedures in this repo"),
     (KIND_DEADEND, "## Known dead ends (do not repeat)"),
     (KIND_SESSION_ARCHIVE, "## Exact context from before compaction"),
     (KIND_DOC, "## Conventions"),

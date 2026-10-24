@@ -73,6 +73,54 @@ def _rebuild(turn, **overrides):
     return replace(turn, **overrides)
 
 
+def test_a_review_turn_that_named_nothing_still_asks_the_failure():
+    """A mode whose own shape is empty is not a mode that asks nothing.
+
+    A review whose patches named no path and whose user said no word would
+    build an empty question from its own shape — and an empty question is a
+    request that never asked the knowledge base.  The fallback asks with the
+    one fact the turn does carry: the failure it is stuck on.
+    """
+    from agentic_knowledge_support import base_items
+
+    # The environment context opens the turn, but the user says no word.
+    items = [base_items()[0]] + [
+        {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "c",
+            "id": "e",
+            "arguments": '{"cmd": "pytest tests/test_a.py"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "c",
+            "id": "o",
+            "output": (
+                "Process exited with code 1\n"
+                "Output:\nFAILED tests/test_a.py::test_x - "
+                "AssertionError: expected 1 got 2"
+            ),
+        },
+    ]
+    turn = CodexAgentAdapter().parse(codex_payload(items, mode="review"))
+    assert not turn.latest_user_text
+    query = builder().query_for(turn)
+    assert "AssertionError" in query
+    # And the request is actually built, not just the query.
+    assert builder().build(turn, knowledge_config().modes["review"])
+
+
+def test_a_turn_that_says_nothing_at_all_builds_no_query():
+    """The fallback invents nothing: an empty turn asks nothing."""
+    from agentic_knowledge_support import base_items
+
+    # Only the environment context; no user command, no tool call.
+    turn = CodexAgentAdapter().parse(codex_payload(base_items(), mode="review"))
+    # The environment context is not the user's words.
+    assert builder().query_for(_rebuild(turn, latest_user_text="")) == ""
+
+
 def test_a_category_listed_twice_still_restricts_the_archive_to_the_thread():
     # A policy that names `session_archive` twice must not turn the thread
     # filter off.  The old code decided "archive-only" from the *count* of

@@ -817,7 +817,8 @@ def test_a_mode_without_documentation_asks_the_docs_collection_for_nothing():
         publisher=FakePublisher(),
         cache=InMemoryContextCache(),
     )
-    plugin.apply(codex_payload(base_items(cwd="/repo/webapp"), mode="debug"))
+    plugin.apply(codex_payload(base_items(cwd="/repo/webapp"), mode="git_review"))
+    assert store.requests, "the mode is served, so the search happens"
     assert all(
         request.collection != "agentic_kb_webapp_docs" for request in store.requests
     )

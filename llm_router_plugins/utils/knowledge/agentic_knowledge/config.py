@@ -71,8 +71,15 @@ __all__ = [
     "AgenticKnowledgeConfig",
     "ModePolicy",
     "SourcePolicy",
+    "WILDCARD_MODE",
     "WorkerSettings",
 ]
+
+#: Mode key of the policy that serves every mode without one of its own.
+#: Routing falls back to ``implement`` rather than to nothing, so a request
+#: reaches this plugin with an empty mode only when routing did not run at
+#: all — a mode this policy cannot name, and a reason not to skip the search.
+WILDCARD_MODE = "*"
 
 #: Filename patterns the documentation scan picks up by default.  Markdown is
 #: the lingua franca of a repository's own documentation; an .rst tree is worth
@@ -930,6 +937,12 @@ class AgenticKnowledgeConfig:
         """
         Return the policy of *mode*, or ``None`` when the mode has none.
 
+        A mode with no policy of its own falls back to the one named
+        :data:`WILDCARD_MODE`, when the configuration provides one, so a
+        request whose mode routing did not resolve is still asked of the
+        knowledge base instead of being served empty.  A mode's own policy
+        always wins over the fallback.
+
         Parameters
         ----------
         mode : str
@@ -940,7 +953,7 @@ class AgenticKnowledgeConfig:
         ModePolicy or None
             The policy, or ``None`` when this mode is not served.
         """
-        return self.modes.get(mode or "")
+        return self.modes.get(mode or "") or self.modes.get(WILDCARD_MODE)
 
     def collection(self, scope: str, kind: str) -> str:
         """

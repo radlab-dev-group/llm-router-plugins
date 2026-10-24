@@ -150,7 +150,7 @@ knowledge to use, and none is mined from it, so it carries no annotation.
 | `assembler.py`     | weighted voting over sources, dedup, character budget, rendering             |
 | `cache.py`         | `GenerationContextCache` (Redis) + in-process one when Redis is absent       |
 | `redisclient.py`   | `RedisClientHandle`: lazy, fork-aware Redis client shared by cache and pub   |
-| `miner.py`         | `EpisodeMiner`: recipe / deadend / loop / compaction → `KnowledgeEvent`      |
+| `miner.py`         | `EpisodeMiner`: recipe / playbook / deadend / loop / compaction → `KnowledgeEvent` |
 | `docs_ingestor.py` | scans the repository's markdown into `doc` documents and keeps them current  |
 | `doc_context.py`   | the standing map of that documentation a session carries, and where it lives |
 | `events.py`        | `KnowledgeEventPublisher`: `SET NX` dedup + `XADD`                           |
@@ -181,6 +181,7 @@ the scope is unknown, and both reads and writes are skipped (`scope: ""` in the 
 | Kind              | Collection                       | Produced by                                          |
 |-------------------|----------------------------------|--------------------------------------------------------|
 | `recipe`          | `<prefix>_<scope>`               | `test_failure → patch → test pass`                      |
+| `playbook`        | `<prefix>_<scope>`               | `patch → test pass` with no failure in between — the correct steps |
 | `deadend`         | `<prefix>_<scope>`               | a repeated failure, a dead end                          |
 | `doc`             | `<prefix>_<scope>_docs`          | the repository's markdown — [Documentation](#documentation-doc) |
 | `session_archive` | `<prefix>_<scope>_sessions`      | a request classified `compaction`                       |
@@ -206,6 +207,7 @@ metadata in `metadata_json`, filtered by `eq`/`in`.
 | `implement`       | latest user text + touched paths                                              |
 | `plan`            | latest user text                                                              |
 | `git_review`, `review` | paths from patches                                                       |
+| `*` (fallback)    | the general composition: user text + paths + failure, for a mode routing did not resolve |
 
 Each mode has a policy — the sources it reads, their weights, `max_items`, and a character budget:
 
@@ -215,11 +217,24 @@ Each mode has a policy — the sources it reads, their weights, `max_items`, and
   "sources": [
     {"category": "recipe",          "weight": 1.0, "max_items": 3},
     {"category": "deadend",         "weight": 0.9, "max_items": 3},
-    {"category": "session_archive", "weight": 0.6, "max_items": 3}
+    {"category": "playbook",        "weight": 0.5, "max_items": 2},
+    {"category": "session_archive", "weight": 0.6, "max_items": 3},
+    {"category": "doc", "weight": 0.4, "max_items": 2, "doc_types": ["guide", "note"]}
   ],
   "escalation_model_name": "qwen/Qwen3.8-27B"
 }
 ```
+
+A mode with no policy of its own — routing resolved none, or a name this policy
+does not know — falls back to the one named `*`, so the request is asked of the
+base rather than served empty.  An explicit policy always wins; a configuration
+without a `*` entry behaves as before (such a request is mined, but not read).
+The shipped policy reads every kind the miner can write — including
+`playbook`, where the mode is about doing rather than un-breaking — and reads
+documentation in the modes that previously read none of it: `debug` asks for the
+guide and the notes about the module the failure sits in, `test` for the guide
+and the contributing rules the change has to keep, and `implement` for the
+dead ends it would otherwise walk back into.
 
 A source may also restrict the **phases** it is read in — the work the episode was
 doing (`test`, `implement`, …), which is *not* the document kind: a `recipe` mined
@@ -264,14 +279,17 @@ rendered in a fixed order inside constant markers:
 ```
 <agentic_knowledge>
 ## Verified fixes in this repo
+## Verified procedures in this repo
 ## Known dead ends (do not repeat)
 ## Exact context from before compaction
 ## Conventions
 </agentic_knowledge>
 ```
 
-Every entry is cited with the phase it was learned in — `[recipe · in test · 2026-10-12 · src/a.py]` — so
-the agent can tell a fix it verified in a test run from one it learned by editing.
+Every entry is cited with the phase it was learned in — `[recipe · in test · 2026-10-12 · src/a.py]`,
+`[playbook · in test · 2026-10-12 · src/a.py]` — so the agent can tell a fix it verified in a test run from one it
+learned by editing. A procedure is never the "strong recipe" that holds a looping model in place: it carries no
+failure signature, and what was never broken is not evidence about what is.
 
 A repository whose first episode has not been indexed yet has no collection at all, and the engine says so with an error code rather than an empty list; the read path answers it as an empty one (nothing known yet, no warning per request) until the worker creates the collection on that first event.
 
@@ -294,8 +312,15 @@ stays escalated even when a later request no longer repeats the loop by itself.
 ### Write path
 
 `EpisodeMiner` reads the turn's phase evidence — `collect_phase_evidence` from the Codex package, no second parser —
-and emits `recipe` for a `test_failure → patch → test pass` episode and `deadend` for a failure that repeats with an
-identical signature.  Each event carries the **phase** its own evidence names — the mode most of its items are in,
+and emits `recipe` for a `test_failure → patch → test pass` episode, `playbook` for a `patch → test pass` episode
+that no failure opened, and `deadend` for a failure that repeats with an identical signature. A turn that went right
+from the first try writes no recipe — there was no failure to file it under — and before the `playbook` kind it
+wrote nothing at all: the correct steps of most tasks never reached the base. A playbook is therefore read back
+where the question is how this repository does a thing that has not gone wrong yet, not where a failure is the
+question: the body leads with what was asked for, then what was changed, then the command that proved the change.
+A stretch that a verified recipe already covers (the recipe keeps every patch that followed its failure, so the
+last, wider test run is usually inside its diff) is not written twice. A stretch a test run never accepted is not
+written either: an intention indexed as a verified procedure is a guess the next session would trust.  Each event carries the **phase** its own evidence names — the mode most of its items are in,
 the newest one breaking a tie, the turn's mode when it names none — which the worker writes into the document
 header and into `metadata_json.phase`, verbatim (it is a filter key, like `thread_id`). Codex resends the whole history with every request, so episodes are recomputed each time and
 deduplicated before publishing: `SET NX <fingerprint> EX <dedup_ttl_seconds>` in front of `XADD`, and `XADD … MAXLEN ~

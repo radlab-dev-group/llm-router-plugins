@@ -192,6 +192,54 @@ def deadend_items(failure=FAILING):
     ]
 
 
+def procedure_items(
+    paths=("src/export.py",),
+    command="pytest tests/test_a.py",
+    rounds=1,
+):
+    """
+    Items describing changes their test runs accepted, with no failure at all.
+
+    This is the shape of most correct work: the agent implements, runs the
+    tests, and nothing ever broke.  Before this builder such a turn wrote no
+    knowledge; each *round* is one patch followed by the green run that
+    accepted it, so ``rounds=2`` is two procedures, not one.
+    """
+    items = base_items()
+    for index in range(1, rounds + 1):
+        items.append(_patch(f"p{index}", f"pe{index}", paths))
+        items.append(_command(f"c{index}", f"e{index}", command))
+        items.append(_command_output(f"c{index}", f"oe{index}", GREEN, code=0))
+    return items
+
+
+def fix_then_procedure_items(
+    failure=FAILING,
+    fixed_paths=("src/export.py",),
+    later_paths=("src/other.py",),
+    command="pytest tests/test_a.py",
+    later_command="pytest tests/test_b.py",
+):
+    """
+    Items describing a failure fixed and, afterwards, new work its tests took.
+
+    Two episodes of one turn, with identifiers that do not collide: the tool
+    output maps of a turn are keyed by ``call_id``, so a fixture that reuses
+    one lets a later output overwrite an earlier failure and the recipe
+    silently loses its signature.
+    """
+    return base_items() + [
+        _command("c1", "e1", command),
+        _command_output("c1", "o1", failure, code=1),
+        _patch("p1", "pe1", fixed_paths),
+        _command("c2", "e2", command),
+        _command_output("c2", "o2", GREEN, code=0),
+        _patch("p3", "pe3", later_paths),
+        _command("c3", "e3", later_command),
+        _command_output("c3", "o3", GREEN, code=0),
+    ]
+
+
 def main_payload(mode="debug", failures=1, **kwargs):
     """A main request whose turn failed its test *failures* times."""
     return codex_payload(loop_items(failures), mode=mode, **kwargs)

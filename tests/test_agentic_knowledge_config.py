@@ -18,6 +18,7 @@ from agentic_knowledge_support import knowledge_config
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AGENTIC_KNOWLEDGE_ENV_PREFIX,
+    WILDCARD_MODE,
     AgenticKnowledgeConfig,
     ModePolicy,
     SourcePolicy,
@@ -25,7 +26,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
 )
 
 
-def test_bundled_policy_loads_with_six_modes():
+def test_bundled_policy_serves_every_mode_and_one_for_the_unknown():
     config = AgenticKnowledgeConfig.from_file()
     assert set(config.modes) == {
         "debug",
@@ -34,13 +35,41 @@ def test_bundled_policy_loads_with_six_modes():
         "plan",
         "git_review",
         "review",
+        "*",
     }
     assert config.escalation_enabled is False
 
 
-def test_policy_for_returns_the_mode_or_none():
+def test_the_read_budget_holds_the_collections_a_mode_asks():
+    """A mode reads three collections; a budget for one would read one.
+
+    The number is checked against the shipped policy rather than asserted
+    twice, because the failure it guards against is silent: the later searches
+    of a request are simply not started, and the knowledge base looks empty.
+    """
+    config = AgenticKnowledgeConfig.from_file()
+    calls = max(
+        len({config.collection("x", s.category) for s in policy.sources})
+        for policy in config.modes.values()
+    )
+    assert config.read_timeout_seconds >= calls * config.sse_timeout_seconds
+
+
+def test_policy_for_returns_the_mode_or_the_fallback():
     config = knowledge_config()
     assert config.policy_for("debug") is not None
+    assert config.policy_for("debug").name == "debug"
+    # A mode this policy does not name is served by the fallback, not skipped.
+    assert config.policy_for("does-not-exist").name == "*"
+
+
+def test_a_policy_without_a_fallback_serves_no_unknown_mode():
+    config = knowledge_config()
+    config.modes = {
+        name: policy
+        for name, policy in config.modes.items()
+        if name != WILDCARD_MODE
+    }
     assert config.policy_for("does-not-exist") is None
 
 

@@ -1,10 +1,11 @@
 """
-The episode miner: recipes, dead ends, loops and the compaction archive.
+The episode miner: recipes, procedures, dead ends, loops and the archive.
 
 The miner is stateless — it recomputes episodes from a turn's evidence and
 deduplicates downstream — so a recipe is only mined from a failure, a change
-and a green test; a dead end from the same failure after a change; and a loop
-is a count, not a document.  A compaction turn archives its window instead.
+and a green test; a dead end from the same failure after a change; a procedure
+from a change a green run accepted with no failure in between; and a loop is a
+count, not a document.  A compaction turn archives its window instead.
 """
 
 import json
@@ -17,6 +18,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from agentic_knowledge_support import (
     FAILING,
+    GREEN,
     _command,
     _command_output,
     _patch,
@@ -24,8 +26,10 @@ from agentic_knowledge_support import (
     codex_payload,
     compaction_payload,
     deadend_items,
+    fix_then_procedure_items,
     heredoc_recipe_items,
     loop_items,
+    procedure_items,
     recipe_items,
 )
 
@@ -34,6 +38,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.codex import 
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     KIND_DEADEND,
+    KIND_PLAYBOOK,
     KIND_RECIPE,
     KIND_SESSION_ARCHIVE,
     parse_document_text,
@@ -96,6 +101,100 @@ def test_a_clean_turn_mines_nothing():
     result = mine(payload)
     assert result.events == ()
     assert result.loop_count == 0
+
+
+def test_a_change_its_tests_accepted_is_mined_as_a_procedure():
+    result = mine(codex_payload(procedure_items(), mode="implement"))
+    assert len(result.events) == 1
+    event = result.events[0]
+    assert event.kind == KIND_PLAYBOOK
+    assert event.fingerprint
+    # No failure happened, so nothing normalizes into a signature — and the
+    # document still says what was changed and what proved it.
+    assert event.signature_hash == ""
+    assert event.metadata["test_command"] == "pytest tests/test_a.py"
+    assert "src/export.py" in event.metadata["paths"]
+    meta, body = parse_document_text(event.text)
+    assert meta.kind == KIND_PLAYBOOK
+    assert "Steps that worked" in body
+    assert "fix the failing export test" in body
+
+
+def test_a_procedure_records_the_phase_it_was_verified_in():
+    result = mine(codex_payload(procedure_items(), mode="implement"))
+    event = result.events[0]
+    # The patch was written while implementing, the run that accepted it was a
+    # test run; the episode's own evidence says which one closed it.
+    assert event.metadata["phase"] == "test"
+
+
+def test_a_verified_fix_is_a_recipe_and_not_also_a_procedure():
+    kinds = [event.kind for event in mine(codex_payload(recipe_items())).events]
+    assert kinds == [KIND_RECIPE]
+
+
+def test_a_wider_green_run_records_the_change_it_accepted():
+    # The second run proved a different scope than the one that failed, so no
+    # fix is claimed — but a run accepted the later change, and that is a step
+    # worth repeating even though nothing ever broke.
+    result = mine(codex_payload(fix_then_procedure_items(), mode="debug"))
+    kinds = [event.kind for event in result.events]
+    assert kinds == [KIND_PLAYBOOK]
+    procedure = result.events[0]
+    assert "src/other.py" in procedure.metadata["paths"]
+    assert procedure.metadata["test_command"] == "pytest tests/test_b.py"
+
+
+def test_a_procedure_never_duplicates_the_recipe_that_covers_it():
+    # A last, wider test run closes the failure and its later patch together,
+    # so the recipe already carries that change; a second document for it
+    # would spend the mode's budget saying the same thing twice.
+    items = base_items() + [
+        _command("c1", "e1", "pytest"),
+        _command_output("c1", "o1", FAILING, code=1),
+        _patch("p1", "pe1", ("src/a.py",)),
+        _command("c2", "e2", "pytest"),
+        _command_output("c2", "o2", GREEN, code=0),
+        _patch("p3", "pe3", ("src/b.py",)),
+        _command("c3", "e3", "pytest"),
+        _command_output("c3", "o3", GREEN, code=0),
+    ]
+    kinds = [event.kind for event in mine(codex_payload(items, mode="debug")).events]
+    assert kinds == [KIND_RECIPE]
+
+
+def test_each_accepted_round_of_a_turn_is_its_own_procedure():
+    result = mine(codex_payload(procedure_items(rounds=2), mode="implement"))
+    procedures = [e for e in result.events if e.kind == KIND_PLAYBOOK]
+    assert len(procedures) == 2
+    assert len({event.fingerprint for event in procedures}) == 2
+
+
+def test_a_procedure_fingerprint_survives_the_turn_replaying():
+    first = mine(codex_payload(procedure_items(), mode="implement")).events
+    second = mine(codex_payload(procedure_items(), mode="implement")).events
+    assert [event.fingerprint for event in first] == [
+        event.fingerprint for event in second
+    ]
+
+
+def test_a_change_no_test_run_accepted_is_not_recorded():
+    items = base_items() + [_patch("p1", "pe", ("src/a.py",))]
+    assert mine(codex_payload(items, mode="implement")).events == ()
+
+
+def test_a_deadend_turn_records_no_procedure():
+    kinds = [event.kind for event in mine(codex_payload(deadend_items())).events]
+    assert KIND_PLAYBOOK not in kinds
+
+
+def test_a_procedure_never_suppresses_an_escalation():
+    # A procedure carries no signature, so it cannot be the "strong recipe"
+    # that keeps a looping model in place; escalation reads recipes only.
+    result = mine(codex_payload(procedure_items(), mode="implement"))
+    event = result.events[0]
+    meta, _ = parse_document_text(event.text)
+    assert meta.signature_hash == ""
 
 
 def test_repeated_history_yields_a_stable_fingerprint():
@@ -196,8 +295,14 @@ def test_a_marker_filter_still_voids_the_recipe():
         ("pytest tests/unit tests/integration", "pytest tests/unit"),
         ("pytest tests/test_a.py", "pytest tests/test_a.py -knot_test_x"),
         ("pytest tests/test_a.py", "pytest tests/test_a.py -mfast"),
-        ("pytest tests/test_a.py", "pytest tests/test_a.py --deselect=tests/test_a.py::test_x"),
-        ("pytest tests/test_a.py", "pytest tests/test_a.py --ignore=tests/test_a.py"),
+        (
+            "pytest tests/test_a.py",
+            "pytest tests/test_a.py --deselect=tests/test_a.py::test_x",
+        ),
+        (
+            "pytest tests/test_a.py",
+            "pytest tests/test_a.py --ignore=tests/test_a.py",
+        ),
         ("pytest tests/test_a.py", "pytest tests/test_a.py --ignore-glob='*a.py'"),
         ("pytest tests/test_a.py", "pytest tests/test_a.py --lf"),
         ("pytest tests/test_a.py", "pytest tests/test_a.py --collect-only"),

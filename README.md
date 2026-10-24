@@ -282,9 +282,11 @@ learned, **without the agent cooperating**. It reads the routing decision (`rout
 `agent_mode`, `model`), searches the **Semantic Search Engine** for verified fixes, dead ends and
 the pre-compaction archive of the current scope, and injects the result as a separate, removable
 context block. It also learns from the traffic: the miner turns a `test_failure → patch → test
-pass` episode into a `recipe` and a repeated failure into a `deadend`, publishes them to a Redis
-Stream, and an indexing worker masks them with `FastMasker` before indexing; the window a
-`compaction` request is about to summarize is archived whole. Every mined episode also carries the
+pass` episode into a `recipe`, a `patch → test pass` episode that no failure opened into a
+`playbook` — the correct steps of a task are knowledge too, and without this kind a turn that went
+right from the first try wrote nothing at all — and a repeated failure into a `deadend`, publishes
+them to a Redis Stream, and an indexing worker masks them with `FastMasker` before indexing; the
+window a `compaction` request is about to summarize is archived whole. Every mined episode also carries the
 work **phase** its evidence names (`test`, `implement`, …), and a retrieval source can be
 restricted to phases in its policy, so a mode can read only what was learned while doing its kind
 of work. The retrieval result is a routing signal: an agent looping on one error signature with no
@@ -313,6 +315,10 @@ The worker is a separate process the operator starts —
 `scripts/plugins/agentic_knowledge/run-agentic-kb-worker.sh` in the `llm-router` checkout takes its
 environment from the router's own run script. It creates a repository's collection on that repository's
 first event; a project that has produced nothing yet simply has an empty knowledge base.
+
+A mode routing did not resolve falls back to the `"*"` policy rather than to no search at all, and
+the read budget (`read.timeout_seconds`) is a *sum* of engine calls — one per collection a mode
+reads — not a per-call timeout, which is set apart by `SSE_API_TIMEOUT`.
 
 Connection settings (SSE and Redis) come only from `LLM_ROUTER_KNOWLEDGE_AGENTIC_*`; the policy
 (adapters, per-mode sources, weights and budgets, escalation models, retention) is
