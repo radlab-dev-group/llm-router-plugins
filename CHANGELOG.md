@@ -8,6 +8,7 @@ release tagged as `v<version>`.
 
 | Version | Changelog |
 | ------- | --------- |
+| 0.1.5 | **Changed:** `agentic_knowledge` stores one repository in one collection. Every document kind — mined knowledge, the pre-compaction archive, the repository's own documentation — is now written into `<prefix>_<scope>` and told apart by its engine `category`, which the engine resolves to a document set before scoring, so a search that did not ask for a category never sees it. `collection_layout` (`single`, the shipped default, or `split`, the older three-collections spelling for a deployment indexed with it) decides the collection a reader asks and a worker writes; the split layout keeps working for legacy data, and retention still sweeps the `..._sessions` collections it left behind. A mode still asks one question per source group — mined knowledge, the archive restricted to its `thread_id`, the documentation restricted by `doc_type` — whatever collection the layout gives them. **Fixed:** a search of one repository now returns a document of only that repository under either layout, and the retention pass deletes only the document kinds it names, so a shared collection can no longer age a README on the archive's clock. |
 | 0.1.4 | **Added:** `agentic_knowledge` — a knowledge layer that runs behind the Codex router: per-work-mode retrieval of verified fixes, dead ends and the pre-compaction archive from the Semantic Search Engine, a masked learn-from-traffic write path through a Redis Stream and an indexing worker, and optional knowledge-or-escalate model selection. Adapters for Codex (full) and Claude Code (read-only), plus offline counterfactual evaluation. **Fix:** the `agentic_knowledge` collection names are reduced to the engine's character set at configuration time, so a repository scope that would produce a hyphen can no longer make every indexing attempt fail with a 500 at collection creation; the retention pass still sweeps the legacy `prefix-<scope>-sessions` archives; the repository of a request is read from the leading messages, so a compaction (which re-sends the whole window) is filed under its own project instead of into a scope-less prefix, and a request with no known repository publishes nothing; a search of a repository that has not been indexed yet is an empty answer, not a failed search **Added:** engine login for a Semantic Search Engine that authenticates by username and password rather than by a pre-issued token (`SSE_API_USERNAME`/`SSE_API_PASSWORD`); every mined episode now carries the work **phase** its evidence names (`test`, `implement`, …) in its header and in `metadata_json.phase`, and a retrieval source can be restricted in its policy to phases (`"phases": ["test"]`) or to routing modes (`"modes": ["debug"]`) — the filter is engine-side, unions across names, intersects the source's categories, never touches the archived window whose `thread_id` owns the single metadata slot, and a policy cannot mix the two dimensions in one request. **Added:** `agentic_knowledge` indexes the repository's own documentation — a heading-aware scan of its `*.md` files published as `doc` documents, republished on content change, superseded documents retired through a `docs_prune` control message (never on a truncated scan), plus the `llm-router-agentic-kb-docs` command and the `docs` policy section. Documentation now lives in `<prefix>_<scope>_docs`, is read per work mode through `doc_types`, is searched on the turn's subject rather than its failure signature, and a guide about a file the turn edits outranks one that is not. On top of retrieval a session carries a **standing documentation map** — structural, stable per repository, budgeted first — and every mined fix or dead end points at the page that documents the module it touched. **Fix:** the Codex routing record follows the phase that was actually routed with instead of the last signal it could rebuild, so an interleaved command no longer freezes the record and repeats a conflict on every request of the turn (captured-session replay: 11 conflicts -> 0). **Added:** `RememberResult` carries why a memory write was skipped; the log names the real cause instead of an undifferentiated `version conflict`. **Added:** `agentic_knowledge` mines `playbook` — a change a test run accepted with no failure in between — so the correct steps of a task are knowledge too, not only the ones that went wrong; a mode routing did not resolve is served by a `*` fallback policy instead of reading nothing; every mode now reads the kinds it ignored (`doc` in `debug`/`test`, `deadend` in `implement`, `playbook`/`recipe` where a plan or a review could use them). **Fix:** a read budget equal to one engine call started no search of any request — the deadline left no room for the call it budgeted — which looked like an empty knowledge base; the budget is now raised above one call at validation, defaults to three calls, and the "searches not started" warning names both numbers and repeats at most once per repository per interval. |
 | 0.1.3 | **Added:** an accepted semantic decision can be carried across one command generation (`MEMORY_CARRY_DECISIONS`). **Changed:** semantic rankings are read against their own scale; the phase layer separates work states from shell noise; CLI-injected context is kept out of the intent text. |
 | 0.1.2 | **Added:** optional Redis-backed shared session memory with `MEMORY_MAX_RETRIES`; offline routing evaluation with calibration replay; a configurable `phase` layer reading assistant actions and tool activity; heuristic `negation_pattern` / `min_margin` / `weights`; `per_target_top_k` aggregation. **Changed:** mode definitions refined; semantic context built from the latest assistant utterance only. |
@@ -17,6 +18,42 @@ release tagged as `v<version>`.
 | 0.0.5 | **Added:** `TimeRule`, an IBAN masking test suite, spaced car-plate formats. **Changed:** multi-format IBAN anchors, `_iban_mod97` moved to `validators`, PEP 8 import cleanup and no `__init__.py` re-exports. |
 | 0.0.2 | **Added:** PII masking plugin, dynamic pseudonym generation with de-anonymization in `FastMasker`, LangChain RAG plugin with CLI, `SojkaGuardPlugin`, lint/format/type/security configuration. **Changed:** `mask()` returns `(masked_text, mappings)`; `numpy` loaded only when LangChain RAG is enabled. |
 | 0.0.1 | **Added:** `fast_masker` plugin (IP, KRS, JWT, NRB, NIP, URL, SSN and other rules), packaging (`setup.py`) with the initial `.version`, License section in the README. |
+
+## [0.1.5] - 2026-10-27
+
+### Changed
+- **One collection per repository.** Every document kind of a repository now
+  lives in `<prefix>_<scope>`: mined knowledge, the pre-compaction session
+  archive and the repository's own documentation are written into one
+  collection and told apart by their engine `category`, not by the name of a
+  collection. A category is a boundary of the same hardness a collection was —
+  the engine turns it into a set of document names *before* the vector leg
+  scores anything, so a request that did not ask for the documentation never
+  sees it, and its `max_results` is spent within what survived the cut.
+- **`collection_layout`** — `single` (the default) or `split`, the older
+  three-collections spelling: `<prefix>_<scope>` for mined knowledge,
+  `<prefix>_<scope>_sessions` for the archive, `<prefix>_<scope>_docs` for the
+  documentation. The layout is a property of the data at rest, so a deployment
+  switches the reader and the writer at once; `split` stays, so a repository
+  indexed with it keeps being read and stays reversible without re-indexing.
+  `LLM_ROUTER_KNOWLEDGE_AGENTIC_COLLECTION_LAYOUT` overrides the policy.
+- **A mode still asks one question per source group.** The request that
+  retrieves the archive is restricted by its `thread_id`, the one that
+  retrieves the documentation by `doc_type`, and the one that retrieves mined
+  knowledge by neither — whatever collection the layout gives them. A request
+  never mixes the archive with mined knowledge: the engine intersects filter
+  families, so a `thread_id` on such a request would cut the mined knowledge to
+  the documents of this one thread, silently dropping every recipe mined in an
+  earlier session.
+
+### Fixed
+- **The retention pass deletes only the document kinds it names.** One
+  collection now holds several kinds on different clocks: an archived window
+  ages after `write.archive.ttl_seconds`, a README ages when a human deletes
+  the file, a mined recipe retires by being superseded. The pass sweeps the
+  repository's collection (and still the legacy `..._sessions` collections it
+  left behind), but deletes only the archive's kind, so a shared collection
+  cannot age a README on a fourteen-day clock.
 
 ## [Unreleased]
 
