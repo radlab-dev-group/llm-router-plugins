@@ -706,7 +706,9 @@ indexing request. Changing `…_SSE_CHUNK_TOKENS`/`…_SSE_CHUNK_OVERLAP` does n
 documents: recreate and re-index the affected collection to keep it consistent. The
 default 400/60 sits under the 508 tokens the embedder cuts at, which a chunk of the engine's 500 default does not.
 
-CLI (worker): `--config <path>`, `--once` (drain one batch and exit — cron friendly), `--no-retain`, `--log-level`.
+CLI (worker): `--config <path>`, `--once` (drain one batch and exit — cron friendly), `--no-retain`, `--clean-redis-memory-cache`, `--log-level`.
+
+`--clean-redis-memory-cache` drops the layer's cached state in Redis before the worker starts: assembled generations, the scan state of the documentation (and its standing digest), and the deduplication claims that say which events were already published. Use it after you delete a collection — the scan state still says the documentation is indexed and the claims still say its events were seen, so nothing is written again until every TTL expires on its own, and the clean turns the next scan into a real re-index. The event stream, its consumer group and the per-entry attempt counters are deliberately left alone: they are a queue and its bookkeeping, and emptying them would lose episodes that were published and not yet indexed. A clean that fails stops the run with a log rather than indexing on a cache that was not cleared.
 
 The worker logs its configuration block (engine, stream, group, consumer, chunking, retention) on start and then:
 a per-batch summary with read/indexed/dropped counts and elapsed time, per-event details at `DEBUG`

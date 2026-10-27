@@ -58,6 +58,19 @@ release tagged as `v<version>`.
 ## [Unreleased]
 
 ### Added
+- **`--clean-redis-memory-cache` on the indexing worker** drops the layer's
+  cached state in Redis before it starts: an assembled generation context, a
+  repository's documentation scan state and its standing digest, and the
+  deduplication claims that remember which events were already published. The
+  case it is for is a deleted collection — the scan state goes on saying the
+  documentation is indexed and the claims go on saying its events were seen, so
+  nothing is written again until every TTL expires by itself, and an operator
+  watching an empty collection has no lever but time. The keys are matched by
+  their own namespace segments under `SCAN` cursors and deleted in batches, so
+  neither the event stream and its consumer group — a queue, not a cache, whose
+  unpublished episodes would be lost with it — nor another plugin's keys in the
+  same database are touched. A clean that cannot reach Redis stops the run with
+  the engine's own message rather than indexing on a cache that was not cleared.
 - `agentic_knowledge` mines a fourth kind of episode: **`playbook`**, a change
   whose test run passed with **no failure in between**. Until now a turn that
   went right from the first try taught the repository nothing — a recipe needs a
