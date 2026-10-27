@@ -23,6 +23,7 @@ JSON structure::
     {
       "adapters": ["codex", "claude_code"],
       "collection_prefix": "agentic_kb",
+      "collection_layout": "single",
       "scope": {"strategy": "repo_basename", "overrides": {}, "default": ""},
       "read": {"enabled": true, "timeout_seconds": 1.5, "min_similarity": 0.35,
                "hybrid_search": true, "rerank_results": false,
@@ -73,6 +74,7 @@ __all__ = [
     "SourcePolicy",
     "WILDCARD_MODE",
     "WorkerSettings",
+    "is_collection_of",
 ]
 
 #: Mode key of the policy that serves every mode without one of its own.
@@ -151,6 +153,78 @@ def _engine_collection_fragment(value: str, label: str) -> str:
 _DEFAULT_COLLECTION_PREFIX = _engine_collection_fragment(
     "agentic-kb", "collection_prefix"
 )
+
+#: One collection per repository: every document kind lives inside it, told
+#: apart by its engine ``category``.  A category is as hard a boundary as a
+#: collection of its own was — the engine resolves it to document names
+#: *before* the vector leg runs (``semantic.py``: the category becomes a list
+#: of names handed to ``search_in_documents``), so ``max_results`` is spent
+#: within what survived the cut and a README cannot push a recipe out of a
+#: search that did not ask for a README.
+COLLECTION_LAYOUT_SINGLE = "single"
+
+#: The older layout: mined knowledge, session archives and documentation in
+#: three collections per repository — ``<base>``, ``<base>_sessions`` and
+#: ``<base>_docs``.  Kept so a deployment can be read by the code that wrote
+#: it, and so a layout change stays reversible without re-indexing.
+COLLECTION_LAYOUT_SPLIT = "split"
+
+#: Layouts an operator may name, in ``collection_layout`` and in the env.
+COLLECTION_LAYOUTS: Tuple[str, ...] = (
+    COLLECTION_LAYOUT_SINGLE,
+    COLLECTION_LAYOUT_SPLIT,
+)
+
+_DEFAULT_COLLECTION_LAYOUT = COLLECTION_LAYOUT_SINGLE
+
+#: Suffix of the archive collection of the split layout.  Retention used to
+#: find archives by it; under one collection it finds them by document kind,
+#: and this stays only to recognise what the split layout left behind.
+_SESSIONS_SUFFIX = "sessions"
+
+#: Suffix of the documentation collection of the split layout.
+_DOCS_SUFFIX = "docs"
+
+
+def is_collection_of(name: str, prefix: str, layout: str = COLLECTION_LAYOUT_SPLIT) -> bool:
+    """
+    Whether a collection *name* belongs to this plugin under *prefix*.
+
+    The split layout gives every repository three names — the bare one plus
+    the ``_sessions`` and ``_docs`` companions — and the single layout gives it
+    one.  The caller asks one question ("is this mine, and of what kind?") and
+    gets an answer that is true of either spelling: a hyphenated name from a
+    release before the engine's character set was enforced is still this
+    plugin's name, and a ``_sessions`` collection left behind by a layout
+    change is still this plugin's, so it can be swept.
+
+    Returns
+    -------
+    str or None
+        The kind of the collection — ``"repository"``, ``"sessions"`` or
+        ``"docs"`` — or ``None`` when the name is not this plugin's at all.
+    """
+    for separator in ("_", "-"):
+        if not name.startswith(f"{prefix}{separator}"):
+            continue
+        rest = name[len(prefix) + 1 :]
+        if rest.endswith(f"_{_SESSIONS_SUFFIX}") or rest.endswith(f"-{_SESSIONS_SUFFIX}"):
+            return "sessions"
+        if rest.endswith(f"_{_DOCS_SUFFIX}") or rest.endswith(f"-{_DOCS_SUFFIX}"):
+            return "docs"
+        return "repository"
+    return None
+
+
+def _collection_layout(value: Any, label: str) -> str:
+    """Read one of :data:`COLLECTION_LAYOUTS`; anything else is a typo."""
+    text = str(value or "").strip().lower()
+    if text not in COLLECTION_LAYOUTS:
+        raise ValueError(
+            f"{label} must be one of {list(COLLECTION_LAYOUTS)}, got {value!r}"
+        )
+    return text
+
 
 #: Ceiling of one read call, so a typo cannot stall a request.
 _MAX_SSE_TIMEOUT_SECONDS = 10.0
@@ -363,6 +437,12 @@ class AgenticKnowledgeConfig:
     enabled: bool = True
     adapters: Tuple[str, ...] = ("codex",)
     collection_prefix: str = _DEFAULT_COLLECTION_PREFIX
+    #: How a repository's documents are spread over collections; see
+    #: :data:`COLLECTION_LAYOUT_SINGLE` and :data:`COLLECTION_LAYOUT_SPLIT`.
+    #: It is a property of the **data at rest**, not of a request: the layout
+    #: the worker indexed with is the layout the reader must ask with, so a
+    #: deployment switching it switches both sides at once and re-indexes.
+    collection_layout: str = _DEFAULT_COLLECTION_LAYOUT
     key_prefix: str = _DEFAULT_KEY_PREFIX
 
     scope_strategy: str = "repo_basename"
@@ -534,6 +614,10 @@ class AgenticKnowledgeConfig:
                 str(data.get("collection_prefix", _DEFAULT_COLLECTION_PREFIX)),
                 "collection_prefix",
             ),
+            collection_layout=_collection_layout(
+                data.get("collection_layout", _DEFAULT_COLLECTION_LAYOUT),
+                "collection_layout",
+            ),
             scope_strategy=strategy,
             scope_overrides=_overrides(scope.get("overrides", {})),
             scope_default=str(scope.get("default", "") or ""),
@@ -680,6 +764,9 @@ class AgenticKnowledgeConfig:
             # a hyphen from the environment would reach a creation the engine
             # refuses with a 500.
             ("COLLECTION_PREFIX", "collection_prefix", _engine_collection_fragment),
+            # The layout is validated, not reduced: a typo would silently read
+            # one repository's documents out of a collection nobody indexes.
+            ("COLLECTION_LAYOUT", "collection_layout", _collection_layout),
             ("KEY_PREFIX", "key_prefix", _safe),
             ("SSE_API_HOST", "sse_host", _text),
             ("SSE_API_PREFIX", "sse_prefix", _text),
@@ -1001,15 +1088,37 @@ class AgenticKnowledgeConfig:
             if fragment
             else self.collection_prefix
         )
+        if self.collection_layout == COLLECTION_LAYOUT_SINGLE:
+            # One collection per repository, every kind inside it.  What keeps
+            # the kinds apart is their engine ``category``, which a search
+            # names and the engine resolves to a document set *before* it
+            # scores — a boundary as hard as a collection of one's own, asked
+            # for per request rather than baked into a name.  What this gives
+            # up is nothing the reader used: one embedder, one chunking and one
+            # ``min_similarity`` already served all three collections, and
+            # isolation between repositories was never a filter, it was the
+            # fact that there is one collection per repository.
+            return base
         if kind == "session_archive":
-            return f"{base}_sessions"
+            return f"{base}_{_SESSIONS_SUFFIX}"
         if kind == "doc":
             # Documentation lives apart from mined knowledge: it is written
             # on a different clock (a human edits a README) and it is the
             # only kind a mode restricts by doc_type, which is one metadata
             # request the engine answers in one collection.
-            return f"{base}_docs"
+            return f"{base}_{_DOCS_SUFFIX}"
         return base
+
+    @property
+    def uses_single_collection(self) -> bool:
+        """Whether every kind of this repository shares one collection.
+
+        Two consumers must ask this rather than assume a name shape: retention,
+        which under one collection may only age the documents of the archive's
+        kind, and the worker, which can no longer discover an archive by the
+        ``_sessions`` suffix of its name.
+        """
+        return self.collection_layout == COLLECTION_LAYOUT_SINGLE
 
     @property
     def served_adapters(self) -> Tuple[str, ...]:
@@ -1046,6 +1155,7 @@ _POLICY_KEYS = frozenset(
         "description",
         "adapters",
         "collection_prefix",
+        "collection_layout",
         "scope",
         "read",
         "modes",

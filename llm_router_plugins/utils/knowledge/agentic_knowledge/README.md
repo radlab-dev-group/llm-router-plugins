@@ -178,20 +178,38 @@ the scope is unknown, and both reads and writes are skipped (`scope: ""` in the 
 
 ### Collections and documents
 
-| Kind              | Collection                       | Produced by                                          |
-|-------------------|----------------------------------|--------------------------------------------------------|
-| `recipe`          | `<prefix>_<scope>`               | `test_failure → patch → test pass`                      |
-| `playbook`        | `<prefix>_<scope>`               | `patch → test pass` with no failure in between — the correct steps |
-| `deadend`         | `<prefix>_<scope>`               | a repeated failure, a dead end                          |
-| `doc`             | `<prefix>_<scope>_docs`          | the repository's markdown — [Documentation](#documentation-doc) |
-| `session_archive` | `<prefix>_<scope>_sessions`      | a request classified `compaction`                       |
+| Kind              | Category (engine)  | Produced by                                          |
+|-------------------|--------------------|--------------------------------------------------------|
+| `recipe`          | `recipe`           | `test_failure → patch → test pass`                      |
+| `playbook`        | `playbook`         | `patch → test pass` with no failure in between — the correct steps |
+| `deadend`         | `deadend`          | a repeated failure, a dead end                          |
+| `doc`             | `doc`              | the repository's markdown — [Documentation](#documentation-doc) |
+| `session_archive` | `session_archive`  | a request classified `compaction`                       |
 
-Default `<prefix>` is `agentic_kb`. A collection is `<prefix>_<scope>` (and
-`<prefix>_<scope>_sessions` for the archive, `<prefix>_<scope>_docs` for the
-repository's own documentation); the engine's character set —
-letters, digits, `_`, `.` — is enforced at configuration time, **on both the
-prefix and the scope**, because the scope is a checkout's directory name and
-the engine refuses a hyphen (a 500) in a collection name: `llm-router` becomes
+One collection per repository, `<prefix>_<scope>`: every kind above is
+written into it, told apart by its engine **category** rather than by the name
+of the collection. The separation is as hard as a collection was — a search
+names the categories it asks for, and the engine resolves them to a set of
+document names *before* the vector leg scores anything
+(`semantic.py`: `documents_names_from_categories` → `search_in_documents`), so
+a request that did not ask for the documentation never sees it, and its
+`max_results` is spent within what survived the cut. One embedder, one
+chunking and one `min_similarity` already served all three collections, so the
+layout gives up nothing the reader used, and it leaves behind two collections
+per repository to create, prune and monitor.
+
+`"collection_layout": "split"` keeps the older three-collections spelling —
+`<prefix>_<scope>` for mined knowledge, `<prefix>_<scope>_sessions` for the
+archive, `<prefix>_<scope>_docs` for the documentation — for a deployment that
+was indexed with it: it changes only the names, and a search restricted to one
+collection and a search restricted to the matching categories of one collection
+return the same documents. The layout is a property of the data at rest, so a
+deployment switching it switches both the reader and the writer at once.
+
+Default `<prefix>` is `agentic_kb`. The engine's character set — letters,
+digits, `_`, `.` — is enforced at configuration time, **on both the prefix and
+the scope**, because the scope is a checkout's directory name and the engine
+refuses a hyphen (a 500) in a collection name: `llm-router` becomes
 `<prefix>_llm_router`. A document is named `<kind>:<YYYYMMDD>:<fingerprint>` —
 the day bucket is what retention ages on. Every entry is one document with its
 metadata in `metadata_json`, filtered by `eq`/`in`.
@@ -350,9 +368,12 @@ fallback or new quarantine queue; after the retry limit the event is dropped. Th
 ### Compaction archive
 
 A request classified `compaction` is **written, never read from**: the full window is chunked at message/tool-result
-boundaries (`archive.max_chunk_chars`) and indexed into `<prefix>_<scope>_sessions` with `thread_id`, `window_id` and
-`position`. The next `main` request of the same thread reads that collection filtered by `thread_id`, so the exact
-lines a summary dropped come back as `## Exact context from before compaction`.
+boundaries (`archive.max_chunk_chars`) and indexed into the repository's collection with category
+`session_archive` and the metadata `thread_id`, `window_id` and `position`. The next `main` request of the same
+thread reads that category filtered by `thread_id`, so the exact lines a summary dropped come back as
+`## Exact context from before compaction`. The filter is what keeps the archive to one thread: the mined knowledge in
+the same collection carries a `thread_id` of its own, so a request that asked for both categories and one thread
+would silently narrow the knowledge to that thread — which is why the builder never does.
 
 ### Documentation (`doc`)
 
@@ -426,7 +447,7 @@ asked for in full.
 | Cheap          | Built from the listing the scan already made, and read from Redis (`<key_prefix>:docs:context:<scope>`, TTL `docs.context_ttl_seconds`) by every other request of the session — one `GET`, no filesystem walk per command. |
 
 Two levels, by design: the **map** (always present, `docs.context_max_chars`) and the **deep
-chunks** (what the query matches, in `<prefix>_<scope>_docs`). The annotation reports which was
+chunks** (what the query matches, in the repository's collection under category `doc`). The annotation reports which was
 injected:
 
 ```jsonc
@@ -534,7 +555,8 @@ Policy is JSON (reviewable, versionable, no secrets); every connection is ENV on
 built-in defaults**. A value present but malformed is an error, except connection settings, where a missing host just
 means the feature is unavailable.  `read.timeout_seconds` is the budget a whole request may spend on the engine, and a
 search starts only while a whole call — `SSE_API_TIMEOUT` — still fits before it ends.  It is therefore a *sum* of
-calls, not a per-call number: the shipped policy reads up to three collections per mode and budgets three calls of the
+calls, not a per-call number: the shipped policy asks up to three questions of the repository's collection per mode
+and budgets three calls of the
 two-second default.  A budget that equals one call is raised at validation by a small margin, because the deadline is
 read from the clock a moment before a call is made and a budget with no room over it would start no search of any
 request.  When the budget cannot hold every call of a mode, the later ones are not started and the plugin says so once
@@ -681,7 +703,7 @@ Redis settings come from these fixed variables only — never from JSON, a Redis
 
 The same `max_tokens_in_chunk` and `number_of_overlap_tokens` are sent when a collection is **created** and on every
 indexing request. Changing `…_SSE_CHUNK_TOKENS`/`…_SSE_CHUNK_OVERLAP` does not rewrite an existing collection or its
-documents: recreate and re-index the affected collections (including `_docs` and `_sessions`) to keep them consistent. The
+documents: recreate and re-index the affected collection to keep it consistent. The
 default 400/60 sits under the 508 tokens the embedder cuts at, which a chunk of the engine's 500 default does not.
 
 CLI (worker): `--config <path>`, `--once` (drain one batch and exit — cron friendly), `--no-retain`, `--log-level`.
@@ -771,7 +793,8 @@ cannot be seen. Claude Code requests read the shared knowledge base; they do not
 - Paths outside `repo_root` are dropped from metadata; only paths relative to the repository are stored. Absolute paths
   and the declared working directory are never indexed.
 - Annotation and logs carry no document content, no tokens, no hosts, no full session ids.
-- Retention deletes only documents of this plugin's own collections. `session_archive` ages on `archive.ttl_seconds`
+- Retention deletes only documents of this plugin's own collections, and only of the kind it names.
+  `session_archive` ages on `archive.ttl_seconds`
   (default 14 days), which is the shortest-lived and largest-volume kind.
 - Masking is **rule-based, not semantic**. Fixtures with production data are not safe here: do not enable the layer on
   repositories whose test data carries real customer content.

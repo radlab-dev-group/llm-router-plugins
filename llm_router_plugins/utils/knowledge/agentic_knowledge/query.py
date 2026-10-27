@@ -38,6 +38,13 @@ __all__ = ["QueryBuilder"]
 #: Ceiling of the free-text part of a query.
 _MAX_TEXT_CHARS = 600
 
+#: The three groups of sources one turn asks about; see :func:`_bucket`.  They
+#: key the grouping of requests and are never sent to the engine, which sees
+#: categories and metadata filters instead.
+_BUCKET_KNOWLEDGE = "knowledge"
+_BUCKET_ARCHIVE = "archive"
+_BUCKET_DOC = "doc"
+
 #: Ceiling of one query overall.
 _MAX_QUERY_CHARS = 900
 
@@ -81,7 +88,7 @@ class QueryBuilder:
         Returns
         -------
         Tuple[SearchRequest, ...]
-            One request per collection; empty when the turn has nothing
+            One request per source group; empty when the turn has nothing
             searchable or the scope is unknown.
         """
         if not turn.scope:
@@ -91,6 +98,11 @@ class QueryBuilder:
             return ()
         grouped: Dict[str, List[str]] = {}
         limits: Dict[str, int] = {}
+        # Which collection each group is asked of.  Grouping is by what a
+        # request has to *be*, not by where the documents live: with one
+        # collection per repository the three groups share a name, and only
+        # their categories and filters differ.
+        collections: Dict[str, str] = {}
         # A missing key is "restrictions of the sources seen so far"; ``None``
         # is "any".  One source that does not restrict makes the whole
         # collection unrestricted, because both are retrieved by one request
@@ -106,7 +118,8 @@ class QueryBuilder:
                 # Without a thread there is nothing to restrict the archive to,
                 # and an unfiltered archive is another team's conversation.
                 continue
-            name = str(self.collection_namer(turn.scope, kind))
+            name = _bucket(kind)
+            collections.setdefault(name, str(self.collection_namer(turn.scope, kind)))
             kinds = grouped.setdefault(name, [])
             # A policy may list one category twice; keeping it once means the
             # "archive-only?" test below reads the set of kinds, not their
@@ -150,7 +163,7 @@ class QueryBuilder:
             restricted_types = doc_type_limits.get(name)
             requests.append(
                 SearchRequest(
-                    collection=name,
+                    collection=collections.get(name, name),
                     # Documentation is retrieved on the turn's subject, not on
                     # its failure; everything else keeps the mode-shaped query.
                     query=self.docs_query_for(turn) if documented else query,
@@ -254,6 +267,34 @@ def _is_documentation(categories: Sequence[str]) -> bool:
     default.
     """
     return tuple(str(kind) for kind in categories) == (KIND_DOC,)
+
+
+def _bucket(kind: str) -> str:
+    """
+    Return the group of sources one document kind belongs to.
+
+    Three groups, and they are not a restatement of the collections: each is a
+    different **request**, because it needs a different thing of the engine.
+    Mined knowledge is asked with the mode's own query and no metadata filter;
+    an archived window is asked with the same query but restricted to one
+    thread; documentation is asked with the turn's subject — the user's words
+    and the paths — and restricted by ``doc_type``.  Under the split layout the
+    groups happen to land in three collections; under one collection per
+    repository they share a name, and only the categories and the filters tell
+    them apart.
+
+    The groups never merge, and that is not a stylistic choice.  A request
+    carries at most one metadata filter, and the engine intersects filter
+    families while unioning the filters inside the metadata family — so an
+    archive request that also asked for mined knowledge would cut the mined
+    documents to the ones sharing this ``thread_id``, silently dropping every
+    recipe mined in an earlier session.
+    """
+    if kind == KIND_SESSION_ARCHIVE:
+        return _BUCKET_ARCHIVE
+    if kind == KIND_DOC:
+        return _BUCKET_DOC
+    return _BUCKET_KNOWLEDGE
 
 
 def _stems(paths: Sequence[str]) -> List[str]:
