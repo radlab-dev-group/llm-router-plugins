@@ -69,6 +69,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
+    is_collection_of,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     ENGINE_NAME_SUFFIX,
@@ -945,7 +946,9 @@ class KnowledgeIndexWorker:
             return result
         for collection in self._archive_collections():
             try:
-                result["deleted"] += self._delete_older(collection, cutoff)
+                result["deleted"] += self._delete_older(
+                    collection, cutoff, kinds=(KIND_SESSION_ARCHIVE,)
+                )
             except Exception as exc:
                 self._log(
                     "warning",
@@ -970,21 +973,29 @@ class KnowledgeIndexWorker:
         the pass degrades to the in-process scopes rather than doing nothing.
         """
         found: set = set()
+        prefix = self._config.collection_prefix
+        single = self._config.uses_single_collection
         lister = getattr(self._sse, "list_collections", None)
         if callable(lister):
             try:
-                # The engine-safe name is ``prefix_<scope>_sessions``; a
-                # release before the engine's character set was enforced
-                # created ``prefix-<scope>-sessions`` instead, and those
-                # archives still age out through the same clock.
-                prefix = self._config.collection_prefix
+                # The engine-safe name of an archive is
+                # ``prefix_<scope>_sessions``; a release before the engine's
+                # character set was enforced created
+                # ``prefix-<scope>-sessions`` instead, and those archives still
+                # age out through the same clock.  A listing is read for both
+                # layouts, because a deployment that moved to one collection
+                # per repository still has the split archives it wrote before
+                # the move, and nothing else will ever delete them.
                 for entry in lister() or ():
                     name = getattr(entry, "name", "") or str(entry)
-                    if (
-                        name.startswith(f"{prefix}_") and name.endswith("_sessions")
-                    ) or (
-                        name.startswith(f"{prefix}-") and name.endswith("-sessions")
-                    ):
+                    kind = is_collection_of(name, prefix)
+                    if kind == "sessions":
+                        found.add(name)
+                    elif single and kind == "repository":
+                        # Under one collection the archive has no name of its
+                        # own to be found by.  Sweeping the repository's
+                        # collection is safe because the deletion it drives is
+                        # restricted to the archive's document kind.
                         found.add(name)
             except Exception as exc:  # a listing failure narrows, never crashes
                 self._log(
@@ -998,8 +1009,29 @@ class KnowledgeIndexWorker:
         )
         return sorted(found)
 
-    def _delete_older(self, collection: str, cutoff: date) -> int:
-        """Delete this plugin's documents in a collection published before *cutoff*."""
+    def _delete_older(
+        self,
+        collection: str,
+        cutoff: date,
+        kinds: Tuple[str, ...] = (KIND_SESSION_ARCHIVE,),
+    ) -> int:
+        """
+        Delete this plugin's documents **of the given kinds** older than *cutoff*.
+
+        The kinds are named because one collection now holds several of them and
+        they age on different clocks.  An archived window expires after
+        ``write.archive.ttl_seconds``; a repository's documentation expires when
+        a human deletes the file, and mined recipes are retired by being
+        superseded, not by ageing.  A fourteen-day clock applied to a README is
+        how a project loses its conventions on a Tuesday — and under one
+        collection per repository the README and the window are neighbours, so
+        the clock has to name what it is allowed to delete.
+
+        Defaulting to the archive's kind is deliberate: a caller that forgets
+        the argument ages out conversation windows it meant to age out, rather
+        than the only documents in the collection that no re-scan will bring
+        back.
+        """
         details = self._sse.list_document_details(collection)
         stale: List[str] = []
         for ref in details or ():
@@ -1007,6 +1039,8 @@ class KnowledgeIndexWorker:
             if not is_knowledge_document(name):
                 continue
             meta = parse_document_name(name)
+            if meta.kind not in kinds:
+                continue
             if meta.date is not None and meta.date < cutoff:
                 stale.append(name)
         if not stale:
