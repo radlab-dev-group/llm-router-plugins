@@ -149,7 +149,13 @@ def test_archive_source_is_restricted_to_the_thread():
     plugin.apply(main_payload(mode="debug"))
     archive = [r for r in store.requests if "session_archive" in r.categories]
     assert archive and all(r.thread_id == "thread-1" for r in archive)
-    assert any(r.collection.endswith("_sessions") for r in archive)
+    # The restriction is a filter on the request, not a name on the
+    # collection: with one collection per repository the archive and the
+    # mined knowledge are neighbours, and only the thread keeps them apart.
+    knowledge = [
+        r for r in store.requests if "session_archive" not in r.categories
+    ]
+    assert all(r.thread_id == "" for r in knowledge)
 
 
 def test_injection_is_idempotent_within_one_generation():

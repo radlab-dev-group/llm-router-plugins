@@ -97,27 +97,73 @@ def test_a_budget_bigger_than_one_call_is_kept():
     assert config.read_timeout_seconds == 6.0
 
 
-def test_collection_names_separate_the_session_archive():
-    config = knowledge_config()
+def test_the_split_layout_gives_each_kind_its_own_collection():
+    """The layout a deployment was indexed with, kept readable and reversible."""
+    config = knowledge_config(collection_layout="split")
     assert config.collection("webapp", "recipe") == "agentic_kb_webapp"
     assert (
         config.collection("webapp", "session_archive")
         == "agentic_kb_webapp_sessions"
     )
+    assert config.collection("webapp", "doc") == "agentic_kb_webapp_docs"
 
 
-def test_collection_names_separate_the_documentation():
-    """Documentation lives apart from mined knowledge.
+def test_the_single_layout_gives_a_repository_one_collection():
+    """One collection per project, its kinds separated by engine category.
 
-    One search request carries one metadata dimension, so a mode that reads
-    only the guides of a repository can restrict by doc_type in one request
-    only when nothing else shares the request; giving the documentation its own
-    collection is what buys that, and it re-indexes as a set besides.
+    A category is a boundary of the same hardness: the engine turns it into a
+    set of document names before it scores anything, so a search that asked for
+    recipes never sees the READMEs of the same repository.  What the layout
+    gives up is only the collections themselves — the embedder, the chunking
+    and the similarity floor were always one setting shared by all three.
     """
     config = knowledge_config()
-    assert config.collection("webapp", "doc") == "agentic_kb_webapp_docs"
-    assert config.collection("", "doc") == "agentic_kb_docs"
-    assert config.collection("web-app", "doc") == "agentic_kb_web_app_docs"
+    assert config.uses_single_collection is True
+    assert config.collection("webapp", "recipe") == "agentic_kb_webapp"
+    assert config.collection("webapp", "session_archive") == "agentic_kb_webapp"
+    assert config.collection("webapp", "doc") == "agentic_kb_webapp"
+
+
+def test_the_layout_reduces_to_the_engine_spelling_of_a_scope():
+    config = knowledge_config()
+    assert config.collection("", "doc") == "agentic_kb"
+    assert config.collection("web-app", "doc") == "agentic_kb_web_app"
+
+
+def test_an_unknown_layout_is_a_typo_not_a_default():
+    """Guessing here would read a repository out of a collection nobody writes."""
+    for raw in ('{"collection_layout": "merged"}', '{"collection_layout": ""}'):
+        try:
+            AgenticKnowledgeConfig.from_json(raw)
+        except ValueError as exc:
+            assert "collection_layout" in str(exc)
+        else:
+            raise AssertionError(f"{raw} was accepted")
+
+
+def test_is_collection_of_recognises_both_layouts_and_both_separators():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        is_collection_of,
+    )
+
+    assert is_collection_of("agentic_kb_webapp", "agentic_kb") == "repository"
+    assert is_collection_of("agentic_kb_webapp_sessions", "agentic_kb") == "sessions"
+    assert is_collection_of("agentic_kb_webapp_docs", "agentic_kb") == "docs"
+    # Written before the engine's character set was enforced.
+    assert is_collection_of("agentic_kb_web-sessions", "agentic_kb") == "sessions"
+    assert is_collection_of("someone_elses_index", "agentic_kb") is None
+
+
+def test_the_layout_arrives_from_the_environment():
+    import os
+
+    os.environ["LLM_ROUTER_KNOWLEDGE_AGENTIC_COLLECTION_LAYOUT"] = "split"
+    try:
+        config = knowledge_config()
+        config.override_from_env()
+        assert config.collection_layout == "split"
+    finally:
+        del os.environ["LLM_ROUTER_KNOWLEDGE_AGENTIC_COLLECTION_LAYOUT"]
 
 
 def test_a_doc_source_can_list_the_kinds_it_reads():
@@ -297,8 +343,12 @@ def test_a_hyphenated_repo_scope_gets_an_engine_safe_collection(monkeypatch):
         config.collection("llm-router-plugins", "recipe")
         == "agentic_kb_llm_router_plugins"
     )
+    # The shipped layout gives a repository one collection; the split spelling
+    # is still readable, for a deployment indexed with it.
+    split = AgenticKnowledgeConfig.from_file()
+    split.collection_layout = "split"
     assert (
-        config.collection("kb-probe", "session_archive")
+        split.collection("kb-probe", "session_archive")
         == "agentic_kb_kb_probe_sessions"
     )
     for scope in ("kb-probe", "llm-router", "a--b"):

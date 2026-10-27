@@ -57,7 +57,7 @@ def test_archive_requests_are_restricted_to_the_thread():
     requests = builder().build(turn, knowledge_config().modes["debug"])
     archive = [r for r in requests if "session_archive" in r.categories]
     assert archive and all(r.thread_id == "thread-1" for r in archive)
-    assert any(r.collection.endswith("_sessions") for r in archive)
+
 
 
 def test_non_archive_requests_are_not_thread_restricted():
@@ -65,6 +65,44 @@ def test_non_archive_requests_are_not_thread_restricted():
     requests = builder().build(turn, knowledge_config().modes["debug"])
     non_archive = [r for r in requests if "session_archive" not in r.categories]
     assert all(r.thread_id == "" for r in non_archive)
+
+
+def test_a_thread_restriction_never_mixes_the_archive_with_knowledge():
+    """
+    The engine intersects filter families, so a request that carries a
+    ``thread_id`` and asks for more than the archive would cut the mined
+    knowledge to the documents sharing this thread — silently dropping every
+    recipe mined in an earlier session.  The builder must not produce one:
+    a request that names a thread names only the archive's category.
+    """
+    turn = turn_for(mode="debug")
+    for policy in (
+        knowledge_config().modes["debug"],
+        knowledge_config(collection_layout="split").modes["debug"],
+    ):
+        for request in builder().build(turn, policy):
+            if request.thread_id:
+                assert set(request.categories) == {"session_archive"}, request
+
+
+def test_one_repository_collection_still_answers_three_requests():
+    """Merged collections, not merged requests: the filters do the separating."""
+    requests = builder().build(turn_for(mode="debug"), knowledge_config().modes["debug"])
+    assert len(requests) == 3
+    assert {request.collection for request in requests} == {"agentic_kb_webapp"}
+    assert {tuple(sorted(request.categories)) for request in requests} == {
+        ("deadend", "playbook", "recipe"),
+        ("doc",),
+        ("session_archive",),
+    }
+    # Each request keeps its own metadata dimension: the thread on the archive,
+    # the doc types on the documentation, nothing on the mined knowledge.
+    by_categories = {request.categories: request for request in requests}
+    assert by_categories[("session_archive",)].thread_id == "thread-1"
+    assert by_categories[("doc",)].doc_types == ("guide", "note")
+    knowledge = by_categories[("recipe", "deadend", "playbook")]
+    assert knowledge.thread_id == ""
+    assert knowledge.doc_types == ()
 
 
 def _rebuild(turn, **overrides):
@@ -263,7 +301,8 @@ def _policy(*sources):
     return ModePolicy(name="implement", sources=tuple(sources))
 
 
-def test_documentation_is_searched_in_its_own_collection():
+def test_documentation_is_its_own_request():
+    """The request, not the collection, is what separates prose from knowledge."""
     from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
         SourcePolicy,
     )
@@ -272,11 +311,16 @@ def test_documentation_is_searched_in_its_own_collection():
         turn_for(), _policy(SourcePolicy(category="doc", weight=0.5))
     )
     assert len(requests) == 1
-    assert requests[0].collection == "agentic_kb_webapp_docs"
+    assert requests[0].collection == "agentic_kb_webapp"
     assert requests[0].categories == ("doc",)
 
 
 def test_documentation_and_knowledge_are_two_requests():
+    """
+    One request carries one query and one metadata dimension, so the
+    documentation's doc_type and the mined knowledge's failure signature never
+    share one — whatever collection the layout gives them.
+    """
     from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
         SourcePolicy,
     )
@@ -288,10 +332,11 @@ def test_documentation_and_knowledge_are_two_requests():
             SourcePolicy(category="doc", weight=0.5, doc_types=("guide",)),
         ),
     )
-    by_collection = {request.collection: request for request in requests}
-    assert set(by_collection) == {"agentic_kb_webapp", "agentic_kb_webapp_docs"}
-    assert by_collection["agentic_kb_webapp"].doc_types == ()
-    assert by_collection["agentic_kb_webapp_docs"].doc_types == ("guide",)
+    assert len(requests) == 2
+    by_categories = {request.categories: request for request in requests}
+    assert set(by_categories) == {("recipe",), ("doc",)}
+    assert by_categories[("recipe",)].doc_types == ()
+    assert by_categories[("doc",)].doc_types == ("guide",)
 
 
 def test_the_documentation_query_carries_no_failure_signature():

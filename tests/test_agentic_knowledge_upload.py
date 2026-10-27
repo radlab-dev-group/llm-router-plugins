@@ -45,8 +45,8 @@ class UploadSSE(FakeSSE):
         self.uploads.append((collection, files, indexing_options, file_metadata))
 
 
-def make_worker(sse, redis=None, chunk_tokens=400, chunk_overlap=60):
-    config = knowledge_config()
+def make_worker(sse, redis=None, chunk_tokens=400, chunk_overlap=60, config=None):
+    config = config or knowledge_config()
     config.worker = dataclasses.replace(
         config.worker,
         embedder="embed",
@@ -85,7 +85,10 @@ def test_full_file_upload_uses_collection_chunking(
     assert sse.indexed == []
     assert len(sse.uploads) == 1
     collection, files, options, metadata = sse.uploads[0]
-    assert collection == "agentic_kb_demo_docs"
+    # One collection per repository: the document's kind is carried by its
+    # category, not by the name of the collection it is written into.
+    assert collection == "agentic_kb_demo"
+    assert metadata[files[0][0]]["category"] == "doc"
     assert len(files) == 1
     name, content, mime = files[0]
     assert name.startswith("doc:") and name.endswith(".txt")
@@ -120,9 +123,13 @@ def test_multiple_files_share_one_upload_per_collection():
         [(str(i), stream_message(e)) for i, e in enumerate(events)]
     ) == (3, 3)
     assert [(call[0], len(call[1])) for call in sse.uploads] == [
-        ("agentic_kb_alpha_docs", 2),
-        ("agentic_kb_beta_docs", 1),
+        ("agentic_kb_alpha", 2),
+        ("agentic_kb_beta", 1),
     ]
+    # The kinds are carried by the category, which a search resolves to a
+    # document set before scoring — not by the name of the collection.
+    _collection, _files, _options, metadata = sse.uploads[0]
+    assert all(m["category"] == "doc" for m in metadata.values())
     assert redis.acked == ["0", "1", "2"]
     assert sse.indexed == []
 
@@ -137,10 +144,11 @@ def test_documents_and_mined_events_use_their_own_endpoints():
         [(str(i), stream_message(e)) for i, e in enumerate(events)]
     ) == (3, 3)
     assert len(sse.uploads) == 1
-    assert [call[0] for call in sse.indexed] == [
-        "agentic_kb_webapp",
-        "agentic_kb_webapp_sessions",
-    ]
+    # One collection per repository: the mined event goes through the text
+    # endpoint, the document through the upload, and both land in the
+    # repository's collection, told apart by category.
+    assert sse.uploads[0][0] == "agentic_kb_webapp"
+    assert [call[0] for call in sse.indexed] == ["agentic_kb_webapp"]
 
 
 def test_duplicate_deliveries_do_not_duplicate_attachments():
@@ -172,7 +180,7 @@ def test_conflicting_attachments_are_not_uploaded_or_acknowledged(target):
 
 
 def test_existing_collection_still_receives_configured_chunking():
-    sse = UploadSSE(exists=("agentic_kb_webapp_docs",))
+    sse = UploadSSE(exists=("agentic_kb_webapp",))
     worker = make_worker(sse, chunk_tokens=900, chunk_overlap=120)
     worker.index_event(knowledge_event(kind="doc"))
     assert sse.creation_options == []
@@ -241,7 +249,7 @@ def test_prune_recognizes_uploaded_and_legacy_document_names():
         "doc:20261010:old.input_text",
         "doc:20261010:keep.txt",
     ]
-    sse = UploadSSE(names={"agentic_kb_webapp_docs": names})
+    sse = UploadSSE(names={"agentic_kb_webapp": names})
     make_worker(sse).index_event(prune_event("webapp", ["doc:20261010:old"]))
-    assert sse.deleted == [("agentic_kb_webapp_docs", names[:2])]
+    assert sse.deleted == [("agentic_kb_webapp", names[:2])]
     assert sse.uploads == sse.indexed == []

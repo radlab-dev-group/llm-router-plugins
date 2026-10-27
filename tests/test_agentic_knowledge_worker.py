@@ -104,11 +104,28 @@ def test_indexes_a_recipe_event_into_the_scope_collection():
     assert documents[0]["category"] == "recipe"
 
 
-def test_session_archive_goes_to_the_sessions_collection():
+def test_the_split_layout_writes_an_archive_to_its_own_collection():
     _processed, _redis, sse = run_event(
-        knowledge_event(kind="session_archive", scope="webapp")
+        knowledge_event(kind="session_archive", scope="webapp"),
+        config=knowledge_config(collection_layout="split"),
     )
     assert sse.indexed[0][0] == "agentic_kb_webapp_sessions"
+
+
+def test_the_single_layout_writes_every_kind_to_one_collection():
+    """One collection per repository; the category is what tells the kinds apart.
+
+    The category is not a label bolted onto the text: a search names it and the
+    engine resolves it to a document set before scoring, so writing a window and
+    a recipe into one collection does not make a recipe search see the window.
+    """
+    for kind in ("recipe", "deadend", "playbook", "session_archive"):
+        _processed, _redis, sse = run_event(
+            knowledge_event(kind=kind, scope="webapp")
+        )
+        collection, documents = sse.indexed[0]
+        assert collection == "agentic_kb_webapp", kind
+        assert documents[0]["category"] == kind
 
 
 def test_document_name_carries_kind_date_and_fingerprint():
@@ -678,7 +695,7 @@ def test_malformed_or_unversioned_message_is_acked_and_skipped():
 
 
 def test_retention_deletes_expired_archived_documents():
-    config = knowledge_config()
+    config = knowledge_config(collection_layout="split")
     config = dataclasses.replace(config)
     config.archive_ttl_seconds = 7 * 86400
     sse = FakeSSE()
@@ -695,6 +712,32 @@ def test_retention_deletes_expired_archived_documents():
     assert result["deleted"] == 1
     assert sse.deleted == [
         ("agentic_kb_webapp_sessions", [f"session_archive:{old}:old"])
+    ]
+
+
+def test_retention_does_not_age_documentation_that_shares_the_collection():
+    """
+    One collection now holds the repository's documentation next to the
+    archive, on different clocks.  The documentation ages when a human deletes
+    a file; the archive ages after ``write.archive.ttl_seconds``.  A pass that
+    looked only at the day in a document name would delete a year-old README
+    on a fourteen-day clock — which is why the deletion names its kind.
+    """
+    config = dataclasses.replace(knowledge_config())
+    config.archive_ttl_seconds = 7 * 86400
+    sse = FakeSSE()
+    work = worker(sse=sse, config=config)
+    work._scopes.add("webapp")
+    old = (datetime.date.today() - datetime.timedelta(days=30)).strftime("%Y%m%d")
+    sse.names["agentic_kb_webapp"] = [
+        f"session_archive:{old}:old",
+        f"doc:{old}:conventions",
+        f"recipe:{old}:fix",
+    ]
+    result = work.run_retention()
+    assert result["deleted"] == 1
+    assert sse.deleted == [
+        ("agentic_kb_webapp", [f"session_archive:{old}:old"])
     ]
 
 
@@ -956,7 +999,7 @@ def test_an_existing_collection_is_not_announced(caplog):
 
 
 def test_retention_says_what_it_deleted(caplog):
-    config = dataclasses.replace(knowledge_config())
+    config = dataclasses.replace(knowledge_config(collection_layout="split"))
     config.archive_ttl_seconds = 7 * 86400
     sse = FakeSSE()
     work = worker(sse=sse, config=config)

@@ -556,13 +556,13 @@ def test_a_doc_event_is_indexed_into_the_scopes_collection():
         scope="webapp",
         agent="codex",
     )[0]
-    worker = _worker(sse=sse)
+    worker = _worker(sse=sse, config=knowledge_config(collection_layout="split"))
     worker.index_event(event)
 
     collection, files, metadata = sse.uploaded[0]
-    # Documentation is indexed apart from mined knowledge: it is written on a
-    # human's clock, re-indexed as a set, and read with its own metadata
-    # restriction, so it lives in a collection of its own.
+    # The split layout writes documentation apart from mined knowledge: it is
+    # written on a human's clock, re-indexed as a set, and read with its own
+    # metadata restriction, so it lives in a collection of its own.
     assert collection == "agentic_kb_webapp_docs"
     assert len(files) == 1
     name, content, mime = files[0]
@@ -583,7 +583,9 @@ def test_a_prune_event_deletes_the_documents_the_engine_holds():
         }
     )
     worker = KnowledgeIndexWorker(
-        config=knowledge_config(), redis_client=FakeRedis(), sse_client=sse
+        config=knowledge_config(collection_layout="split"),
+        redis_client=FakeRedis(),
+        sse_client=sse,
     )
     worker.index_event(_prune("doc:20261010:old1"))
 
@@ -664,8 +666,8 @@ def request_at(root):
     return codex_payload(base_items(cwd=str(root)))
 
 
-def _worker(sse):
-    config = knowledge_config()
+def _worker(sse, config=None):
+    config = config or knowledge_config()
     config.worker = dataclasses.replace(
         config.worker, embedder="bge-m3", reranker="bge-reranker-v2-m3"
     )
@@ -803,10 +805,12 @@ def test_documentation_is_searched_in_its_own_collection():
         request for request in store.requests if request.categories == ("doc",)
     ]
     assert len(documented) == 1
-    assert documented[0].collection == "agentic_kb_webapp_docs"
     assert documented[0].doc_types == ("readme", "guide", "contributing")
+    # Documentation is asked for on its own request whatever the layout: one
+    # request carries one metadata dimension, and a request that mixed the
+    # documentation's doc_type with mined knowledge would widen one of them.
     mined = [request for request in store.requests if request.categories != ("doc",)]
-    assert all(request.collection != "agentic_kb_webapp_docs" for request in mined)
+    assert all("doc" not in request.categories for request in mined)
 
 
 def test_a_mode_without_documentation_asks_the_docs_collection_for_nothing():

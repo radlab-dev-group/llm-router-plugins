@@ -399,7 +399,9 @@ def test_force_rebuilds_deleted_database_through_worker(tmp_path, monkeypatch):
     assert make_worker(empty_database)._process_batch(
         list(redis.entries.items())
     ) == (1, 1)
-    assert empty_database.created == [("agentic_kb_demo_docs", "embed", "rerank")]
+    # The worker creates the collection the layout it reads names: one
+    # collection per repository, not one per document kind.
+    assert empty_database.created == [("agentic_kb_demo", "embed", "rerank")]
     assert empty_database.uploads == original.uploads
 
 
