@@ -349,9 +349,21 @@ class FakeRedis:
         self._maybe_fail("get")
         return self.kv.get(key)
 
-    def delete(self, key):
+    def delete(self, *keys):
         self._maybe_fail("delete")
-        self.kv.pop(key, None)
+        removed = 0
+        for key in keys:
+            if self.kv.pop(key, None) is not None:
+                removed += 1
+        return removed
+
+    def scan_iter(self, match=None, count=None):
+        self._maybe_fail("scan_iter")
+        import fnmatch
+
+        for key in sorted(self.kv):
+            if match is None or fnmatch.fnmatchcase(key, match):
+                yield key
 
     def xadd(self, key, fields, maxlen=None, approximate=False):
         self._maybe_fail("xadd")

@@ -50,6 +50,7 @@ __all__ = [
     "STATE_HIT",
     "STATE_MISS",
     "STATE_UNAVAILABLE",
+    "clear_memory_cache",
 ]
 
 #: A cached block was reused; no search was made.
@@ -443,6 +444,75 @@ def _decode_doc_context(raw: Any) -> Optional[DocContext]:
         fingerprint=str(raw.get("fingerprint") or ""),
         truncated=bool(raw.get("truncated")),
     )
+
+
+#: The key namespaces that hold only cached state, each rebuildable by the
+#: layer itself: a generation's assembled context, a repository's scanned
+#: documentation (the scan state ``docs:<scope>`` and the standing digest
+#: ``docs:context:<scope>`` under one pattern), and the publisher's
+#: deduplication claims, which would otherwise swallow a re-publication of
+#: unchanged documentation as "already seen".  What is deliberately absent is
+#: the event stream and the consumer group, which are a queue, not a cache —
+#: cleaning them would lose episodes that were published and not yet indexed —
+#: and the worker's attempt counters, which belong to stream entries.
+CACHE_NAMESPACES: Tuple[str, ...] = ("ctx", "docs", "seen")
+
+
+def clear_memory_cache(
+    client: Any,
+    key_prefix: str,
+    namespaces: Tuple[str, ...] = CACHE_NAMESPACES,
+    batch_size: int = 500,
+) -> Dict[str, int]:
+    """
+    Delete every cached key of one plugin's namespaces and count them.
+
+    The key is built from a literal namespace segment, never from a bare
+    ``*`` over the whole prefix: the event stream lives in the same database
+    and its name is not a cache, so a wildcard the operator cannot see must
+    not reach it.  Deletion runs over ``SCAN`` cursors in batches, which
+    neither blocks a busy server the way ``KEYS`` would nor load a large
+    keyspace into memory in one call.
+
+    Parameters
+    ----------
+    client : Any
+        A Redis client with ``scan_iter`` and ``delete``.
+    key_prefix : str
+        The namespace of this plugin's keys; empty input is refused rather
+        than scanned, because an empty prefix would widen the match beyond
+        what it names.
+    namespaces : Tuple[str, ...], optional
+        Which namespace segments to clear.
+    batch_size : int
+        How many keys one ``DELETE`` carries.
+
+    Returns
+    -------
+    Dict[str, int]
+        One count per namespace, in the order asked.
+
+    Raises
+    ------
+    ValueError
+        When *key_prefix* is empty.
+    """
+    if not str(key_prefix or "").strip():
+        raise ValueError("key_prefix must not be empty")
+    counts: Dict[str, int] = {}
+    for namespace in namespaces:
+        pattern = f"{key_prefix}:{namespace}:*"
+        removed = 0
+        batch: List[str] = []
+        for key in client.scan_iter(match=pattern, count=batch_size):
+            batch.append(key)
+            if len(batch) >= batch_size:
+                removed += int(client.delete(*batch) or 0)
+                batch = []
+        if batch:
+            removed += int(client.delete(*batch) or 0)
+        counts[namespace] = removed
+    return counts
 
 
 def _decode(raw: Any) -> Optional[CachedContext]:

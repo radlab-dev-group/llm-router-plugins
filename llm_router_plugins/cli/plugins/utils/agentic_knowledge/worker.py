@@ -67,6 +67,9 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
 from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
     CONTROL_DOCS_PRUNE,
 )
+from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
+    clear_memory_cache,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
     is_collection_of,
@@ -1056,6 +1059,41 @@ class KnowledgeIndexWorker:
         )
         return len(stale)
 
+    def clean_memory_cache(self) -> Dict[str, int]:
+        """
+        Delete this plugin's cached state in Redis and count what went.
+
+        The operator reaches for it after dropping a collection: the scan state
+        still says the documentation is indexed and the deduplication claims
+        still say its events were published, so nothing is written again until
+        every TTL expires on its own.  Clearing the cache turns that into the
+        next scan, at the price of re-indexing what the scan finds unchanged.
+
+        The stream, its consumer group and the per-entry attempt counters are
+        left alone — they are a queue and its bookkeeping, and emptying them
+        here would lose episodes that were published and never indexed.
+
+        Returns
+        -------
+        Dict[str, int]
+            Keys removed per cache namespace.
+
+        Raises
+        ------
+        Exception
+            When Redis could not be reached or the keys could not be deleted;
+            a cache the worker cannot clear is not a cache that was cleared.
+        """
+        counts = clear_memory_cache(self._redis_client(), self._config.key_prefix)
+        detail = ", ".join(f"{name}={count}" for name, count in counts.items())
+        self._log(
+            "info",
+            "knowledge cache cleared: %d key(s) removed (%s)",
+            sum(counts.values()),
+            detail,
+        )
+        return counts
+
     # --------------------------------------------------------- redis plumbing -
     def _ensure_group(self) -> None:
         """Create the consumer group once, tolerating that it already exists."""
@@ -1419,6 +1457,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the periodic retention pass.",
     )
     parser.add_argument(
+        "--clean-redis-memory-cache",
+        action="store_true",
+        help=(
+            "Delete this plugin's cached state in Redis before indexing: "
+            "assembled generations, scanned documentation and deduplication "
+            "claims. Use it after dropping a collection so unchanged "
+            "documentation is published again without waiting for the TTLs. "
+            "The event stream and its consumer group are left alone, so a "
+            "published but unindexed episode is not lost."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         default=None,
         help=(
@@ -1612,6 +1662,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     """
     args = build_parser().parse_args(argv)
     worker = _build_worker(args)
+    if args.clean_redis_memory_cache:
+        logger = logging.getLogger("agentic-kb-worker")
+        try:
+            worker.clean_memory_cache()
+        except Exception as exc:
+            # A cache the worker could not clear is a cache that was not
+            # cleared: continuing to index would leave the operator believing
+            # the stale scan state was gone.
+            logger.error("knowledge cache clean failed: %s", _describe(exc))
+            return 1
     if args.once:
         logger = logging.getLogger("agentic-kb-worker")
         try:

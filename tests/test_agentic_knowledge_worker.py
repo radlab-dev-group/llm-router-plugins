@@ -1060,3 +1060,99 @@ def test_describe_clips_a_page_of_html_from_a_proxy():
 
 def test_describe_on_a_messageless_exception_still_names_it():
     assert worker_cli._describe(RuntimeError()) == "RuntimeError"
+
+
+def test_cleaning_the_cache_removes_every_cached_namespace():
+    """
+    A dropped collection leaves the scan state and the deduplication claims
+    behind, and both of them say "already indexed" until their TTL expires:
+    nothing is written again, and the collection stays empty.  The clean is
+    what turns the next scan into a real re-index.
+    """
+    redis = FakeRedis()
+    redis.kv.update(
+        {
+            "agentic-kb:ctx:webapp:gen-1": "{}",
+            "agentic-kb:docs:webapp": "{}",
+            "agentic-kb:docs:context:webapp": "{}",
+            "agentic-kb:seen:9f2c1e": "1",
+        }
+    )
+    work = worker(redis=redis)
+
+    counts = work.clean_memory_cache()
+
+    assert counts == {"ctx": 1, "docs": 2, "seen": 1}
+    assert redis.kv == {}
+
+
+def test_cleaning_the_cache_leaves_the_stream_and_other_plugins_alone():
+    """
+    The stream is a queue, not a cache: an episode published and not yet
+    indexed is knowledge that has not happened yet, and emptying it here would
+    lose it.  So would a wildcard over the whole prefix, which is why the
+    namespaces are named one by one and a foreign key is verified untouched.
+    """
+    redis = FakeRedis()
+    redis.kv.update(
+        {
+            "agentic-kb:tries:kb-workers:1-0": "2",
+            "agentic_kb:events": "stream",
+            "llm-router:codex-routing:v1:sessions": "{}",
+            "agentic-kb:ctx:webapp:gen-1": "{}",
+        }
+    )
+    work = worker(redis=redis)
+
+    work.clean_memory_cache()
+
+    assert redis.kv == {
+        "agentic-kb:tries:kb-workers:1-0": "2",
+        "agentic_kb:events": "stream",
+        "llm-router:codex-routing:v1:sessions": "{}",
+    }
+
+
+def test_a_cache_that_cannot_be_cleared_is_reported_and_stops_the_run(
+    caplog, monkeypatch
+):
+    """
+    Indexing on after a failed clean would let the operator believe the stale
+    scan state was gone, so the failure is the story and the process stops.
+    """
+
+    class Broken(FakeRedis):
+        def scan_iter(self, match=None, count=None):
+            raise RuntimeError("redis is down")
+
+    built = worker(redis=Broken())
+    monkeypatch.setattr(worker_cli, "_build_worker", lambda args: built)
+    with caplog.at_level("ERROR"):
+        assert worker_cli.main(["--clean-redis-memory-cache", "--once"]) == 1
+    assert "redis is down" in caplog.text
+
+
+def test_the_clean_happens_before_the_batch_it_is_asked_to_drain(monkeypatch):
+    """
+    Cleaning and draining in one command is the operator's one-shot: the clean
+    has to be the thing that runs first, or the drain reads a stream nobody has
+    been made able to publish to again.
+    """
+    order = []
+
+    class Ordered(FakeRedis):
+        def scan_iter(self, match=None, count=None):
+            # One SCAN per cache namespace; the order of the sweep is what
+            # matters here, not how many namespaces it walked.
+            if not order:
+                order.append("clean")
+            return iter(())
+
+    built = worker(redis=Ordered())
+    monkeypatch.setattr(worker_cli, "_build_worker", lambda args: built)
+    monkeypatch.setattr(
+        built, "run_once", lambda block_ms=None: order.append("drain") or 0
+    )
+
+    assert worker_cli.main(["--clean-redis-memory-cache", "--once"]) == 0
+    assert order == ["clean", "drain"]
