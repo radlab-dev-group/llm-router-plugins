@@ -858,3 +858,63 @@ def test_the_documentation_search_is_not_the_failure_query():
     assert documented
     assert "rename the export helper" in documented[0].query
     assert "AssertionError" not in documented[0].query
+
+
+# --------------------------------------------------------- CLI --scope - -
+def _cli_exit(tmp_path, *argv):
+    import contextlib
+    import io
+
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge import (
+        docs as docs_cli,
+    )
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = docs_cli.main(["--path", str(tmp_path), "--dry-run", *argv])
+    return code, buffer.getvalue()
+
+
+@pytest.mark.parametrize("scope", ["-", "___", "....", ".", "____-___"])
+def test_explicit_scope_that_normalizes_to_empty_is_refused(tmp_path, scope):
+    """0.2: an explicit --scope used to reach config.collection() literally;
+    one that normalizes to empty is a scope the engine refuses — the exact
+    wedge 0.1 removed.  It is refused with a validation error before anything
+    is written to the stream."""
+    demo_repo(tmp_path)
+    # The refusal is logged to stderr (not stdout) and exits 1; the dry-run
+    # never reaches the point where it prints scope=... or touches the stream.
+    code, out = _cli_exit(tmp_path, "--scope", scope)
+    assert code == 1
+    assert "scope=" not in out
+
+
+def test_a_blank_explicit_scope_falls_back_to_the_derived_one(tmp_path):
+    """A --scope of only whitespace is not a scope at all: it takes the
+    derived-from-path road rather than being refused."""
+    demo_repo(tmp_path)
+    code, out = _cli_exit(tmp_path, "--scope", "   ")
+    assert code == 0
+    assert f"scope={tmp_path.name.lower()}" in out
+
+
+@pytest.mark.parametrize(
+    "scope,expected",
+    [
+        ("MyRepo", "myrepo"),
+        ("repo-ą", "repo"),
+        ("../x", "x"),
+        ("a/b", "a-b"),
+        ("UPPER_CASE", "upper_case"),
+    ],
+)
+def test_explicit_scope_is_normalized_like_the_proxy_path(
+    tmp_path, scope, expected
+):
+    """The CLI scope takes the same normalization road as a scope derived from
+    a directory: lowercased, unsafe runs reduced to hyphens, capped.  A scope
+    that survives is printed by the dry-run."""
+    demo_repo(tmp_path)
+    code, out = _cli_exit(tmp_path, "--scope", scope)
+    assert code == 0
+    assert f"scope={expected}" in out

@@ -30,6 +30,7 @@ __all__ = [
     "RepositoryScope",
     "ScopeResolver",
     "declared_working_directory",
+    "normalize_scope",
     "scope_key",
 ]
 
@@ -302,3 +303,28 @@ def _normalize(value: Optional[str]) -> str:
     """Make an out of a path fragment something a collection name accepts."""
     text = _UNSAFE_RE.sub("-", (value or "").strip().lower()).strip("-._")
     return text[:_MAX_SCOPE_CHARS].strip("-._")
+
+
+def normalize_scope(value: str) -> str:
+    """
+    Reduce one operator-supplied scope to what a collection name accepts.
+
+    The proxy path derives its scope from a directory name and normalizes it
+    on the way in; a scope typed into ``llm-router-agentic-kb-docs --scope``
+    must take the same road, because the engine refuses a collection name with
+    a character the normalization would not produce — and a scope that cannot
+    be named is a scope the worker cannot index into.  An empty result is
+    returned as ``""`` so the caller can refuse the command before it writes
+    anything.
+
+    Parameters
+    ----------
+    value : str
+        The scope the operator typed; ``""`` when none was given.
+
+    Returns
+    -------
+    str
+        The normalized scope key, possibly ``""``.
+    """
+    return _normalize(value)
