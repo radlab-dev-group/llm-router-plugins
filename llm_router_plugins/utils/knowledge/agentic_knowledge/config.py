@@ -373,6 +373,39 @@ class ModePolicy:
     escalation_model_name: str = ""
     cheap_model_name: str = ""
 
+    def policy_signature(self) -> str:
+        """
+        What a switch to another mode would actually change.
+
+        The identity of the questions this mode asks of the knowledge base:
+        the categories and their weights and caps, the character budget, and
+        the filters that shape the requests.  Two modes that read the same
+        sources with the same budget answer the same question, and a switch
+        between them changes the *label* of the answer, not the answer —
+        which is what the generation cache may keep serving.
+        """
+        import hashlib
+        import json
+
+        parts = [
+            self.max_chars,
+            [
+                [
+                    source.category,
+                    float(source.weight),
+                    int(source.max_items),
+                    list(source.phases),
+                    list(source.modes),
+                    list(source.doc_types),
+                ]
+                for source in self.sources
+            ],
+        ]
+        digest = hashlib.sha256(
+            json.dumps(parts, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        return digest[:16]
+
 
 @dataclass(frozen=True)
 class WorkerSettings:

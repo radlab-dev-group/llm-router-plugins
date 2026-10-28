@@ -175,6 +175,45 @@ def test_injection_is_idempotent_within_one_generation():
     assert json.dumps(second).count(MARKER) == 1
 
 
+def test_a_mode_switch_with_the_same_evidence_serves_the_cached_block():
+    """A mode is a reading of the same facts, not new facts.
+
+    The generation cache used to invalidate on every mode change, and the
+    mode of a command jumps on roughly half the requests — so a request
+    paid for a re-read of the knowledge base whose answer was already in
+    hand.  Two modes that read the same sources on the same budget ask the
+    same question, and the switch between them may serve the cached block
+    instead of re-reading.
+    """
+    config = knowledge_config()
+    store = FakeStore(hits=(store_hit("recipe"),))
+    plugin = make_plugin(config, store=store)
+    first = plugin.apply(main_payload(mode="git_review"))
+    searches_after_first = len(store.requests)
+    assert first["routing"]["knowledge"]["cache"] == "miss"
+    # `review` is an alias of `git_review`: the same sources, the same
+    # weights, the same budget.  The switch is a label, not a new question,
+    # and the block may be served from the cache.
+    second = plugin.apply(main_payload(mode="review"))
+    assert second["routing"]["knowledge"]["cache"] == "hit"
+    assert len(store.requests) == searches_after_first
+
+
+def test_a_mode_switch_to_a_differently_reading_mode_re_reads():
+    """A mode whose policy reads something else is a different question."""
+    config = knowledge_config()
+    store = FakeStore(hits=(store_hit("recipe"),))
+    plugin = make_plugin(config, store=store)
+    first = plugin.apply(main_payload(mode="implement"))
+    searches_after_first = len(store.requests)
+    assert first["routing"]["knowledge"]["cache"] == "miss"
+    # `plan` drops the deadend source `implement` reads; the switch changes
+    # what the mode asks for, and the cache is a miss for it.
+    second = plugin.apply(main_payload(mode="plan"))
+    assert second["routing"]["knowledge"]["cache"] == "miss"
+    assert len(store.requests) > searches_after_first
+
+
 def test_aux_title_is_never_enriched():
     config = knowledge_config()
     store = FakeStore(hits=(store_hit("recipe"),))

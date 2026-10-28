@@ -303,7 +303,11 @@ class AgenticKnowledgePlugin(PluginInterface):
         # whatever a previous request cached for this generation.  The cache is
         # still read below, because escalation persistence lives in it and has
         # its own switch.
-        fresh = read_on and cached is not None and self._is_fresh(cached, turn)
+        fresh = (
+            read_on
+            and cached is not None
+            and self._is_fresh(cached, turn, config)
+        )
         if fresh:
             context = KnowledgeContext(
                 hits=cached.context.hits,
@@ -383,7 +387,7 @@ class AgenticKnowledgePlugin(PluginInterface):
                 )
             ):
                 recipe_trials.setdefault(mining.signature_hash, mining.loop_count)
-            self._remember_context(turn, context, target, recipe_trials)
+            self._remember_context(turn, context, target, recipe_trials, config)
         self._annotate(payload, adapter, turn, context, decision, publish, docs)
         return payload
 
@@ -548,11 +552,26 @@ class AgenticKnowledgePlugin(PluginInterface):
         return cache.get(turn.scope, turn.cache_generation)
 
     @staticmethod
-    def _is_fresh(cached: CachedContext, turn: AgentTurn) -> bool:
+    def _is_fresh(
+        cached: CachedContext, turn: AgentTurn, config: Any
+    ) -> bool:
         """Whether the cached block still describes this turn."""
-        return cached.mode == turn.mode and not _evidence_moved(
-            cached.evidence_fingerprint, turn
-        )
+        if _evidence_moved(cached.evidence_fingerprint, turn):
+            # New evidence is new facts: the block was built against a
+            # different turn than the one in front of it, whatever the mode.
+            return False
+        if cached.mode == turn.mode:
+            return True
+        # The mode switched, but a mode is a reading of the same facts:
+        # two modes that read the same sources on the same budget ask the
+        # same question of the knowledge base, and a switch between them
+        # changes the label of the answer, not the answer.  The block may
+        # keep being served.  A mode whose policy reads anything different
+        # is a different question, and the cache is a miss for it.
+        policy = config.policy_for(turn.mode) if config is not None else None
+        if policy is None or not cached.policy_signature:
+            return False
+        return cached.policy_signature == policy.policy_signature()
 
     @staticmethod
     def _persisted_escalation(
@@ -569,6 +588,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         context: KnowledgeContext,
         escalated_model: str,
         recipe_trials: Optional[Dict[str, int]] = None,
+        config: Any = None,
     ) -> None:
         """Remember the block for the rest of the generation, if caching is on."""
         cache = self._cache
@@ -581,6 +601,12 @@ class AgenticKnowledgePlugin(PluginInterface):
                 context=context,
                 evidence_fingerprint=_evidence_fingerprint(turn),
                 mode=turn.mode,
+                policy_signature=(
+                    config.policy_for(turn.mode).policy_signature()
+                    if config is not None
+                    and config.policy_for(turn.mode) is not None
+                    else ""
+                ),
                 escalated=bool(escalated_model),
                 escalated_model=escalated_model,
                 recipe_trials=dict(recipe_trials or {}),

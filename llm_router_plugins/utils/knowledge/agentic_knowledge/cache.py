@@ -68,8 +68,10 @@ STATE_UNAVAILABLE = "unavailable"
 #: Shape of a serialized entry.  Version ``2`` added the documentation
 #: fields of a hit (`source`, `doc_type`, `heading`) and the standing
 #: documentation digest, so a cache written before them is not read as if
-#: it carried none.
-_SCHEMA = 2
+#: it carried none.  Version ``3`` added the policy signature: the
+#: identity of the questions a mode asks, so a switch to a mode that asks
+#: the same question does not read the knowledge base twice.
+_SCHEMA = 3
 
 
 @dataclass
@@ -100,6 +102,9 @@ class CachedContext:
     escalated_model: str = ""
     #: First failure count at which a qualifying recipe was offered, per failure.
     recipe_trials: Dict[str, int] = field(default_factory=dict)
+    #: Identity of the questions the block was built with; a mode switch
+    #: that keeps the same signature serves the block instead of re-reading.
+    policy_signature: str = ""
 
 
 class GenerationContextCache:
@@ -380,6 +385,7 @@ def _encode(entry: CachedContext) -> str:
         "schema": _SCHEMA,
         "evidence": entry.evidence_fingerprint,
         "mode": entry.mode,
+        "policy_signature": str(entry.policy_signature or ""),
         "escalated": bool(entry.escalated),
         "escalated_model": str(entry.escalated_model or ""),
         "recipe_trials": dict(entry.recipe_trials),
@@ -530,7 +536,14 @@ def _decode(raw: Any) -> Optional[CachedContext]:
         payload = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
     except (TypeError, ValueError):
         return None
-    if not isinstance(payload, dict) or payload.get("schema") != _SCHEMA:
+    if not isinstance(payload, dict):
+        return None
+    # A schema bump is a new field, not a broken one: an entry written by the
+    # previous build decodes, carrying an empty policy signature, which is
+    # the same as a miss for the mode-switch read — the block it holds is
+    # still the block it rendered.
+    schema = payload.get("schema")
+    if schema not in (_SCHEMA, _SCHEMA - 1):
         return None
     try:
         stored_hits = payload.get("hits") or ()
@@ -582,6 +595,7 @@ def _decode(raw: Any) -> Optional[CachedContext]:
             context=context,
             evidence_fingerprint=str(payload.get("evidence", "")),
             mode=str(payload.get("mode", "")),
+            policy_signature=str(payload.get("policy_signature", "")),
             escalated=bool(payload.get("escalated")),
             escalated_model=str(payload.get("escalated_model", "")),
             recipe_trials=recipe_trials,
