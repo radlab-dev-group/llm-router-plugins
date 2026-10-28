@@ -1,5 +1,5 @@
 {
-  "description": "Agentic knowledge layer — reads verified fixes, dead ends, the pre-compaction archive and this repository's own documentation from the Semantic Search Engine and injects them into coding-agent requests, while mining new knowledge out of the traffic. One collection per repository holds every document kind, told apart by its engine category: a search names the categories it asks for, and the engine resolves them to a document set before scoring, so a request that did not ask for documentation never sees it. \"collection_layout\": \"split\" keeps the older three-collections spelling (mined knowledge, <prefix>_<scope>_sessions, <prefix>_<scope>_docs) for a deployment that was indexed with it. A source may list the work phases it is read in (\"phases\": [\"test\"]) — an empty list reads every phase. The doc source may list the documentation kinds it reads (\"doc_types\": [\"guide\"]) — readme, guide, changelog, contributing, security, license, agent, note; an empty list reads every kind, and the restriction belongs to the doc source alone. The \"docs\" section decides whether a repository's markdown is scanned and published (by a request, or only by llm-router-agentic-kb-docs), and whether a short standing map of that documentation (\"context_*\") is injected on every request of a session. Connection settings (SSE, Redis) come from the LLM_ROUTER_KNOWLEDGE_AGENTIC_* environment only; this file holds policy.",
+  "description": "Agentic knowledge layer \u2014 reads verified fixes, dead ends, the pre-compaction archive and this repository's own documentation from the Semantic Search Engine and injects them into coding-agent requests, while mining new knowledge out of the traffic. One collection per repository holds every document kind, told apart by its engine category: a search names the categories it asks for, and the engine resolves them to a document set before scoring, so a request that did not ask for documentation never sees it. \"collection_layout\": \"split\" keeps the older three-collections spelling (mined knowledge, <prefix>_<scope>_sessions, <prefix>_<scope>_docs) for a deployment that was indexed with it. A source may list the work phases it is read in (\"phases\": [\"test\"]) \u2014 an empty list reads every phase. The doc source may list the documentation kinds it reads (\"doc_types\": [\"guide\"]) \u2014 readme, guide, changelog, contributing, security, license, agent, note; an empty list reads every kind, and the restriction belongs to the doc source alone. The \"docs\" section decides whether a repository's markdown is scanned and published (by a request, or only by llm-router-agentic-kb-docs), and whether a short standing map of that documentation (\"context_*\") is injected on every request of a session. Connection settings (SSE, Redis) come from the LLM_ROUTER_KNOWLEDGE_AGENTIC_* environment only; this file holds policy.",
   "adapters": [
     "codex",
     "claude_code"
@@ -159,6 +159,16 @@
       "max_chars": 4000,
       "sources": [
         {
+          "category": "doc",
+          "weight": 0.8,
+          "max_items": 3,
+          "doc_types": [
+            "guide",
+            "contributing",
+            "security"
+          ]
+        },
+        {
           "category": "recipe",
           "weight": 0.7,
           "max_items": 2
@@ -192,6 +202,11 @@
             "contributing",
             "security"
           ]
+        },
+        {
+          "category": "recipe",
+          "weight": 0.7,
+          "max_items": 2
         },
         {
           "category": "deadend",
