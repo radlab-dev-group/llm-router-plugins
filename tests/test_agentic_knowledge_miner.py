@@ -453,3 +453,52 @@ def test_repeated_failure_revokes_green_without_duplicate_attempts():
     result = mine(codex_payload(items))
     assert [event.kind for event in result.events] == [KIND_DEADEND]
     assert result.loop_count == 3
+
+
+# -------------------------------------------------- 1.2 diagnostics --
+def _diag(result, name):
+    return dict(result.diagnostics).get(name, 0)
+
+
+def test_diagnostics_read_an_empty_turn_as_no_failure_not_no_patch():
+    """1.2: a turn with commands but no test failure is `no_failure`, not
+    `no_patch` — today the two look identical, and an empty knowledge base
+    could not say which one it was."""
+    result = mine(codex_payload(loop_items(failures=0) if False else base_items() + [
+        __import__("agentic_knowledge_support")._command("c1", "e1"),
+        __import__("agentic_knowledge_support")._command_output("c1", "o1", "ok", code=0),
+    ]))
+    assert _diag(result, "no_failure") == 1
+    assert _diag(result, "no_patch") == 0
+    assert _diag(result, "published") == 0
+
+
+def test_diagnostics_read_a_failure_without_a_patch_as_no_patch():
+    """1.2: a failure the turn never changed anything for is `no_patch`."""
+    items = base_items() + [
+        __import__("agentic_knowledge_support")._command("c1", "e1"),
+        __import__("agentic_knowledge_support")._command_output("c1", "o1", FAILING, code=1),
+    ]
+    result = mine(codex_payload(items))
+    assert _diag(result, "no_patch") == 1
+    assert _diag(result, "no_failure") == 0
+
+
+def test_diagnostics_count_a_change_that_was_never_rerun():
+    """1.2: a failure the agent patched but never re-ran is `not_verified` —
+    the change is unproven, and neither a recipe nor a dead end can be read
+    from it.  A dead end (the same failure again) is a different outcome and
+    is not counted here."""
+    items = base_items() + [
+        _command("c1", "e1"),
+        _command_output("c1", "o1", FAILING, code=1),
+        _patch("p1", "pe"),
+    ]
+    result = mine(codex_payload(items))
+    assert _diag(result, "not_verified") == 1
+    assert _diag(result, "published") == 0
+
+
+def test_diagnostics_count_published_documents():
+    result = mine(codex_payload(recipe_items()))
+    assert _diag(result, "published") == 1

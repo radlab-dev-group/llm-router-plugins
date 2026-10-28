@@ -110,6 +110,13 @@ class MiningResult:
     loop_count: int = 0
     signature_hash: str = ""
     tried: Tuple[str, ...] = ()
+    #: Why nothing (or less than expected) was written, counted per turn.
+    #: ``no_failure`` — a turn with commands but no test failure to key an
+    #: episode on; ``no_patch`` — a failure the turn never changed anything for;
+    #: ``not_verified`` — a change with no green re-run of the same failure;
+    #: ``covered_by_recipe`` — a procedure a recipe already describes;
+    #: ``published`` — documents this turn actually emitted.
+    diagnostics: Tuple[Tuple[str, int], ...] = ()
 
 
 @dataclass
@@ -221,6 +228,9 @@ class EpisodeMiner:
         if not turn.evidence:
             return MiningResult()
         failures = self._episodes(turn)
+        procedures, covered_by_recipe = self._procedures(
+            turn, _verified_patches(failures)
+        )
         events = [
             event
             for event in (
@@ -230,10 +240,7 @@ class EpisodeMiner:
                     for item in failures
                     for attempt in item.failed_attempts
                 ),
-                *(
-                    self._playbook(turn, window)
-                    for window in self._procedures(turn, _verified_patches(failures))
-                ),
+                *(self._playbook(turn, window) for window in procedures),
             )
             if event is not None
         ]
@@ -248,6 +255,42 @@ class EpisodeMiner:
             loop_count=loop.loop_count,
             signature_hash=loop.signature_hash,
             tried=tried,
+            diagnostics=self._diagnostics(
+                turn, failures, events, covered_by_recipe
+            ),
+        )
+
+    def _diagnostics(
+        self,
+        turn: AgentTurn,
+        failures: List["_Failure"],
+        events: List[KnowledgeEvent],
+        covered_by_recipe: int = 0,
+    ) -> Tuple[Tuple[str, int], ...]:
+        """
+        Count why a turn wrote what it wrote, so an empty knowledge base can
+        be read: a turn with commands but no failure is not the same as a
+        failure the agent never changed, and neither is the same as a change
+        nobody re-ran.  The counts are per turn and never carry content.
+        """
+        kinds = [item.kind for item in turn.evidence]
+        has_failure = EVIDENCE_TEST_FAILURE in kinds
+        has_patch = EVIDENCE_PATCH in kinds
+        has_command = EVIDENCE_COMMAND in kinds
+        no_failure = int(has_command and not has_failure)
+        no_patch = int(has_failure and not has_patch)
+        not_verified = sum(
+            1
+            for item in failures
+            if item.patches and not item.verified() and not item.failed_attempts
+        )
+        published = len(events)
+        return (
+            ("no_failure", no_failure),
+            ("no_patch", no_patch),
+            ("not_verified", not_verified),
+            ("covered_by_recipe", covered_by_recipe),
+            ("published", published),
         )
 
     # ------------------------------------------------------------- episodes -
@@ -334,7 +377,7 @@ class EpisodeMiner:
 
     def _procedures(
         self, turn: AgentTurn, covered: Optional[FrozenSet[str]] = None
-    ) -> List["_Procedure"]:
+    ) -> Tuple[List["_Procedure"], int]:
         """
         Split the turn into stretches of work that a green run just accepted.
 
@@ -358,6 +401,7 @@ class EpisodeMiner:
         """
         already = covered or frozenset()
         procedures: List[_Procedure] = []
+        covered_count = 0
         current = _Procedure()
         for position, evidence in enumerate(turn.evidence):
             if evidence.kind == EVIDENCE_TEST_FAILURE:
@@ -381,10 +425,20 @@ class EpisodeMiner:
                     current.verified_at = position
                     current.items.append(evidence)
                     procedures.append(current)
+                elif (
+                    current.patches
+                    and not current.failures
+                    and recorded
+                    and recorded <= already
+                ):
+                    # The recipe that owns these patches already says this;
+                    # counted so a silent "no playbook" can be read as "the
+                    # recipe covered it" rather than as a mining gap.
+                    covered_count += 1
                 current = _Procedure()
                 continue
             current.items.append(evidence)
-        return procedures
+        return procedures, covered_count
 
     def _playbook(
         self, turn: AgentTurn, procedure: "_Procedure"
