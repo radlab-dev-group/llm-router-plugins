@@ -814,11 +814,37 @@ class DocsScanState:
             if isinstance(entry, dict)
         }
 
+    def load_truncated(self, scope: str) -> bool:
+        """
+        Whether the last saved listing was cut short by a ceiling.
+
+        A listing written while the scan was truncated is not the whole
+        repository, and the files it never saw are not gone — they were not
+        counted.  Retiring their documents would delete them for no reason,
+        so the flag is read back and the prune is withheld while it is set.
+        """
+        client = self._handle.get()
+        if client is None:
+            return False
+        try:
+            raw = client.get(self.key(scope))
+        except Exception as exc:
+            self._warn("knowledge docs state unreadable: %s", type(exc).__name__)
+            return False
+        if not raw:
+            return False
+        try:
+            payload = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+        except (TypeError, ValueError):
+            return False
+        return bool(isinstance(payload, dict) and payload.get("truncated"))
+
     def save(
         self,
         scope: str,
         entries: Dict[str, Dict[str, Any]],
         collection: str = "",
+        truncated: bool = False,
     ) -> bool:
         """
         Write the listing of *scope*.
@@ -843,7 +869,12 @@ class DocsScanState:
         if client is None:
             return False
         payload = json.dumps(
-            {"v": _STATE_VERSION, "collection": collection, "files": entries},
+            {
+                "v": _STATE_VERSION,
+                "collection": collection,
+                "files": entries,
+                "truncated": bool(truncated),
+            },
             ensure_ascii=False,
         )
         try:
@@ -1012,6 +1043,11 @@ class DocsIndexer:
         # believe a listing of a collection nobody reads.
         collection = self.config.collection(scope, KIND_DOC)
         entries = self.state.load(scope, collection)
+        # A listing cut short by a ceiling is not the whole repository, and
+        # the files it never saw are not gone — they were not counted.  While
+        # the flag is set the prune is withheld: retiring a document for a
+        # file the listing never saw would delete it for no reason.
+        previous_truncated = self.state.load_truncated(scope)
         by_file = _group(report.records)
         changed = _changed_files(entries, by_file)
         if republish:
@@ -1067,7 +1103,7 @@ class DocsIndexer:
             replacement_landed = republish or published > 0
 
         pruned = 0
-        if allow_prune and not report.truncated:
+        if allow_prune and not report.truncated and not previous_truncated:
             stale = gone_stale
             if replacement_landed:
                 stale = list(stale) + changed_stale
@@ -1077,7 +1113,10 @@ class DocsIndexer:
                 )
 
         if not self.state.save(
-            scope, _next_entries(entries, by_file, changed, day), collection
+            scope,
+            _next_entries(entries, by_file, changed, day),
+            collection,
+            truncated=report.truncated,
         ):
             self._warn("knowledge docs state not saved for %d file(s)", len(by_file))
         context = self._refresh_context(scope, report, by_file)

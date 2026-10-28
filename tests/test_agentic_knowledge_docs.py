@@ -423,6 +423,33 @@ def test_a_truncated_scan_retires_nothing(tmp_path):
     assert not any(e.kind == CONTROL_DOCS_PRUNE for e in publisher.published)
 
 
+def test_a_truncated_listing_holds_the_prune_until_the_repository_is_whole(tmp_path):
+    """A listing cut short is not the repository, and its unseen files are not gone.
+
+    The scan stopped at the ceiling, so the listing it saved holds only the
+    files it saw.  The next scan — whole — would retire every file the
+    listing never saw as "gone", deleting documents for no reason.  The
+    truncated flag is written with the listing and read back, and the prune
+    is withheld while it is set: the unseen files are not gone, they were
+    not counted.
+    """
+    root = demo_repo(tmp_path)
+    state = scanning_state()
+    config = knowledge_config(docs_max_files=1)
+    outcome = indexer(config=config, publisher=FakePublisher(), state=state).index(
+        "demo", root, force=True
+    )
+    assert outcome.truncated is True
+
+    # A later, whole scan sees every file the truncated one never counted.
+    # The documents for them must not be retired on that scan.
+    publisher = FakePublisher()
+    whole = indexer(publisher=publisher, state=state).index("demo", root)
+    assert whole.truncated is False
+    assert whole.pruned == 0
+    assert not any(e.kind == CONTROL_DOCS_PRUNE for e in publisher.published)
+
+
 def test_the_scans_of_one_process_are_bounded_by_a_cooldown(tmp_path):
     root = demo_repo(tmp_path)
     now = [1_000.0]
