@@ -8,6 +8,7 @@ release tagged as `v<version>`.
 
 | Version | Changelog |
 | ------- | --------- |
+| 0.1.6 | **Changed:** a hybrid search is read on the scale its scores were produced on — a fused (RRF) rank is remapped onto 0-1 inside the result set that produced it before a bonus or a threshold is applied to it, and a hit carries the name of the scale its score lives on (`score_scale`), so `strong_recipe_score` and `min_similarity` are no longer read against a number of another kind. The sources a mode reads are read in parallel under one shared budget instead of one after another, and the shipped `read.timeout_seconds` falls to 3.0. The injected annotation gains a `metrics` block: how many searches the read made and how many the budget could not start. **Fixed:** a scope that arrives padded or with non-ASCII letters is normalized, transliteration included, before it becomes a collection name; an edit made by the shell itself — a redirect, `tee`, `sed -i` — is evidence of changed code again in a CLI without a patch tool; the read cache is keyed by the policy the mode reads with, so switching to a mode that asks a different question no longer serves the previous mode's answer; a document is named for the day its event was created, so a re-index does not collide with the documents of another day; a documentation scan that was truncated holds its prune instead of retiring files it never saw. **Added:** `git_review` reads the repository's documentation the way `review` does, and `review` is its alias; a repository without mined documents skips the mined search and is still answered from the archive and the documentation; the indexing worker reports `pending` and `oldest_age` in its heartbeat; the miner names, in its diagnostics, the turn it read as no failure and the failure nothing changed for; a shell command an operator edits is visible in the mined document that quotes it. |
 | 0.1.5 | **Changed:** `agentic_knowledge` stores one repository in one collection. Every document kind — mined knowledge, the pre-compaction archive, the repository's own documentation — is now written into `<prefix>_<scope>` and told apart by its engine `category`, which the engine resolves to a document set before scoring, so a search that did not ask for a category never sees it. `collection_layout` (`single`, the shipped default, or `split`, the older three-collections spelling for a deployment indexed with it) decides the collection a reader asks and a worker writes; the split layout keeps working for legacy data, and retention still sweeps the `..._sessions` collections it left behind. A mode still asks one question per source group — mined knowledge, the archive restricted to its `thread_id`, the documentation restricted by `doc_type` — whatever collection the layout gives them. **Fixed:** a search of one repository now returns a document of only that repository under either layout, and the retention pass deletes only the document kinds it names, so a shared collection can no longer age a README on the archive's clock. |
 | 0.1.4 | **Added:** `agentic_knowledge` — a knowledge layer that runs behind the Codex router: per-work-mode retrieval of verified fixes, dead ends and the pre-compaction archive from the Semantic Search Engine, a masked learn-from-traffic write path through a Redis Stream and an indexing worker, and optional knowledge-or-escalate model selection. Adapters for Codex (full) and Claude Code (read-only), plus offline counterfactual evaluation. **Fix:** the `agentic_knowledge` collection names are reduced to the engine's character set at configuration time, so a repository scope that would produce a hyphen can no longer make every indexing attempt fail with a 500 at collection creation; the retention pass still sweeps the legacy `prefix-<scope>-sessions` archives; the repository of a request is read from the leading messages, so a compaction (which re-sends the whole window) is filed under its own project instead of into a scope-less prefix, and a request with no known repository publishes nothing; a search of a repository that has not been indexed yet is an empty answer, not a failed search **Added:** engine login for a Semantic Search Engine that authenticates by username and password rather than by a pre-issued token (`SSE_API_USERNAME`/`SSE_API_PASSWORD`); every mined episode now carries the work **phase** its evidence names (`test`, `implement`, …) in its header and in `metadata_json.phase`, and a retrieval source can be restricted in its policy to phases (`"phases": ["test"]`) or to routing modes (`"modes": ["debug"]`) — the filter is engine-side, unions across names, intersects the source's categories, never touches the archived window whose `thread_id` owns the single metadata slot, and a policy cannot mix the two dimensions in one request. **Added:** `agentic_knowledge` indexes the repository's own documentation — a heading-aware scan of its `*.md` files published as `doc` documents, republished on content change, superseded documents retired through a `docs_prune` control message (never on a truncated scan), plus the `llm-router-agentic-kb-docs` command and the `docs` policy section. Documentation now lives in `<prefix>_<scope>_docs`, is read per work mode through `doc_types`, is searched on the turn's subject rather than its failure signature, and a guide about a file the turn edits outranks one that is not. On top of retrieval a session carries a **standing documentation map** — structural, stable per repository, budgeted first — and every mined fix or dead end points at the page that documents the module it touched. **Fix:** the Codex routing record follows the phase that was actually routed with instead of the last signal it could rebuild, so an interleaved command no longer freezes the record and repeats a conflict on every request of the turn (captured-session replay: 11 conflicts -> 0). **Added:** `RememberResult` carries why a memory write was skipped; the log names the real cause instead of an undifferentiated `version conflict`. **Added:** `agentic_knowledge` mines `playbook` — a change a test run accepted with no failure in between — so the correct steps of a task are knowledge too, not only the ones that went wrong; a mode routing did not resolve is served by a `*` fallback policy instead of reading nothing; every mode now reads the kinds it ignored (`doc` in `debug`/`test`, `deadend` in `implement`, `playbook`/`recipe` where a plan or a review could use them). **Fix:** a read budget equal to one engine call started no search of any request — the deadline left no room for the call it budgeted — which looked like an empty knowledge base; the budget is now raised above one call at validation, defaults to three calls, and the "searches not started" warning names both numbers and repeats at most once per repository per interval. |
 | 0.1.3 | **Added:** an accepted semantic decision can be carried across one command generation (`MEMORY_CARRY_DECISIONS`). **Changed:** semantic rankings are read against their own scale; the phase layer separates work states from shell noise; CLI-injected context is kept out of the intent text. |
@@ -55,7 +56,62 @@ release tagged as `v<version>`.
   left behind), but deletes only the archive's kind, so a shared collection
   cannot age a README on a fourteen-day clock.
 
-## [Unreleased]
+### Changed
+- **Hybrid scores are read on the scale they were produced on.** A fused
+  (RRF) rank is remapped onto 0-1 inside the result set that produced it —
+  the ceiling of the set is the best hit actually in hand — before a bonus or
+  a threshold is applied to it, and every hit now carries the name of the
+  scale its score lives on (`score_scale`: `rrf`, `reranker` or `cosine`).
+  `strong_recipe_score` is a threshold on that remapped scale;
+  `min_similarity` stays where the engine applies it. The two numbers a
+  deployment tunes are no longer read against a value of another kind.
+- **A mode's sources are read in parallel, under one budget.** The searches a
+  mode asks — mined knowledge, the archive, the documentation — now run
+  concurrently inside one call instead of one after another, so a slow
+  source no longer spends the budget the others were to use; the shipped
+  `read.timeout_seconds` falls from 6.0 to 3.0 to match, and the read still
+  fits inside one call's duration plus slack.
+- **The injected annotation names what the read did.** A `metrics` block
+  reports how many searches the read made for the request and how many the
+  budget could not start — the number a deployment reads to see how much the
+  layer spends on the engine per request.
+
+### Fixed
+- **A scope is normalized before it becomes a collection name.** Padding and
+  case are trimmed and non-ASCII letters are transliterated, so a repository
+  that arrives as `Webapp ` or with an accented name lands in the collection
+  its events were filed under instead of a name the engine would reject or
+  that no request would ever ask.
+- **An edit made by the shell itself is evidence of changed code again.** In
+  a CLI release without a patch tool, a redirect, `tee` or `sed -i` that
+  writes a file is mined as a (weak) patch signal with a reason of its own;
+  the command the operator edited is visible in the document that quotes it.
+- **The read cache is keyed by the policy the mode reads with.** Switching to
+  a mode that asks a different question — the policy's signature changed —
+  no longer serves the previous mode's answer under the same key; a hit is
+  still a hit while the policy stands, and the annotation says why a miss
+  was a miss (`mode`, `evidence` or `cold`).
+- **A document is named for the day its event was created.** Two events that
+  re-index the same repository on different days no longer collide on one
+  name, and a prune retires by the name the document actually carries.
+- **A truncated documentation scan holds its prune.** A scan that was cut
+  off before it saw every file retires nothing, so a page the scan never
+  reached is not retired in the same pass it should have been republished.
+
+### Added
+- **`git_review` reads the repository's documentation**, the same
+  `guide`/`contributing`/`security` pages `review` reads, and `review` is an
+  alias of it.
+- **A repository without mined documents is not paid for.** A cold scope
+  skips the hybrid search it could not answer and is still asked of the
+  archive and the documentation as always.
+- **The indexing worker says what its queue is doing.** Its heartbeat reports
+  `pending` and `oldest_age`, so a deployment sees the depth and the age of
+  what is waiting without reading the engine.
+- **The miner explains what it read.** Its diagnostics name the turn it read
+  as a command with no failure (`no_failure`, not `no_patch`) and the failure
+  nothing changed for (`no_patch`), so an empty knowledge base can say which
+  of the two it was.
 
 ### Added
 - **`--clean-redis-memory-cache` on the indexing worker** drops the layer's
