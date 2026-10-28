@@ -227,6 +227,16 @@ class KnowledgeContext:
     cache: str = "miss"
     status: str = "ok"
     doc_context: Optional[DocContext] = None
+    #: How many engine searches the read made for this request, the ones the
+    #: budget could not start included; the number a deployment reads to see
+    #: how much the layer spends on the engine per request.
+    searches: int = 0
+    #: How many of those searches the read budget could not start.
+    budget_skipped: int = 0
+    #: Why the cache did not serve this request: ``mode`` for a switch to a
+    #: mode that reads a different question, ``evidence`` for new evidence,
+    #: ``cold`` for nothing cached at all, ``""`` when the cache did serve.
+    cache_miss_reason: str = ""
 
     @property
     def empty(self) -> bool:

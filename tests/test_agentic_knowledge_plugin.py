@@ -860,6 +860,42 @@ def test_a_scope_with_mined_documents_searches_everything():
     assert "recipe" in kinds
 
 
+# ------------------------------------------------------------- metrics ---
+def test_the_annotation_carries_the_numbers_a_deployment_reads():
+    """The read path's health, without its contents, on every request.
+
+    The annotation is where an operator already looks, and the numbers
+    that say how the layer is doing without reading a block: how many
+    searches the read made, how many the budget could not start, why the
+    cache did not serve, what the turn mined, and how much of the write
+    the stream already knew.
+    """
+    config = knowledge_config()
+    store = FakeStore(hits=(store_hit("recipe"),))
+    plugin = make_plugin(config, store=store)
+    out = plugin.apply(main_payload(mode="debug", failures=1))
+    metrics = out["routing"]["knowledge"]["metrics"]
+    assert metrics["searches_per_request"] >= 3
+    assert metrics["read_budget_skips"] == 0
+    assert metrics["cache_miss_reason"] == "cold"
+    assert "recipe" not in metrics["mined_kinds"]
+    assert metrics["docs_publish_dropped_as_duplicate"] == 0
+
+
+def test_a_cache_hit_reports_no_searches_and_no_miss_reason():
+    """A served request made no search, and the cache serving is not a miss."""
+    config = knowledge_config()
+    store = FakeStore(hits=(store_hit("recipe"),))
+    plugin = make_plugin(config, store=store)
+    plugin.apply(main_payload(mode="debug", failures=1))
+    out = plugin.apply(main_payload(mode="debug", failures=1))
+    knowledge = out["routing"]["knowledge"]
+    assert knowledge["cache"] == "hit"
+    metrics = knowledge["metrics"]
+    assert metrics["searches_per_request"] == 0
+    assert metrics["cache_miss_reason"] == ""
+
+
 # ------------------------------------------------------------ parallel ---
 def test_a_slow_engine_is_waited_once_not_once_per_source():
     """The mode's sources are independent; they are asked together.

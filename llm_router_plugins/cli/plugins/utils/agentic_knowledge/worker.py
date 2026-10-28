@@ -249,14 +249,39 @@ class KnowledgeIndexWorker:
         if now - self._last_heartbeat < HEARTBEAT_SECONDS:
             return
         self._last_heartbeat = now
+        pending, oldest = self._pending_age()
         self._log(
             "info",
-            "knowledge worker idle (indexed=%d dropped=%d stream=%s group=%s)",
+            "knowledge worker idle (indexed=%d dropped=%d pending=%d"
+            " oldest_age_s=%d stream=%s group=%s)",
             self._indexed,
             self._dropped,
+            pending,
+            oldest,
             self._stream,
             self._group,
         )
+
+    def _pending_age(self) -> Tuple[int, int]:
+        """
+        How many stream entries are waiting, and how long the oldest is.
+
+        A worker that keeps up shows ``pending=0``; one that is behind shows a
+        growing count and an age that is the time between an episode happening
+        and it being indexed.  The number an operator needs to read the write
+        path's health, and it is measured on the heartbeat clock so an idle
+        worker pays for it once a minute, not once a batch.
+        """
+        try:
+            client = self._redis_client()
+            if client is None:
+                return 0, 0
+            summary = client.xpending(self._stream, self._group)
+        except Exception:
+            return 0, 0
+        pending = _pending_count(summary) or 0
+        oldest = _oldest_pending_age(summary, time.time())
+        return int(pending), int(oldest)
 
     def run_once(self, block_ms: Optional[int] = None) -> int:
         """
@@ -1326,11 +1351,35 @@ def _pending_count(summary: Any) -> Optional[int]:
     """Read the pending depth of an ``XPENDING`` summary, if it states one."""
     if not isinstance(summary, dict):
         return None
-    for key in ("pending", b"pending"):
+    for key in ("pending", b"pending", "count"):
         value = summary.get(key)
         if isinstance(value, int):
             return value
     return None
+
+
+def _oldest_pending_age(summary: Any, now: float) -> int:
+    """
+    Seconds the oldest pending entry has been waiting, ``0`` when it is unknown.
+
+    The ``XPENDING`` summary states the oldest entry's stream id when it has
+    one; the id's first field is its millisecond timestamp, and the difference
+    to now is the age.  A summary without the field — an older client — says
+    nothing, and a summary nobody can read is not worth a number.
+    """
+    if not isinstance(summary, dict):
+        return 0
+    for key in ("min", b"min", "oldest"):
+        value = summary.get(key)
+        if not value:
+            continue
+        try:
+            stamped = float(str(value).split("-", 1)[0])
+        except (TypeError, ValueError):
+            continue
+        if stamped > 0:
+            return int(max(0.0, now - stamped / 1000.0))
+    return 0
 
 
 def _is_busy_group(exc: Exception) -> bool:

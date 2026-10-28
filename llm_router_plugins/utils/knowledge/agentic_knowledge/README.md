@@ -134,6 +134,11 @@ One request passes through: **adapter selection → parse → mine once → publ
 → inject → escalate → annotate**. Mining and publishing happen exactly once per request — the write path never
 re-annotates, so an escalation decision cannot be overwritten by it.
 
+An edit made through the shell — a here-document piped to `apply_patch`, a `cat > file` — is
+still an edit: the phase evidence records the files it writes and the miner closes a recipe on
+them, marked as shell-edited, so a fix the agent applied without the patch tool is not invisible
+to the knowledge base.
+
 A request the router classified `aux_title` is returned before any of this — a title generation has no repository
 knowledge to use, and none is mined from it, so it carries no annotation.
 
@@ -144,11 +149,11 @@ knowledge to use, and none is mined from it, so it carries no annotation.
 | `adapters/base.py` | `AgentAdapter` (ABC), `AgentTurn`, `KnowledgeEvent`, `InjectionSpec`         |
 | `adapters/codex.py`| Codex: reuses `codex.payload`, `codex.phase`; full read **and** write        |
 | `adapters/claude_code.py` | Claude Code: scope, latest user text, injection into `system`; read-only |
-| `scope.py`         | repository scope from the declared working directory; collection names       |
+| `scope.py`         | repository scope from the declared working directory; collection names; an explicit `--scope` is normalized the same way before it reaches the engine, and a name outside ASCII is transliterated (falling back to a digest) so it cannot mix two repositories or lose its knowledge |
 | `signature.py`     | error/stack trace → stable signature + hash                                  |
-| `query.py`         | query and SSE filters per work mode                                          |
+| `query.py`         | query and SSE filters per work mode; a `debug` query leads with the failure's readable signature and its test command, and a review/test query names the files the turn touched |
 | `assembler.py`     | weighted voting over sources, dedup, character budget, rendering             |
-| `cache.py`         | `GenerationContextCache` (Redis) + in-process one when Redis is absent       |
+| `cache.py`         | `GenerationContextCache` (Redis) + in-process one when Redis is absent; a switch to a mode that reads the same sources on the same budget serves the cached block instead of re-reading |
 | `redisclient.py`   | `RedisClientHandle`: lazy, fork-aware Redis client shared by cache and pub   |
 | `miner.py`         | `EpisodeMiner`: recipe / playbook / deadend / loop / compaction → `KnowledgeEvent` |
 | `docs_ingestor.py` | scans the repository's markdown into `doc` documents and keeps them current  |
@@ -533,6 +538,10 @@ flaky test looks exactly like a loop. The "already tried" list comes from the cu
   "sources": {"recipe": 2, "deadend": 1},
   "cache": "hit",                  // hit | miss | disabled
   "loop_count": 3,
+  "metrics": {"searches_per_request": 3, "read_budget_skips": 0,
+              "cache_miss_reason": "cold",   // "" | mode | evidence | cold
+              "mined_kinds": ["recipe"],
+              "docs_publish_dropped_as_duplicate": 0}
   "escalation": {"action": "escalate", "reason": "loop_without_recipe",
                   "from": "auto_codex", "to": "qwen/Qwen3.8-27B"},
   "write": {"published": 1, "deduplicated": 0, "errors": 0, "status": "ok"},  // ok | partial | unavailable | disabled
@@ -595,15 +604,20 @@ switched by `…_HYBRID_SEARCH` and `…_RERANK_RESULTS`.  They also decide the 
 back on — the engine's `results.score_scale`: a squashed cross-encoder logit with the reranker on,
 a Reciprocal Rank Fusion rank in a plain hybrid search, and a cosine similarity when the legs are
 off — so `escalation.strong_recipe_score` is a threshold on that scale: a reranker logit under
-`rerank_results: true`, an RRF rank otherwise.  Raising it against an RRF scale is a no-op in
-practice, which is why the reranker stays off by default: it costs a model call per search and a
-collection whose engine serves no reranker answers nothing with it on.
+`rerank_results: true`, a cosine similarity with the legs off, and — in the default hybrid
+search — a fused rank the assembler remaps onto `0…1` **within the result set that produced
+it**, the set's best hit being `1.0`.  The weight and the signature/path bonuses are then added
+on that same scale, which is what keeps a bonus a *shift* and not an order of magnitude over the
+retrieval.  `min_similarity` stays where the engine applies it, on the vector leg before the
+fusing; the assembler does not re-apply it to the score it sees.  A threshold the scale cannot
+reach warns at start instead of failing silently.
 
 ### How one request reads the engine
 
 A mode asks **one question per collection** it reads — mined knowledge, the session archive, the
-repository's documentation — and the questions are asked one after another.  Two numbers bound what
-that costs, and they are not the same number:
+repository's documentation.  The questions are independent, so they are asked **at once** through
+a short pool of workers, against one shared budget: a slow engine costs the per-call timeout once,
+not once per source.  Two numbers bound what that costs, and they are not the same number:
 
 | Knob | Means |
 |------|-------|
@@ -611,13 +625,14 @@ that costs, and they are not the same number:
 | `…_READ_TIMEOUT_SECONDS` | what **one request** may spend on the engine in total |
 
 A search is started only while a whole call still fits before the budget runs out, so
-`…_READ_TIMEOUT_SECONDS` is the ceiling a request really waits rather than a per-call figure
-multiplied by the number of sources.  It is never allowed below the per-call timeout — a budget in
-which no call fits would read nothing and report an empty knowledge base.  When a budget is spent
-mid-request the remaining sources are skipped and one warning names the scope and how many were
-lost; raise the budget or shorten the mode's sources.  Measured against a real engine on another
-host, a hybrid search takes a median of ~1.7 s, which is why a 1.5 s per-call ceiling lost every
-search it made.
+`…_READ_TIMEOUT_SECONDS` is the ceiling a request really waits.  It is never allowed below the
+per-call timeout — a budget in which no call fits would read nothing and report an empty
+knowledge base.  Because the questions run together, a budget of one call plus its margin holds
+the whole read of a mode, which is why the shipped policy budgets 3 s over the 2 s per-call
+default.  When a budget is spent mid-request the searches that do not fit are not started and one
+warning names the scope and how many were lost; raise the budget or shorten the mode's sources.
+Measured against a real engine on another host, a hybrid search takes a median of ~1.7 s, which
+is why a 1.5 s per-call ceiling lost every search it made.
 
 The plugin also asks the engine **not to guess the language of the query**
 (`…_SSE_IGNORE_LANGUAGE_DETECT`, on by default).  The engine otherwise detects the language of the
@@ -821,10 +836,16 @@ bash scripts/agentic-kb-eval.sh --enable-escalation
 `evaluation.py` replays recorded sequences (`tests/data/agentic_knowledge_eval.json`, anonymized prefixes from
 `agents-conversation/`) offline. For request *k* the fake store is fed **only** events mined before *k*, so no future
 knowledge leaks backwards, and the question is whether retrieval would have returned the fix the session eventually
-used. Metrics: `recipe_hit_rate`, `turns_potentially_saved`, `missed_saves`, `loop_detection_precision/recall`,
-`escalations`, `injected_chars_per_turn`, reported per variant: `no_kb`, `read`, `read_escalate`. Use it to decide
-whether escalation is worth enabling; `tests/test_agentic_knowledge_evaluation.py` keeps the replay deterministic and
-leak-free.
+used. The fake store indexes every mined kind — not only recipes — and honors the request's collection, categories,
+phases, doc types and the `min_similarity` floor, and a session may declare the documentation its repository had
+written down, whose digest the replay injects as the read path would. Metrics: `recipe_hit_rate`,
+`turns_potentially_saved`, `missed_saves`, `loop_detection_precision/recall`, `escalations`, and two injection
+numbers — `injected_chars_per_turn`, the block a request is shown, and
+`retrieved_chars_per_turn`, the retrieved content in it without the standing map — reported per variant: `no_kb`,
+`read`, `read_escalate`. Use it to decide whether escalation is worth enabling;
+`tests/test_agentic_knowledge_evaluation.py` keeps the replay deterministic and leak-free, and carries a synthetic
+scenario set — a fix, a dead end, a procedure, a fix followed by covered work, a shell edit — with the kinds they
+must produce, so the mining shapes a recorded corpus lacks are asserted where they can fail.
 
 ## Limitations
 

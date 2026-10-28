@@ -276,7 +276,14 @@ class AgenticKnowledgePlugin(PluginInterface):
         if turn.request_class == _REQUEST_CLASS_COMPACTION:
             # A window about to be summarized is written, never read from.
             self._annotate(
-                payload, adapter, turn, None, EscalationDecision(), publish, docs
+                payload,
+                adapter,
+                turn,
+                None,
+                EscalationDecision(),
+                publish,
+                docs,
+                mining,
             )
             return payload
         return self._serve_read(
@@ -308,6 +315,18 @@ class AgenticKnowledgePlugin(PluginInterface):
             and cached is not None
             and self._is_fresh(cached, turn, config)
         )
+        cache_miss_reason = ""
+        if not fresh and cached is not None:
+            # The block a request is shown is one thing, and why the cache did
+            # not serve it is another: a mode switch that reads the same
+            # question is a hit, a mode that reads a different question is a
+            # miss the operator can read as "the policy changed", and new
+            # evidence is a miss that is the turn actually moving.
+            cache_miss_reason = (
+                "evidence"
+                if _evidence_moved(cached.evidence_fingerprint, turn)
+                else "mode"
+            )
         if fresh:
             context = KnowledgeContext(
                 hits=cached.context.hits,
@@ -323,6 +342,13 @@ class AgenticKnowledgePlugin(PluginInterface):
             context = self._assemble(
                 turn, config, policy, mining, self._doc_context(turn, docs)
             )
+            # Nothing cached for this generation is a cold read; a switch to a
+            # mode that reads a different question is a policy change; new
+            # evidence is the turn moving.
+            if cache_miss_reason:
+                context = _with_miss_reason(context, cache_miss_reason)
+            elif context.cache == "miss":
+                context = _with_miss_reason(context, "cold")
 
         if not context.empty:
             payload = adapter.inject(payload, context.rendered)
@@ -388,7 +414,9 @@ class AgenticKnowledgePlugin(PluginInterface):
             ):
                 recipe_trials.setdefault(mining.signature_hash, mining.loop_count)
             self._remember_context(turn, context, target, recipe_trials, config)
-        self._annotate(payload, adapter, turn, context, decision, publish, docs)
+        self._annotate(
+            payload, adapter, turn, context, decision, publish, docs, mining
+        )
         return payload
 
     def _assemble(
@@ -479,6 +507,9 @@ class AgenticKnowledgePlugin(PluginInterface):
             cache="miss",
             status=status,
             doc_context=context.doc_context,
+            searches=len(results) + skipped,
+            budget_skipped=skipped,
+            cache_miss_reason="cold",
         )
 
     def _skip_cold_knowledge(self, turn: AgentTurn, requests) -> tuple:
@@ -702,6 +733,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         decision: EscalationDecision,
         publish: Optional[PublishStatus],
         docs: Optional[ScanOutcome] = None,
+        mining: Any = None,
     ) -> None:
         """Write the knowledge layer's decision into ``payload["routing"]``."""
         routing = payload.get("routing")
@@ -722,6 +754,30 @@ class AgenticKnowledgePlugin(PluginInterface):
             "cache": context.cache if context else "disabled",
             "loop_count": decision.loop_count,
         }
+        # The numbers a deployment needs to read the layer without its
+        # contents: how many searches the read made, how many the budget
+        # could not start, why the cache did not serve, what the turn mined,
+        # and how much of the write the stream already knew.
+        metrics: Dict[str, Any] = {
+            "searches_per_request": int(
+                getattr(context, "searches", 0) if context else 0
+            ),
+            "read_budget_skips": int(
+                getattr(context, "budget_skipped", 0) if context else 0
+            ),
+            "cache_miss_reason": (
+                context.cache_miss_reason if context is not None else ""
+            ),
+            "mined_kinds": sorted(
+                {str(event.kind) for event in getattr(mining, "events", ())}
+            )
+            if mining is not None
+            else [],
+            "docs_publish_dropped_as_duplicate": int(
+                publish.deduplicated if publish is not None else 0
+            ),
+        }
+        knowledge["metrics"] = metrics
         if decision.action != "none":
             knowledge["escalation"] = {
                 "action": decision.action,
@@ -1054,6 +1110,13 @@ def _source_counts(context: Optional[KnowledgeContext]) -> Dict[str, int]:
         key = hit.category or "doc"
         counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+def _with_miss_reason(context: KnowledgeContext, reason: str) -> KnowledgeContext:
+    """The context, saying why the cache did not serve it."""
+    import dataclasses
+
+    return dataclasses.replace(context, cache_miss_reason=reason)
 
 
 def _query_builder_with_failure(builder: Any, signature: str) -> Any:
