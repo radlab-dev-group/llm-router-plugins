@@ -67,13 +67,35 @@ every kind. The shipped policy:
 | `implement`  | `readme`, `guide`, `contributing`       |
 | `plan`       | `readme`, `guide`, `changelog`, `note`  |
 | `review`     | `guide`, `contributing`, `security`     |
-| `git_review` | (no documentation source)               |
+| `git_review` | `guide`, `contributing`, `security`     |
 | `*`          | every kind                              |
 
 A repository that has only a `README` therefore gives `debug` and `test`
-nothing to read, while `implement` finds the `readme`. That is a policy
-decision, not a failure — but it is the first thing to check when a search
-comes back empty in one mode and not in another.
+nothing to read, while `implement` finds the `readme`. `git_review` reads
+the same pages as `review` — it is its alias. That is a policy decision,
+not a failure — but it is the first thing to check when a search comes back
+empty in one mode and not in another.
+
+## On what scale to read a score
+
+A hybrid search returns a fused (RRF) rank that lives on its own scale —
+its ceiling is the best hit actually in hand, not one. Before a hit goes
+under a mode's weight or a threshold, the rank is remapped onto 0–1 inside
+the result set that produced it, and every hit carries the name of the
+scale its score lives on (`score_scale`: `rrf`, `reranker` or `cosine`).
+`strong_recipe_score` is a threshold on that remapped scale; `min_similarity`
+stays where the engine applies it.
+
+## What a read costs
+
+A mode's sources — mined knowledge, the archive, the documentation — are
+read in parallel inside one call under one shared budget, not one after
+another: a slow source no longer spends the budget the others were to use.
+The shipped `read.timeout_seconds` is 3.0. The annotation under
+`routing.knowledge` carries a `metrics` block with how many searches the
+read made for the request and how many the budget could not start — the
+number a deployment reads to see how much the layer costs the engine per
+request.
 
 ## How documentation is classified
 
