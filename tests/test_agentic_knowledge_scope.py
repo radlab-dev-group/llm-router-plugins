@@ -164,3 +164,59 @@ def test_the_scan_is_bounded_per_request():
     lead = [_message("user", "x" * 200_000) for _ in range(12)]
     payload = {"input": lead + [_message("user", _context())]}
     assert declared_working_directory(payload) == ""
+
+
+# ------------------------------------------------------ 0.4 non-ASCII --
+def test_non_ascii_repository_names_get_a_real_scope_key():
+    """0.4: the normalization used to delete every non-ASCII character, so
+    projekt / nihon / "-" all became the empty scope (the whole knowledge
+    layer silently off) and repo-a / repo-e became one collection.  A name
+    must survive as ASCII where transliteration can, and where it cannot, a
+    deterministic digest of the name stands in for it — never empty."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import (
+        scope_key,
+    )
+
+    keys = {
+        "проект": scope_key("/home/u/проект"),
+        "日本": scope_key("/home/u/日本"),
+        "ścieżki": scope_key("/home/u/ścieżki"),
+    }
+    assert all(keys.values()), f"an empty scope key: {keys}"
+    assert len(set(keys.values())) == len(keys), f"colliding keys: {keys}"
+
+
+def test_differing_only_by_diacritics_are_different_repositories():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import (
+        scope_key,
+    )
+
+    a = scope_key("/home/u/repo-ą")
+    e = scope_key("/home/u/repo-ę")
+    assert a and e
+    assert a != e, f"repo-ą and repo-ę collapsed to one scope: {a!r}"
+
+
+def test_ascii_names_keep_their_historical_keys():
+    """The transliteration must not move a scope a deployment already has."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import (
+        scope_key,
+    )
+
+    assert scope_key("/home/u/dev/webapp") == "webapp"
+    assert scope_key("/home/u/MyRepo") == "myrepo"
+    assert scope_key("/home/u/repo-x") == "repo-x"
+    assert scope_key("/home/u/2checkout") == "2checkout"
+    assert scope_key("/home/u/My.Repo_Name") == "my.repo_name"
+
+
+def test_the_hash_fallback_is_stable_and_distinct():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import (
+        scope_key,
+    )
+
+    first = scope_key("/home/u/проект")
+    second = scope_key("/home/u/проект")
+    assert first == second
+    assert len(first) <= 48
+    assert first != scope_key("/home/u/日本")

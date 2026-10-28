@@ -16,9 +16,12 @@ the isolation out of the query: the search of a repository cannot return a
 document of another even if a metadata filter is forgotten.
 """
 
+import hashlib
+import logging
 import os
 import re
 import posixpath
+import unicodedata
 
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Mapping, Optional, Tuple
@@ -68,6 +71,13 @@ _SCAN_TOTAL_CHARS = 1_000_000
 _UNSAFE_RE = re.compile(r"[^a-z0-9._-]+")
 
 _MAX_SCOPE_CHARS = 48
+
+_LOGGER = logging.getLogger("agentic-kb-scope")
+
+#: One warning per (key, first-seen name) per process: two distinct
+#: repositories sharing a scope key is a configuration error the operator
+#: should see once, not a line in every request.
+_seen: dict = {}
 
 
 def _clean_path(value: str) -> str:
@@ -240,7 +250,7 @@ class ScopeResolver:
         """
         root = declared_working_directory(payload)
         if not root:
-            return RepositoryScope(key=_normalize(self.default_scope))
+            return RepositoryScope(key=_normalize(self.default_scope, digest=True))
         return RepositoryScope(
             key=scope_key(
                 root,
@@ -296,13 +306,79 @@ def scope_key(
     name = parts[-1]
     if strategy == STRATEGY_PARENT_DIRECTORY and len(parts) > 1:
         name = f"{parts[-2]}-{name}"
-    return _normalize(name) or _normalize(default)
+    # A scope the operator never typed may not be empty: a repository whose
+    # name has no ASCII at all still needs a collection to live in, so the
+    # digest fallback stands in for a name that cannot be read.
+    return _normalize(name, digest=True) or _normalize(default)
 
 
-def _normalize(value: Optional[str]) -> str:
-    """Make an out of a path fragment something a collection name accepts."""
-    text = _UNSAFE_RE.sub("-", (value or "").strip().lower()).strip("-._")
-    return text[:_MAX_SCOPE_CHARS].strip("-._")
+def _transliterate(value: str) -> str:
+    """
+    Reduce *value* to the ASCII it contains, best effort.
+
+    A name is lowercased and its safe characters kept; the non-ASCII that
+    survives is decomposed (NFKD) and its diacritics dropped, so ``repo-ą``
+    reads as ``repo-a`` and two repositories that differ only by a diacritic
+    stay apart.  A name with no ASCII at all (``проект``, ``日本``) reduces to
+    nothing, and the caller replaces it with a deterministic digest of the
+    original — a scope may not be empty, and a collision of two different
+    names is worse than a name no one can read.
+    """
+    decomposed = unicodedata.normalize("NFKD", value)
+    return "".join(
+        char for char in decomposed if unicodedata.category(char) != "Mn"
+    )
+
+
+def _collides(key: str, original: str) -> None:
+    """Warn once per process when a different name lands on a taken key."""
+    first = _seen.get(key)
+    if first is None:
+        _seen[key] = original
+        return
+    if original != first and (key, first) not in _collides._warned:
+        _collides._warned.add((key, first))
+        _LOGGER.warning(
+            "knowledge scope collision: %r and %r both normalize to %r; "
+            "configure scope.overrides to keep them apart",
+            first,
+            original,
+            key,
+        )
+
+
+_collides._warned = set()
+
+
+def _normalize(value: Optional[str], *, digest: bool = False) -> str:
+    """
+    Make an out of a path fragment something a collection name accepts.
+
+    A *derived* scope (``digest=True``) must never be empty, because an empty
+    key is a scope the engine cannot name and the whole layer goes silently
+    off for that repository; a name with no ASCII at all then stands behind a
+    deterministic digest of itself.  An *operator-supplied* scope
+    (``digest=False``) is a typo when it carries no readable identity, and the
+    caller refuses it rather than inventing a key the operator never asked for.
+    """
+    original = (value or "").strip()
+    if not original:
+        return ""
+    # Transliterate before the unsafe substitution: a name that is only
+    # non-ASCII (``проект``, ``日本``) must not be emptied by the substitution
+    # and then left with no key to fall back on.  The transliteration is what
+    # decides whether a readable ASCII name survives at all.
+    text = _transliterate(original.lower())
+    key = _UNSAFE_RE.sub("-", text).strip("-._")[:_MAX_SCOPE_CHARS].strip("-._")
+    if not key:
+        if not digest:
+            return ""
+        # Nothing readable survived: a deterministic digest of the original
+        # name is the only key that is both stable and never empty.  It is a
+        # fallback, not a preference — a readable name is always preferred.
+        return hashlib.sha1(original.encode("utf-8")).hexdigest()[:8]
+    _collides(key, original)
+    return key
 
 
 def normalize_scope(value: str) -> str:
