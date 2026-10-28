@@ -1156,3 +1156,29 @@ def test_the_clean_happens_before_the_batch_it_is_asked_to_drain(monkeypatch):
 
     assert worker_cli.main(["--clean-redis-memory-cache", "--once"]) == 0
     assert order == ["clean", "drain"]
+
+
+def test_a_poison_entry_with_an_unusable_scope_does_not_wedge_the_batch():
+    """0.1: `config.collection()` outside the try let a ValueError escape the
+    batch loop.  A scope the engine cannot name (empty, `-`) used to be a
+    poison entry that was never acknowledged and re-processed forever."""
+    good = knowledge_event(fingerprint="ok1")
+    poison = dataclasses.replace(good, scope="-", fingerprint="poison1")
+    redis = FakeRedis(
+        messages=[("1-0", stream_message(good)), ("2-0", stream_message(poison))]
+    )
+    sse = FakeSSE()
+    work = worker(redis=redis, sse=sse)
+    work._ensure_group()
+    processed = work.run_once(block_ms=0)
+    assert processed == 2
+    # the good one is indexed, the poison one is counted as a failure
+    assert len(sse.indexed) == 1
+    assert sse.indexed[0][0] == "agentic_kb_webapp"
+    # the poison entry got an attempt recorded, it is not silently acked
+    assert work._tries_key("2-0") in redis.kv
+    assert "1-0" in redis.acked
+    assert "2-0" not in redis.acked
+    # and the worker is not wedged: a second read on the now-empty stream
+    # returns cleanly instead of raising
+    assert work.run_once(block_ms=0) == 0

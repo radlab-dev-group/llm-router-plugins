@@ -387,10 +387,21 @@ class KnowledgeIndexWorker:
         """
         groups: Dict[str, List[Tuple[Any, KnowledgeEvent, Dict[str, Any]]]] = {}
         for entry_id, event in pending:
-            collection = self._config.collection(event.scope, event.kind)
             try:
+                # The scope arrives from the agent and may name a directory the
+                # engine will not accept in a collection name; naming the
+                # collection is part of the preparation, so its failure settles
+                # the entry like any other instead of escaping the batch.
+                collection = self._config.collection(event.scope, event.kind)
                 document = self._document(self._prepare(event), event)
-            except Exception as exc:  # masking is per document; so is its failure
+            except Exception as exc:  # preparation is per document; so is failure
+                self._log(
+                    "warning",
+                    "knowledge entry %s of scope=%s could not be prepared: %s",
+                    entry_id,
+                    event.scope,
+                    _describe(exc),
+                )
                 self._settle_failure(entry_id, event, exc)
                 continue
             groups.setdefault(collection, []).append((entry_id, event, document))
