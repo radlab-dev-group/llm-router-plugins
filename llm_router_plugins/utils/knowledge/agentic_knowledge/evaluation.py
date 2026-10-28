@@ -45,6 +45,11 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.query import QueryBuil
 from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     KIND_RECIPE,
 )
+from llm_router_plugins.utils.knowledge.agentic_knowledge.doc_context import (
+    DocContext,
+    DocFile,
+    build_doc_context,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
     STATUS_OK,
     SearchRequest,
@@ -98,8 +103,18 @@ class _FakeStore:
         text: str,
         mined_at: str,
         phase: str = "",
+        doc_type: str = "",
     ) -> None:
-        """Add one document to the index."""
+        """
+        Add one document of any kind to the index.
+
+        The index mirrors the engine the read path talks to: a document is
+        filed under its kind, its collection, the phase it was mined in and,
+        for documentation, the kind of page it is.  Indexing only recipes
+        used to make the replay blind to the rest of the knowledge base —
+        the dead ends, the procedures and the documentation the read path
+        actually injects — so the metrics it produced understated the block.
+        """
         self.documents.append(
             {
                 "collection": collection,
@@ -107,11 +122,20 @@ class _FakeStore:
                 "text": text,
                 "mined_at": mined_at,
                 "phase": phase,
+                "doc_type": doc_type,
             }
         )
 
-    def search(self, request: SearchRequest) -> SearchResult:
-        """Return deterministic overlap-scored hits for *request*."""
+    def search(self, request: SearchRequest, min_similarity: float = 0.0) -> SearchResult:
+        """
+        Return deterministic overlap-scored hits for *request*.
+
+        The request's metadata restrictions are honored the way the engine
+        honors them: the collection, the categories, the phases and — for a
+        documentation search — the kinds of page asked for.  A document
+        below the *min_similarity* floor is not returned at all, which is
+        the vector leg's cut and not the caller's.
+        """
         query = _tokens(request.query)
         if not query:
             return SearchResult(STATUS_OK)
@@ -124,8 +148,14 @@ class _FakeStore:
                 continue
             if request.phases and document["phase"] not in request.phases:
                 continue
+            if (
+                request.doc_types
+                and document.get("doc_type")
+                and document["doc_type"] not in request.doc_types
+            ):
+                continue
             score = _overlap(query, _tokens(document["text"]))
-            if score < _MIN_OVERLAP:
+            if score < _MIN_OVERLAP or score < float(min_similarity):
                 continue
             scored.append(
                 (
@@ -200,22 +230,34 @@ class ReplayEngine:
             store = _FakeStore()
             turns = session.get("turns") or []
             mined: Dict[str, str] = {}
+            # A session may declare the documentation its repository had
+            # written down; the digest of those files is what the read path
+            # injects on every request of the session, and a replay that
+            # ignored it understated the block by the whole map.
+            doc_context = _doc_context(session, self.config)
             for index, raw in enumerate(turns):
                 turn = _build_turn(session, raw, self.config)
                 mined_result = self._miner.mine(turn)
                 # Publish the fix this turn produced *after* scoring it, so a
                 # turn can never retrieve what it has not yet earned.
                 policy = self.config.policy_for(turn.mode)
-                context, retrieved = self._read(turn, policy, store, variants)
+                context, retrieved = self._read(
+                    turn, policy, store, variants, doc_context
+                )
                 for event in mined_result.events:
+                    # Every mined kind is indexed, not only recipes: a dead
+                    # end the replay cannot see is a regression the metrics
+                    # cannot catch, and the block the read path injects is
+                    # made of more than recipes.
+                    store.index(
+                        event.kind,
+                        self.config.collection(turn.scope, event.kind),
+                        event.text,
+                        str(raw.get("id", index)),
+                        phase=str(event.metadata.get("phase", "")),
+                        doc_type=str(event.metadata.get("doc_type", "")),
+                    )
                     if event.kind == KIND_RECIPE:
-                        store.index(
-                            event.kind,
-                            self.config.collection(turn.scope, event.kind),
-                            event.text,
-                            str(raw.get("id", index)),
-                            phase=str(event.metadata.get("phase", "")),
-                        )
                         mined[str(raw.get("id", index))] = event.signature_hash
                 self._score(variants, raw, context, retrieved, store, index)
                 self._escalate(variants, turn, context, mined_result, raw, policy)
@@ -238,6 +280,7 @@ class ReplayEngine:
         policy: Any,
         store: _FakeStore,
         variants: Dict[str, Any],
+        doc_context: Optional[DocContext] = None,
     ) -> Tuple[Any, List[str]]:
         """Run the read path for one turn; the no-KB variant reads nothing."""
         if policy is None:
@@ -246,13 +289,13 @@ class ReplayEngine:
         results = []
         retrieved: List[str] = []
         for request in self._query_builder.build(turn, policy):
-            result = store.search(request)
+            result = store.search(request, min_similarity=self.config.min_similarity)
             results.append((result, request.categories))
             for hit in result.hits:
                 mined = store.mined_at_for(hit.document_name)
                 if mined:
                     retrieved.append(mined)
-        context = assembler.assemble(results, policy)
+        context = assembler.assemble(results, policy, doc_context=doc_context)
         return context, retrieved
 
     def _score(
@@ -272,6 +315,9 @@ class ReplayEngine:
             tally = variants[name]
             tally.turns += 1
             tally.injected_chars += context.chars
+            tally.retrieved_chars += _retrieved_chars(context)
+            if getattr(context, "doc_context", None):
+                tally.turns_with_doc_context += 1
             if applicable:
                 tally.applicable += 1
                 if hit:
@@ -313,6 +359,11 @@ class _VariantTally:
     injected_chars: int = 0
     escalations: int = 0
     missed_saves: int = 0
+    #: Characters of retrieved content, before the standing documentation
+    #: map the block may also carry; the fixed and the earned halves of the
+    #: injection are reported apart.
+    retrieved_chars: int = 0
+    turns_with_doc_context: int = 0
 
     def report(self) -> Dict[str, Any]:
         """The variant's metrics, rounded for a stable report."""
@@ -322,7 +373,14 @@ class _VariantTally:
             "turns_potentially_saved": self.turns_saved,
             "missed_saves": self.missed_saves,
             "escalations": self.escalations,
+            # The block a request is shown: retrieved content and, where the
+            # mode reads documentation, the standing map the block carries.
+            # The two are measured apart, because the map is a fixed cost the
+            # operator opted into and the retrieved content is the variable
+            # part the read path earns.
             "injected_chars_per_turn": _ratio(self.injected_chars, self.turns),
+            "retrieved_chars_per_turn": _ratio(self.retrieved_chars, self.turns),
+            "turns_with_doc_context": self.turns_with_doc_context,
         }
 
 
@@ -508,6 +566,53 @@ def _empty_context() -> Any:
     )
 
     return KnowledgeContext(cache="miss", status="disabled")
+
+
+def _doc_context(
+    session: Dict[str, Any], config: AgenticKnowledgeConfig
+) -> Optional[DocContext]:
+    """
+    The standing documentation digest of a recorded session, if it declared one.
+
+    A session declares the documentation its repository had written down —
+    path, kind, headings — and the digest built from it is what the read path
+    injects on every request of that session.  A session that declares none
+    replays without a map, exactly as a repository with no markdown reads.
+    """
+    raw = session.get("docs") or ()
+    if not raw:
+        return None
+    files = tuple(
+        DocFile(
+            path=str(item.get("path") or "").strip(),
+            doc_type=str(item.get("doc_type") or ""),
+            headings=tuple(
+                str(heading).strip()
+                for heading in (item.get("headings") or ())
+                if str(heading).strip()
+            ),
+            content_hash=str(item.get("hash") or ""),
+        )
+        for item in raw
+        if str(item.get("path") or "").strip()
+    )
+    if not files:
+        return None
+    return build_doc_context(
+        str(session.get("scope") or "repo"),
+        files,
+        max_chars=config.doc_context_max_chars,
+    )
+
+
+def _retrieved_chars(context: Any) -> int:
+    """Characters of retrieved content in one block, without the map."""
+    if context is None or context.empty:
+        return 0
+    digest = getattr(context, "doc_context", None)
+    if not digest:
+        return int(context.chars)
+    return max(0, int(context.chars) - len(digest.text))
 
 
 def _tokens(text: str) -> frozenset:

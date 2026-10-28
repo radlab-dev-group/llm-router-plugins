@@ -1,5 +1,5 @@
 {
-  "description": "Recorded coding-agent sessions for counterfactual replay of the agentic knowledge layer. Failures, patches and outcomes are synthetic and anonymized; 'saved_by' names the earlier turn whose recipe should be retrieved, 'is_loop' marks a turn the agent was spinning in.",
+  "description": "Recorded coding-agent sessions for counterfactual replay of the agentic knowledge layer. Failures, patches and outcomes are synthetic and anonymized; 'saved_by' names the earlier turn whose recipe should be retrieved, 'is_loop' marks a turn the agent was spinning in. A session may declare 'docs': the documentation its repository had written down, whose standing digest the read path injects on every request of the session.",
   "sessions": [
     {
       "id": "export-fix",
@@ -22,6 +22,26 @@
           "failure": "FAILED tests/test_export.py::test_empty - AssertionError: expected [] got None in to_rows()",
           "saved_by": "export-fix-1",
           "is_loop": false
+        }
+      ],
+      "docs": [
+        {
+          "path": "README.md",
+          "doc_type": "readme",
+          "headings": [
+            "Export project",
+            "Running the tests"
+          ],
+          "hash": "aa11"
+        },
+        {
+          "path": "docs/export.md",
+          "doc_type": "guide",
+          "headings": [
+            "Export guide",
+            "Empty inputs"
+          ],
+          "hash": "bb22"
         }
       ]
     },
