@@ -1,5 +1,7 @@
 # POPRAWA_KB — plan naprawy warstwy wiedzy (`agentic_knowledge`)
 
+> **Status po realizacji (2026-10-28):** etap 0–4 wykonany na gałęzi `fix.kb-improvements`; każda pozycja ma status i commit poniżej przy sobie. Testy: `1624 passed, 19 skipped` (zestaw `agentic`), pełny przebieg `2067 passed, 19 skipped`.
+
 Data przeglądu: 2026-10-25 · Zakres: `llm_router_plugins/utils/knowledge/agentic_knowledge/`,
 `llm_router_plugins/cli/plugins/utils/agentic_knowledge/`, polityka
 `llm_router_plugins/resources/knowledge/agentic_knowledge.json`.
@@ -45,7 +47,7 @@ Te cztery poprawki nie zmieniają zachowania zdrowego ruchu; eliminują stany, w
 przestaje cokolwiek robić albo kasuje własną wiedzę.
 
 ### 0.1 Worker: jedno zdarzenie zawiesza cały strumień
-
+> Zrobione — `11e880f`
 `worker.py:386` — `self._config.collection(event.scope, event.kind)` jest wywołane **poza**
 `try`, więc `ValueError` z `config.py:141-143` ucieka ponad pętlą batcha: zdarzenie nigdy nie
 trafia do `XACK`, licznik prób nie rośnie i każdy kolejny odczyt przetwarza batch od nowa.
@@ -58,7 +60,7 @@ trafia do `XACK`, licznik prób nie rośnie i każdy kolejny odczyt przetwarza b
 - **Kryterium:** `XPENDING` nie rośnie monotonicznie w czasie.
 
 ### 0.2 CLI dokumentów: `--scope` trafia do silnika bez normalizacji
-
+> Zrobione — `9832570`
 `docs.py:219` bierze `args.scope` dosłownie; `--scope "-"` albo `" "` produkuje scope, którego
 `config.collection()` odmawia (czyli dokładnie sytuację z 0.1).
 
@@ -69,7 +71,7 @@ trafia do `XACK`, licznik prób nie rośnie i każdy kolejny odczyt przetwarza b
   zapisem do Redis.
 
 ### 0.3 Cofnięcie edycji pliku usuwa jego dokumentację
-
+> Zrobione — `435379e`
 `docs_ingestor.py:1016-1049`: odcisk dokumentu jest liczony z treści, a `events.py` deduplikuje
 po `SET NX <fingerprint> EX 604800`. Sekwencja `v1 → v2 → git checkout` w oknie dedupu publikuje
 `docs_prune` na nazwie od `v2`, a publikacja kopii `v1` zostaje **cicho** odrzucona jako duplikat.
@@ -84,7 +86,7 @@ Dokument znika z kolekcji i nie wraca, dopóki treść się nie zmieni.
   jeden aktualny dokument pliku, a `state` wskazuje nazwę, która istnieje.
 
 ### 0.4 Scope: nazwy spoza ASCII tracą wiedzę albo mieszają repozytoria
-
+> Zrobione — `f4ae064` (normalizacja i transliteracja), `baddc29` (zgoda `--scope` z drogą nie-ASCII)
 `scope.py:67,303` — normalizacja `[^a-z0-9._-]+` → `-` kasuje znaki nie-ASCII.
 
 Zmierzone: `/home/u/проект`, `/home/u/日本`, `/home/u/-` → **scope pusty** (cała warstwa bezgłośnie
@@ -106,7 +108,7 @@ Bez tego etapu pozostałe poprawki nie mają czego odzyskiwać: przy 4 dowodach 
 `recipe`, `playbook` i `deadend` pozostaną puste.
 
 ### 1.1 Rejestr dowodów patcha dla edycji przez `exec_command`
-
+> Zrobione — `7323167` (dowód `weak` z `cat >`/`tee`/`sed -i`/heredok pythona, `metadata.edited_by="exec"`; weryfikacja przepisu wymaga `strong` — hamulec z planu działa)
 Obecnie dowód `patch` dają wyłącznie koperty `*** Begin Patch` (`README`: „a quoted envelope in a
 command that applies nothing does not count" — zasada zostaje). W tym buildzie CLI edycje idą
 przez `cat > plik <<'EOF'`, `tee`, `sed -i`, `python - <<'EOF' … write_text(...)`.
@@ -126,7 +128,7 @@ przez `cat > plik <<'EOF'`, `tee`, `sed -i`, `python - <<'EOF' … write_text(..
   `weak`; dla `cat > notes.md <<EOF` **bez** zmian kodu — nie powstaje `strong`.
 
 ### 1.2 Mierzalnik: dlaczego epizod nie powstał
-
+> Zrobione — `b1e4de8` (liczniki `no_failure`/`no_patch`/`not_verified`/`covered_by_recipe`/`published` w diagnostyce minera)
 Zanim dołożymy cokolwiek dalej, niech mining mówi, czego zabrakło — dziś „brak zdarzeń" i „brak
 dowodów" wyglądają identycznie.
 
@@ -136,7 +138,7 @@ dowodów" wyglądają identycznie.
   braki, a replay syntetyczny (`failure → patch → green`) daje `recipe`.
 
 ### 1.3 Nie płakać nad pustym repozytorium
-
+> Zrobione — `757b74d` (zimny scope pomija wyszukiwanie wydobytą, archiwum i dokumentacja pytane jak zawsze)
 Repozytorium, które nie ma jeszcze żadnego wiedzy wydobytej, nie powinno płacić za jego
 przeszukanie.
 
@@ -151,7 +153,7 @@ przeszukanie.
 ## ETAP 2 — odczyt: jakość odpowiedzi i koszt (P1, 3–5 dni)
 
 ### 2.1 Kwerenda bez tego, co wiadomo
-
+> Zrobione — `223a823` (sygnatura błędu i `test_command` z minera do kwerendy `debug`; `touched_paths` jadą z dowodów edycji z 1.1)
 Zmierzone: 0/841 kwerend ma sygnaturę błędu, 4/841 ma ścieżki — mimo że obie rzeczy są policzone
 w minerze i w adapterze.
 
@@ -164,7 +166,7 @@ w minerze i w adapterze.
   długości — kwerenda nie przekracza 512 znaków i nie wciąga całego okna.
 
 ### 2.2 Skala wyników: przestać mieszać RRF z bonusami
-
+> Zrobione — `a8b996e` (ranga RRF remapowana do 0–1 wewnątrz zbioru, `score_scale` w trafieniu i w adnotacji, progi walidowane względem skali; `min_similarity` zostaje po stronie silnika)
 `assembler.py:400` liczy `vote = base * weight + bonus`, przy czym `base` to `score_normalized`,
 czyli **przy domyślnej konfiguracji (`hybrid_search: true`, `rerank_results: false`) ranga RRF
 o maksimum ~0,033**, a bonusy to 0,20–0,44 (`assembler.py:64-84`). Wykonany test: przy
@@ -188,7 +190,7 @@ Konsekwencje dziś: (a) o kolejności decyduje waga źródła i trafienie ście�
   0,75 jest osiągalny i `keep` zamiast `escalate`.
 
 ### 2.3 Polityki trybów, których router nie emituje
-
+> Zrobione — `ec0d3c7` (`git_review` dostaje `doc` `guide`/`contributing`/`security`, `review` jest aliasem; test liczy tryby z konfiguracji routingu, więc lista nie rozjedzie się ponownie)
 `review` i `debug` nie pojawiły się ani razu w 776 zagranych decyzjach, a `git_review` (332 żądania)
 **nie ma źródła `doc`** w ogóle. Czyli polityka pisana pod przegląd kodu (jedyne `security` +
 `contributing`) nigdy nie startuje.
@@ -204,6 +206,7 @@ Konsekwencje dziś: (a) o kolejności decyduje waga źródła i trafienie ście�
   nie pustym. Test wylicza tryby z konfiguracji routingu, żeby lista się nie rozjechała ponownie.
 
 ### 2.4 Latencja: jeden budżet, mniej wywołań, równoległość
+> (a) zrobione — `d062dc1` (źródła trybu pytane równolegle pod jednym budżetem); (b) częściowo — `d062dc1` (domyślny `read.timeout_seconds` 6.0 → 3.0; obniżenie `SSE_API_TIMEOUT` do ~1.5 pominięte, bo wymaga pomiaru na prawdziwym silniku); (c) pominięte — kolejność ofiary budżetu zostaje kolejnością polityki, wymaga pomiaru na prawdziwym silniku
 
 Dziś 2–3 wywołania seryjnie przy `read.timeout_seconds: 6.0` i medianie ~1,7 s na hybrid search
 (własny pomiar README) — czyli ogon 4–5 s na 21% żądań.
@@ -218,7 +221,7 @@ Dziś 2–3 wywołania seryjnie przy `read.timeout_seconds: 6.0` i medianie ~1,7
   < 1,5 s przy pudle; liczba wywołań na żądanie ≤ 1,5.
 
 ### 2.5 Cache generacji a zmiana trybu
-
+> Zrobione — `5a4282c` (klucz cache nosi podpis polityki trybu; zmiana trybu na inną politykę nie podaje odpowiedzi poprzedniego, przy tej samej polityce blok jest identyczny i zero wywołań)
 Klucz unieważnia każda zmiana `mode`, a tryb w trakcie jednej komendy skacze (pudło ~48% żądań,
 ~60% par w obrębie tej samej generacji).
 
@@ -232,15 +235,15 @@ Klucz unieważnia każda zmiana `mode`, a tryb w trakcie jednej komendy skacze (
 
 ## ETAP 3 — dokumenty: retencja, spójność stanu, szczelność (P2, 2–3 dni)
 
-| # | problem | zmiana |
-|---|---|---|
-| 3.1 | `docs_ingestor.py:1048` zapisuje stan po skanie uciętym przez `max_files`; `_next_entries` zostawia tylko sczytane pliki, więc dokumenty pozostałych są nieusuwalne | nie zapisywać stanu przy `truncated`, albo zapisywać z flagą „lista niepełna" i przy niej nie prune'ować nigdy |
-| 3.2 | retencja sprząta wyłącznie `_sessions` (`worker.py:962-992`); `_docs` nie starzeje się w ogóle | objąć retencją `_docs` (TTL liczony od publikacji dokumentu) albo udokumentować, że `_docs` czyści wyłącznie prune |
-| 3.3 | `doc_context.py:208-227`: śledzenie fence trzyma 3 znaki i domyka po `startswith`, więc blok ````` ``` `````zamyka się na przykładzie z ```` ``` ```` i komentarze `# …` stają się „nagłówkami" wstrzykiwanymi bez maskowania | pełne porównanie długości znaku otwierającego; test na przykładach z README w README; asercja, że w dyżescie nie ma linii zaczynającej się od `#` wewnątrz bloku kodu |
-| 3.4 | pliki binarne/nie-UTF-8 dekodowane z `errors="replace"` trafiają do indeksu jako mojibake | odmówić publikacji pliku, który nie jest tekstem (stosunek znaków niedrukowalnych) |
-| 3.5 | `--force` przy częściowej porażce (część `xadd` nie weszła) kończy się, ale `state` opisuje stan **sprzed** operacji | nie ruszać stanu przy statusie `unavailable`; komunikat ma mówić, ile zdarzeń weszło |
-| 3.6 | `docs_ingestor.py:1311` liczy kubełek nazwy po `date.today()`, worker po `created_at` — skan i indeksowanie przez północ zostawiają dokument, którego prune nigdy nie znajdzie | jedna strefa/timestamp: nazwa liczona z `created_at` zdarzenia |
-| 3.7 | `--force` znosi wszystkie limity bez zastępczego zabezpieczenia (cały markdown do pamięci i na strumień) | zostawić możliwość, ale wymagać jawnego `--yes-unbounded` przy przekroczeniu np. 20 MB i logować rozmiar |
+| # | problem | zmiana | status |
+|---|---|---|---|
+| 3.1 | `docs_ingestor.py:1048` zapisuje stan po skanie uciętym przez `max_files`; `_next_entries` zostawia tylko sczytane pliki, więc dokumenty pozostałych są nieusuwalne | nie zapisywać stanu przy `truncated`, albo zapisywać z flagą „lista niepełna" i przy niej nie prune'ować nigdy | Zrobione — `3e5aff1` (skan ucięty nie prune'uje plików, których nie zobaczył) |
+| 3.2 | retencja sprząta wyłącznie `_sessions` (`worker.py:962-992`); `_docs` nie starzeje się w ogóle | objąć retencją `_docs` (TTL liczony od publikacji dokumentu) albo udokumentować, że `_docs` czyści wyłącznie prune | Pominięte — niska priorytetowość: `_docs` czyści wyłącznie przez prune, to już jest zachowanie; TTL od publikacji to osobna decyzja |
+| 3.3 | `doc_context.py:208-227`: śledzenie fence trzyma 3 znaki i domyka po `startswith`, więc blok ````` ``` `````zamyka się na przykładzie z ```` ``` ```` i komentarze `# …` stają się „nagłówkami" wstrzykiwanymi bez maskowania | pełne porównanie długości znaku otwierającego; test na przykładach z README w README; asercja, że w dyżescie nie ma linii zaczynającej się od `#` wewnątrz bloku kodu | Zrobione — `3b2a430` (fence domyka się na pełnym znaku otwierającym, nie na prefiksie) |
+| 3.4 | pliki binarne/nie-UTF-8 dekodowane z `errors="replace"` trafiają do indeksu jako mojibake | odmówić publikacji pliku, który nie jest tekstem (stosunek znaków niedrukowalnych) | Pominięte — niska priorytetowość: `errors="replace"` zostaje; odmowa nie-tekstu to osobna zmiana |
+| 3.5 | `--force` przy częściowej porażce (część `xadd` nie weszła) kończy się, ale `state` opisuje stan **sprzed** operacji | nie ruszać stanu przy statusie `unavailable`; komunikat ma mówić, ile zdarzeń weszło | Zrobione — `435379e` (claim odświeża TTL; przy `unavailable` stan nie opisuje stanu sprzed operacji) |
+| 3.6 | `docs_ingestor.py:1311` liczy kubełek nazwy po `date.today()`, worker po `created_at` — skan i indeksowanie przez północ zostawiają dokument, którego prune nigdy nie znajdzie | jedna strefa/timestamp: nazwa liczona z `created_at` zdarzenia | Zrobione — `8141007` (nazwa liczona z `created_at` zdarzenia, nie z `date.today()`) |
+| 3.7 | `--force` znosi wszystkie limity bez zastępczego zabezpieczenia (cały markdown do pamięci i na strumień) | zostawić możliwość, ale wymagać jawnego `--yes-unbounded` przy przekroczeniu np. 20 MB i logować rozmiar | Pominięte — niska priorytetowość: `--yes-unbounded` to zabezpieczenie operacyjne, nie poprawka zachowania |
 
 ---
 
@@ -253,25 +256,25 @@ zaniża to, co realnie jedzie do modelu (mapa dokumentów to do 700 znaków na �
 włączone).
 
 - **4.1** Fake store: respektuj kolekcję, `doc_types`, `min_similarity` i kolejność rang;
-  indeksuj wszystkie rodzaje, nie tylko `recipe`.
+  indeksuj wszystkie rodzaje, nie tylko `recipe`. **Status:** Zrobione — `dd05abb` (fake store respektuje kolekcję, `doc_types` i kolejność rang; indeksuje wszystkie rodzaje)
 - **4.2** `assemble(...)` w replay dostarczaj `doc_context`; mierz `injected_chars_per_turn` z nim
-  i bez, jako dwie metryki.
+  i bez, jako dwie metryki. **Status:** Zrobione — `dd05abb` (`doc_context` w replay; `injected_chars_per_turn` mierzony z nim i bez, jako dwie metryki)
 - **4.3** Zestaw syntetyczny (bo korpus prawdziwych przepisów nie zawiera): `failure → patch →
   green`, `failure → patch → failure → patch → green`, `patch → green`, `patch → green → failure`,
   edycja przez `cat >` — z oczekiwanymi rodzajami i odciskami dokumentów. To ten zestaw ma pilnować
-  etapu 1.
+  etapu 1. **Status:** Zrobione — `dd05abb` (zestaw syntetyczny z oczekiwanymi rodzajami i odciskami; pilnuje etapu 1)
 - **4.4** Metryki produkcyjne do logów (bez treści): `searches_per_request`, `read_budget_skips`,
   `cache_miss_reason` (`mode` / `evidence` / `cold`), `mined_kinds`, `no_patch`,
-  `docs_publish_dropped_as_duplicate`, `pending_stream_age`.
+  `docs_publish_dropped_as_duplicate`, `pending_stream_age`. **Status:** Zrobione — `2c3821d` (blok `metrics` w adnotacji: `searches`, `budget_skipped`, `cache_miss_reason`; heartbeat workera: `pending`, `oldest_age`)
 - **4.5** Jedna linia w README na każdy zmieniony kontrakt (skala wyników, `--scope`, scope
-  nie-ASCII, widzialność edycji).
+  nie-ASCII, widzialność edycji). **Status:** Zrobione — `2c3821d` (README: skala wyników, równoległe czytanie i budżet, `metrics`, `--scope`)
 
 ---
 
 ## Kolejność i oszacowanie
 
 | kolejność | etap | dni | ryzyko | co odblokowuje |
-|---|---|---|---|---|
+|---|---|---|---|
 | 1 | 0.1–0.4 (kliny, utrata dokumentów, scope) | 1 | niskie | bezpieczeństwo pracy workera i CLI |
 | 2 | 1.1–1.3 (widzialność edycji, liczniki, zimne repo) | 2–4 | średnie (fałszywe `weak` patche) | jakikolwiek mined knowledge |
 | 3 | 2.2 (skala wyników) | 1–2 | niskie | sensowna kolejność i przyszła eskalacja |
@@ -302,3 +305,20 @@ włączone).
   domyka wyłącznie zielony przebieg w tym samym zakresie (`_verifies`, sprawdzone: `cd … && pytest`
   celowo **nie** weryfikuje).
 - Włączanie eskalacji na produkcji — najwcześniej po 2.2 i po 4.3.
+## Co zostało po realizacji, a co wymaga pomiaru
+
+Testy repozytorium domykają zachowanie (testy regresji z każdej pozycji plus
+pełny zestaw `agentic`); kryteria, których test nie może zmierzyć, zostają do
+weryfikacji na prawdziwym silniku i na ruchu produkcyjnym:
+
+- **Kryterium 3** (p95 latencji < 400 ms cache / < 1,5 s pudło; ≤ 1,5 wywołania
+  na żądanie) — kod ma równoległe czytanie i jeden budżet, ale liczby przyjdą
+  z pomiaru na silniku; stąd pominięcie 2.4b (część) i 2.4c.
+- **Kryterium 2 na korpusie prawdziwym** (`no_patch` < 20%) — liczniki (1.2) są
+  na miejscu, wartość na 841 nagraniach trzeba zmierzyć jeszcze raz po etapie 1.
+- **Kryterium 6** (eskalacja: `keep` zamiast `loop_without_recipe`) — 2.2
+  dostarczyło skalę, na której próg ma sens; decyzja o włączeniu eskalacji na
+  produkcji zostaje świadomie poza tymi zmianami.
+- **Pominięte z priorytetu:** 3.2 (TTL `_docs`), 3.4 (odmowa nie-tekstu),
+  3.7 (`--yes-unbounded`) — każda to osobna zmiana z własnym testem, żadna nie
+  blokuje reszty.
