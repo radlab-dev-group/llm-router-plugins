@@ -11,6 +11,7 @@ request never pays for a scan twice in an hour.
 """
 
 import dataclasses
+import hashlib
 import inspect
 import os
 import pathlib
@@ -882,11 +883,36 @@ def test_explicit_scope_that_normalizes_to_empty_is_refused(tmp_path, scope):
     wedge 0.1 removed.  It is refused with a validation error before anything
     is written to the stream."""
     demo_repo(tmp_path)
-    # The refusal is logged to stderr (not stdout) and exits 1; the dry-run
-    # never reaches the point where it prints scope=... or touches the stream.
     code, out = _cli_exit(tmp_path, "--scope", scope)
     assert code == 1
     assert "scope=" not in out
+
+
+@pytest.mark.parametrize(
+    "scope,expected",
+    [
+        ("проект", None),
+        ("日本", None),
+        ("repo-ą", "repo-a"),
+        ("repo-ę", "repo-e"),
+        ("Ścieżki", "sciezki"),
+    ],
+)
+def test_explicit_non_ascii_scope_takes_the_derived_road(
+    tmp_path, scope, expected
+):
+    """0.4: an operator-typed scope goes through the same transliteration as
+    a derived one — diacritics survive as their ASCII, and a name with no
+    ASCII at all keeps the deterministic digest the derived road gives it, so
+    the command indexes into the same collection the proxy would use."""
+    demo_repo(tmp_path)
+    code, out = _cli_exit(tmp_path, "--scope", scope)
+    assert code == 0
+    if expected is None:
+        digest = hashlib.sha1(scope.strip().encode("utf-8")).hexdigest()[:8]
+        assert f"scope={digest}" in out
+    else:
+        assert f"scope={expected}" in out
 
 
 def test_a_blank_explicit_scope_falls_back_to_the_derived_one(tmp_path):

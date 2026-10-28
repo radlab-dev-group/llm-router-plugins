@@ -376,9 +376,21 @@ def _normalize(value: Optional[str], *, digest: bool = False) -> str:
         # Nothing readable survived: a deterministic digest of the original
         # name is the only key that is both stable and never empty.  It is a
         # fallback, not a preference — a readable name is always preferred.
-        return hashlib.sha1(original.encode("utf-8")).hexdigest()[:8]
+        return _digest_of(original)
     _collides(key, original)
     return key
+
+
+def _digest_of(original: str) -> str:
+    """The deterministic stand-in for a name nothing readable survives."""
+    return hashlib.sha1(original.encode("utf-8")).hexdigest()[:8]
+
+
+def _is_a_name(value: str) -> bool:
+    """Whether *value* carries a letter or a digit in any script."""
+    return any(
+        unicodedata.category(char).startswith(("L", "N")) for char in value
+    )
 
 
 def normalize_scope(value: str) -> str:
@@ -387,11 +399,14 @@ def normalize_scope(value: str) -> str:
 
     The proxy path derives its scope from a directory name and normalizes it
     on the way in; a scope typed into ``llm-router-agentic-kb-docs --scope``
-    must take the same road, because the engine refuses a collection name with
-    a character the normalization would not produce — and a scope that cannot
-    be named is a scope the worker cannot index into.  An empty result is
-    returned as ``""`` so the caller can refuse the command before it writes
-    anything.
+    takes the same road — transliteration and the digest of a name with no
+    ASCII in it included — because a repository indexed by hand and one an
+    agent works in have to land in the same collection.
+
+    What the operator typed is still the last word: a scope that carries no
+    letter and no digit at all (``-``, ``___``, a bare dot) is a typo, not a
+    name in an unfamiliar script, and it is returned as ``""`` so the caller
+    refuses the command instead of inventing a collection nobody meant.
 
     Parameters
     ----------
@@ -401,6 +416,16 @@ def normalize_scope(value: str) -> str:
     Returns
     -------
     str
-        The normalized scope key, possibly ``""``.
+        The normalized scope key, ``""`` for a scope that names nothing.
     """
-    return _normalize(value)
+    original = (value or "").strip()
+    if not original:
+        return ""
+    key = _normalize(original)
+    if key:
+        return key
+    if _is_a_name(original):
+        digest = _digest_of(original)
+        _collides(digest, original)
+        return digest
+    return ""

@@ -232,9 +232,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     if not scope:
         logger.error(
-            "no knowledge scope could be %s; pass --scope with characters a "
-            "collection name accepts (latin letters, digits, dot, underscore, "
-            "hyphen) or configure scope.default",
+            "no knowledge scope could be %s; pass --scope with a name the "
+            "repository actually has, or configure scope.default",
             "normalized from --scope" if explicit else "derived",
         )
         return 1
