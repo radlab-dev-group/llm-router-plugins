@@ -67,10 +67,20 @@ class QueryBuilder:
         :meth:`AgenticKnowledgeConfig.collection`.
     min_similarity : float
         Cosine floor carried into every request.
+    signature : str
+        Human-readable text of the failure this turn is stuck on, ``""``
+        when there is none.  A digest only the writer can compare is not a
+        question, and a query that carries the failure the agent is looking
+        at retrieves the recipe that was written for it.
+    test_command : str
+        The command that failed, ``""`` when the turn ran none; the recipe
+        names it, so it is a term the search can match on.
     """
 
     collection_namer: object
     min_similarity: float = 0.35
+    signature: str = ""
+    test_command: str = ""
 
     def build(
         self, turn: AgentTurn, policy: ModePolicy
@@ -222,7 +232,12 @@ class QueryBuilder:
         str
             The query; ``""`` when the turn says nothing at all.
         """
-        failure = _failure_signature(turn)
+        # The miner already read the failure out of the turn, on the
+        # writer's normalization; asking again would be a second reader with
+        # a second opinion, and the two could disagree on what the failure
+        # is.  ``_failure_signature`` remains for a caller that has no
+        # miner in hand.
+        failure = self.signature or _failure_signature(turn)
         text = (turn.latest_user_text or "").strip()[:_MAX_TEXT_CHARS]
         paths = " ".join(turn.touched_paths[:12])
         mode = turn.mode
@@ -230,7 +245,7 @@ class QueryBuilder:
         if mode == "debug":
             parts: list = [failure, text]
         elif mode == "test":
-            parts = [_test_command(turn), paths, text]
+            parts = [self.test_command or _test_command(turn), paths, text]
         elif mode == "implement":
             parts = [text, paths, failure]
         elif mode in ("git_review", "review"):

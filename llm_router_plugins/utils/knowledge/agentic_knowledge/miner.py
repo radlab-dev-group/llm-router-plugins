@@ -102,6 +102,11 @@ class MiningResult:
         Times the same failure was seen in this generation.
     signature_hash : str
         Identity of that failure; ``""`` when there was none.
+    signature : str
+        Human-readable text of the failure :attr:`signature_hash` digests,
+        ``""`` when the turn has none.  The reader asks the knowledge base
+        with the failure it can show, not with the digest only the writer
+        can compare.
     tried : Tuple[str, ...]
         One-line summaries of what this turn already attempted, for the
         "do not repeat this" section of the injection.
@@ -110,6 +115,7 @@ class MiningResult:
     events: Tuple[KnowledgeEvent, ...] = ()
     loop_count: int = 0
     signature_hash: str = ""
+    signature: str = ""
     tried: Tuple[str, ...] = ()
     #: Why nothing (or less than expected) was written, counted per turn.
     #: ``no_failure`` — a turn with commands but no test failure to key an
@@ -255,6 +261,7 @@ class EpisodeMiner:
             events=tuple(events),
             loop_count=loop.loop_count,
             signature_hash=loop.signature_hash,
+            signature=loop.signature,
             tried=tried,
             diagnostics=self._diagnostics(
                 turn, failures, events, covered_by_recipe
@@ -549,7 +556,17 @@ class EpisodeMiner:
         if not counts:
             return MiningResult()
         key = max(counts, key=lambda name: (counts[name], seen_at[name]))
-        return MiningResult(loop_count=counts[key], signature_hash=key)
+        matched = None
+        for evidence in self._failure_evidence(turn):
+            candidate = signature_of(texts.get(evidence.call_id, ""))
+            if candidate is not None and candidate.signature_hash == key:
+                matched = candidate
+                break
+        return MiningResult(
+            loop_count=counts[key],
+            signature_hash=key,
+            signature=matched.signature if matched else "",
+        )
 
     def _summary(self, turn: AgentTurn, failure: _Failure) -> str:
         """One line saying what this turn already tried for this failure."""

@@ -417,7 +417,15 @@ class AgenticKnowledgePlugin(PluginInterface):
         # while a whole call fits before this moment, which is what makes
         # `read_timeout_seconds` the number a request actually waits.
         deadline = time.monotonic() + self._config.read_timeout_seconds
-        requests = self._query_builder.build(turn, policy)
+        # The miner read the failure out of the turn on the writer's own
+        # normalization; the query asks with it, so the search is a question
+        # about the failure the agent is looking at and not a paraphrase of
+        # the user's sentence.
+        builder = _query_builder_with_failure(
+            self._query_builder,
+            getattr(mining, "signature", "") or "",
+        )
+        requests = builder.build(turn, policy)
         # A scope with nothing mined has nothing for the knowledge bucket to
         # return, and the search of it is pure latency on the way to an agent.
         # The counter is the worker's; unknown is not zero, and an unknown
@@ -983,6 +991,15 @@ def _source_counts(context: Optional[KnowledgeContext]) -> Dict[str, int]:
         key = hit.category or "doc"
         counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+def _query_builder_with_failure(builder: Any, signature: str) -> Any:
+    """The query builder, carrying the failure the miner read off the turn."""
+    if not signature:
+        return builder
+    import dataclasses
+
+    return dataclasses.replace(builder, signature=signature)
 
 
 def _evidence_fingerprint(turn: AgentTurn) -> str:

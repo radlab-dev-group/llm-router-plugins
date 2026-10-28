@@ -34,6 +34,49 @@ def builder(config=None):
     )
 
 
+def test_a_debug_query_carries_the_failure_the_miner_read():
+    """The query asks with the readable signature, not only the digest.
+
+    The miner normalizes the failure on the writer's side and returns the
+    readable text; the reader must put that text into the query, because a
+    digest is not a question.  The test command travels with it for a mode
+    that verifies.
+    """
+    base = builder()
+    turn = turn_for(mode="debug", failures=2)
+    b = QueryBuilder(
+        collection_namer=base.collection_namer,
+        min_similarity=base.min_similarity,
+        signature="FAILED tests/test_a.py::test_x - KeyError: 'missing'",
+        test_command="pytest tests/test_a.py",
+    )
+    query = b.query_for(turn)
+    assert "KeyError: 'missing'" in query
+
+
+def test_test_mode_uses_the_test_command_it_was_given():
+    base = builder()
+    turn = turn_for(mode="test")
+    given = QueryBuilder(
+        collection_namer=base.collection_namer,
+        min_similarity=base.min_similarity,
+        test_command="go test ./...",
+    )
+    query = given.query_for(turn)
+    assert "go test ./..." in query
+
+
+def test_a_query_never_grows_past_the_ceiling():
+    base = builder()
+    turn = turn_for(mode="debug", failures=2)
+    b = QueryBuilder(
+        collection_namer=base.collection_namer,
+        min_similarity=base.min_similarity,
+        signature="x" * 2000,
+    )
+    assert len(b.query_for(turn)) <= 900
+
+
 def test_no_scope_means_no_requests():
     turn = turn_for()
     turn = _rebuild(turn, scope="")
