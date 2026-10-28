@@ -21,6 +21,7 @@ the prompt changing under the provider's own cache.
 """
 
 import datetime
+import math
 import re
 
 from dataclasses import dataclass
@@ -44,6 +45,9 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     parse_document_text,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+    SCALE_COSINE,
+    SCALE_RRF,
+    SCALE_RERANKER,
     SearchResult,
     StoreHit,
 )
@@ -165,6 +169,11 @@ class KnowledgeHit:
         Exact failure identity, independent of retrieval relevance.
     test_command : str
         Verification command declared by a mined recipe.
+    score_scale : str
+        The scale :attr:`score` was produced on — ``rrf`` in a hybrid
+        search, ``reranker`` under a cross-encoder, ``cosine`` for a
+        vector-only run — so a threshold read against the score knows
+        what the number means.  ``""`` when the answer did not state it.
     """
 
     category: str = ""
@@ -181,6 +190,7 @@ class KnowledgeHit:
     heading: str = ""
     signature_hash: str = ""
     test_command: str = ""
+    score_scale: str = ""
 
 
 @dataclass(frozen=True)
@@ -350,9 +360,15 @@ class ContextAssembler:
         order = {kind: index for index, (kind, _) in enumerate(_SECTIONS)}
         best: Dict[str, _Candidate] = {}
         for result, categories in results:
+            scale = result.score_scale
+            # Rank scales are only comparable inside the result set that
+            # produced them: a fused rank says "this is the first, second,
+            # third of what the engine could fuse", and the ceiling of that
+            # statement is the best hit actually in hand.
+            ceiling = _rank_ceiling(result.hits, scale)
             for hit in result.hits:
                 candidate = self._candidate(
-                    hit, categories, weights, caps, order, types
+                    hit, categories, weights, caps, order, types, scale, ceiling
                 )
                 if candidate is None:
                     continue
@@ -374,6 +390,8 @@ class ContextAssembler:
         caps: Dict[str, int],
         order: Dict[str, int],
         types: Optional[Dict[str, Tuple[str, ...]]] = None,
+        score_scale: str = "",
+        rank_ceiling: float = 0.0,
     ) -> Optional[_Candidate]:
         """Turn one retrieved chunk into a candidate, or drop it."""
         meta, body = self._meta(hit)
@@ -396,6 +414,16 @@ class ContextAssembler:
             hit.score_normalized if hit.score_normalized is not None else hit.score
         )
         base = float(base) if base is not None else 0.0
+        scale = score_scale or hit.score_scale
+        # A fused rank and a cosine similarity are different numbers that
+        # happen to share a name.  A bonus is a *shift* in the scale the
+        # base is measured on: against a cosine the 0.2 of a matching
+        # failure is a real margin, against a fused rank of ~0.03 it is an
+        # order of magnitude that decides the ordering by itself.  Rank
+        # scales are remapped onto [0, 1] before anything is added to
+        # them; similarity scales already live there.
+        if scale == SCALE_RRF and rank_ceiling > 0.0:
+            base = min(1.0, base / rank_ceiling)
         weight = weights.get(kind, min(weights.values()) if weights else 1.0)
         vote = base * weight + self._bonus(meta, kind)
         return _Candidate(
@@ -414,6 +442,7 @@ class ContextAssembler:
                 heading=meta.heading if kind == KIND_DOC else "",
                 signature_hash=meta.signature_hash,
                 test_command=meta.test_command,
+                score_scale=scale,
             ),
             meta=meta,
             vote=vote,
@@ -742,6 +771,29 @@ def _section_index(kind: str) -> int:
         if name == kind:
             return index
     return len(_SECTIONS)
+
+
+def _rank_ceiling(hits: Sequence[StoreHit], score_scale: str) -> float:
+    """
+    Return the best fused rank of one result set, ``0.0`` when it has none.
+
+    A hybrid search returns ranks whose absolute values are meaningless
+    outside the set — the first hit of a two-leg fusion sits at ~0.033 — so
+    the scale has to be read from what the engine actually returned.  A set
+    whose best rank is not a positive number cannot be normalized and is
+    left alone (``0.0`` means "do not rescale").
+    """
+    if score_scale != SCALE_RRF:
+        return 0.0
+    ranks = [
+        float(value)
+        for value in (
+            hit.score_normalized if hit.score_normalized is not None else hit.score
+            for hit in hits
+        )
+        if value is not None and math.isfinite(float(value)) and float(value) > 0.0
+    ]
+    return max(ranks) if ranks else 0.0
 
 
 def best_recipe_score(hits: Iterable[KnowledgeHit]) -> float:

@@ -907,6 +907,7 @@ class AgenticKnowledgeConfig:
         )
         if not 0.0 < self.strong_recipe_score <= 1.0:
             raise ValueError("strong_recipe_score must be in (0, 1]")
+        self._warn_scale_mismatch()
         if self.docs_max_file_bytes < 1024:
             raise ValueError("docs.max_file_bytes must be at least 1024 bytes")
         if self.docs_max_total_bytes < self.docs_max_file_bytes:
@@ -1000,6 +1001,40 @@ class AgenticKnowledgeConfig:
                     "request carries one metadata dimension, the engine unions "
                     "several filters instead of intersecting them"
                 )
+
+    def _warn_scale_mismatch(self) -> None:
+        """
+        Warn once when a threshold is set for a scale it cannot be met on.
+
+        ``strong_recipe_score`` is compared against a recipe's normalized
+        retrieval score.  In the default deployment that score is a fused
+        rank rescaled onto ``[0, 1]`` only *within* the result set that
+        produced it, so a threshold above what a single set can express is
+        never met and the escalation rule "give the recipe a chance first"
+        silently never fires.  The mismatch is a configuration problem, and
+        a configuration problem that prints a warning at start is one an
+        operator can fix; a silent one is one nobody ever finds.
+        """
+        import logging
+
+        if self.rerank_results:
+            return  # a cross-encoder logit squashed onto [0, 1] is the scale
+        # The fused rank of a hybrid search rescales the set's best hit to
+        # 1.0, so any threshold in (0, 1] is reachable in principle.  What
+        # is not reachable is a threshold the *engine* cannot express before
+        # the rescale — but that is a property of the engine, not of this
+        # policy, and the one number an operator can be told is the one
+        # they set: warn when the default scale is in play and the
+        # threshold sits in a band a two-leg fusion rarely reaches.
+        if self.strong_recipe_score > 0.9:
+            logging.getLogger("agentic_knowledge").warning(
+                "escalation.strong_recipe_score=%s is only reachable when "
+                "the engine reranks; a hybrid search rescales each result "
+                "set onto [0, 1], so a recipe must be the set's best hit "
+                "with very little between it and the rest.  If the "
+                "escalation rule never fires, that is why.",
+                self.strong_recipe_score,
+            )
 
     # ------------------------------------------------------------ readiness -
     @property
