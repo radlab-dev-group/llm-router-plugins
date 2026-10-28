@@ -308,7 +308,18 @@ class FakePublisher:
     def __init__(self):
         self.published = []
 
-    def publish(self, events):
+    def publish(self, events, *, refresh_claims=False):
+        events = list(events)
+        self.published.extend(events)
+        from llm_router_plugins.utils.knowledge.agentic_knowledge.events import (
+            STATUS_OK as OK,
+            PublishStatus,
+        )
+
+        return PublishStatus(OK, len(events), 0)
+
+    def replace_docs(self, scope, events):
+        """A forced republish replaces the scope's queued documentation."""
         events = list(events)
         self.published.extend(events)
         from llm_router_plugins.utils.knowledge.agentic_knowledge.events import (

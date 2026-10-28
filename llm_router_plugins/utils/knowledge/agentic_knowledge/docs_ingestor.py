@@ -1014,11 +1014,34 @@ class DocsIndexer:
         entries = self.state.load(scope, collection)
         by_file = _group(report.records)
         changed = _changed_files(entries, by_file)
-        stale = _superseded_names(entries, by_file, changed)
         if republish:
             changed = list(by_file)
+        # A file the repository *has* in a new version is only retired once
+        # its replacement is in the stream: the two travel as separate events,
+        # and a prune that outlives its replacement is a document that vanished
+        # until the text changes again.  A file the repository *lost* retires
+        # now, because nothing is about to replace it.
+        day = datetime.date.today()
+        gone_stale, changed_stale = _stale_names_by_file(entries, by_file, changed)
+        # A forced republish clears every claim of the scope before it
+        # republishes, so every replacement is in the stream by construction
+        # and the old names retire with the rest of the scan.  A name the scan
+        # is itself re-publishing is not retired: an unchanged file gets the
+        # same name back, and deleting it would delete the new copy.
+        if republish:
+            published_names = {
+                document_name(KIND_DOC, day, item.fingerprint)
+                for records in by_file.values()
+                for item in records
+            }
+            gone_stale = (
+                gone_stale
+                + [name for name in changed_stale if name not in published_names]
+            )
+            changed_stale = []
 
         published: int = 0
+        replacement_landed: bool = True
         if changed or republish:
             events = doc_events(
                 _records_of(by_file, changed),
@@ -1026,6 +1049,7 @@ class DocsIndexer:
                 agent=agent,
                 model=model,
                 generation=generation,
+                today=day,
             )
             attempted = self._publish(
                 events, replace_scope=scope if republish else ""
@@ -1038,15 +1062,22 @@ class DocsIndexer:
                     truncated=report.truncated,
                 )
             published = attempted
+            # A republish that the stream fully deduplicated has no document
+            # behind the names it is about to retire, so its prune is withheld.
+            replacement_landed = republish or published > 0
 
         pruned = 0
-        if stale and allow_prune and not report.truncated:
-            pruned = self._publish_prune(
-                scope, stale, agent=agent, generation=generation
-            )
+        if allow_prune and not report.truncated:
+            stale = gone_stale
+            if replacement_landed:
+                stale = list(stale) + changed_stale
+            if stale:
+                pruned = self._publish_prune(
+                    scope, stale, agent=agent, generation=generation
+                )
 
         if not self.state.save(
-            scope, _next_entries(entries, by_file, changed), collection
+            scope, _next_entries(entries, by_file, changed, day), collection
         ):
             self._warn("knowledge docs state not saved for %d file(s)", len(by_file))
         context = self._refresh_context(scope, report, by_file)
@@ -1136,7 +1167,16 @@ class DocsIndexer:
     def _publish(
         self, events: Sequence[KnowledgeEvent], *, replace_scope: str = ""
     ) -> Optional[int]:
-        """Hand events to the worker; ``None`` when the stream refused them."""
+        """
+        Hand events to the worker; ``None`` when the stream refused them.
+
+        A documentation claim is renewed rather than respected, because a
+        claim is not evidence that the engine still holds the document: a
+        ``git checkout`` can return a file to content whose claim is days old
+        while its document was retired in the meantime.  Refusing that as a
+        duplicate would leave a file the repository has with no document until
+        its text changes again.
+        """
         if not events and not replace_scope:
             return 0
         try:
@@ -1145,7 +1185,9 @@ class DocsIndexer:
                     replace_scope, events
                 )
             else:
-                status = self.publisher.publish(events)  # type: ignore[union-attr]
+                status = self.publisher.publish(  # type: ignore[union-attr]
+                    events, refresh_claims=True
+                )
         except Exception as exc:
             self._warn("knowledge docs publish failed: %s", type(exc).__name__)
             return None
@@ -1247,6 +1289,39 @@ def _changed_files(
     return changed
 
 
+def _stale_names_by_file(
+    entries: Dict[str, Dict[str, Any]],
+    by_file: Dict[str, List[DocRecord]],
+    changed: Sequence[str],
+) -> Tuple[List[str], List[str]]:
+    """
+    Split the retired names into the safe-now and the gated ones.
+
+    Returns ``(gone, changed)``: the names of files the repository no longer
+    has, and the names of files it has in a new version.  The first bucket may
+    be pruned immediately; the second only once the replacement document is
+    known to be in the stream, because a prune that lands before its
+    replacement (or instead of it) is a document that disappears until the
+    text changes again.  Both buckets are only computed against a complete
+    scan, which is the caller's concern, not this function's.
+    """
+    gone: List[str] = []
+    changing: List[str] = []
+    changing_set = set(changed)
+    for source_file, entry in entries.items():
+        names = entry.get("n") if isinstance(entry, dict) else None
+        if not isinstance(names, list):
+            continue
+        names = [str(name) for name in names if str(name)]
+        if not names:
+            continue
+        if source_file not in by_file:
+            gone.extend(names)
+        elif source_file in changing_set:
+            changing.extend(names)
+    return gone, changing
+
+
 def _superseded_names(
     entries: Dict[str, Dict[str, Any]],
     by_file: Dict[str, List[DocRecord]],
@@ -1288,6 +1363,7 @@ def _next_entries(
     entries: Dict[str, Dict[str, Any]],
     by_file: Dict[str, List[DocRecord]],
     changed: Sequence[str],
+    day: Optional[datetime.date] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """
     The listing to remember after a scan.
@@ -1309,7 +1385,9 @@ def _next_entries(
                 "s": int(record.size),
                 "m": float(record.mtime),
                 "n": [
-                    document_name(KIND_DOC, datetime.date.today(), item.fingerprint)
+                    document_name(
+                        KIND_DOC, day or datetime.date.today(), item.fingerprint
+                    )
                     for item in records
                 ],
             }

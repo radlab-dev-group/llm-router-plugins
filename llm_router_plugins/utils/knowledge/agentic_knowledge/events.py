@@ -140,7 +140,12 @@ class KnowledgeEventPublisher:
         """Whether a publish can be attempted at all."""
         return self._handle.configured
 
-    def publish(self, events: Sequence[KnowledgeEvent]) -> PublishStatus:
+    def publish(
+        self,
+        events: Sequence[KnowledgeEvent],
+        *,
+        refresh_claims: bool = False,
+    ) -> PublishStatus:
         """
         Append *events* to the stream, once each.
 
@@ -154,6 +159,15 @@ class KnowledgeEventPublisher:
         ----------
         events : Sequence[KnowledgeEvent]
             Episodes mined from the request's turn.
+        refresh_claims : bool, optional
+            Re-publish an event whose claim already exists, refreshing the
+            claim instead of treating the event as a duplicate.  Documentation
+            needs this: a ``git checkout`` can bring a file back to a version
+            whose fingerprint was claimed days ago while its document has been
+            retired in the meantime, and an event refused as duplicate then
+            leaves the repository with no document for a file it has.  Mined
+            episodes keep the strict once-each rule, because a replayed turn
+            asks for the same episode on every request.
 
         Returns
         -------
@@ -180,7 +194,7 @@ class KnowledgeEventPublisher:
                 # stream that misses one.
                 deduplicated += 1
                 continue
-            outcome = self._claim(client, event)
+            outcome = self._claim(client, event, refresh=refresh_claims)
             if outcome == _ERROR:
                 errors += 1
                 reason = "claim"
@@ -310,9 +324,14 @@ class KnowledgeEventPublisher:
         """The deduplication key of one episode."""
         return f"{self._key_prefix}:seen:{event.fingerprint}"
 
-    def _claim(self, client: Any, event: KnowledgeEvent) -> str:
+    def _claim(self, client: Any, event: KnowledgeEvent, *, refresh: bool = False) -> str:
         """
         Take the one-time lock on an episode.
+
+        A claim already taken reads as a duplicate unless *refresh* is set, in
+        which case the claim is renewed and the event goes to the stream again;
+        a caller that can retire a document behind a claim (documentation)
+        cannot let the claim be the last word about what the engine holds.
 
         Returns
         -------
@@ -322,13 +341,12 @@ class KnowledgeEventPublisher:
             deduplication window, :data:`_ERROR` when Redis did not answer —
             the three are not the same thing and must not be counted alike.
         """
+        key = self._seen_key(event)
         try:
-            taken = client.set(
-                self._seen_key(event),
-                "1",
-                nx=True,
-                ex=self._dedup_ttl,
-            )
+            if refresh:
+                client.set(key, "1", ex=self._dedup_ttl)
+                return _CLAIMED
+            taken = client.set(key, "1", nx=True, ex=self._dedup_ttl)
         except Exception as exc:
             self._warn("knowledge dedup failed: %s", type(exc).__name__)
             return _ERROR
