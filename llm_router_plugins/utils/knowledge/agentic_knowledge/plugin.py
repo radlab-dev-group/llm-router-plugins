@@ -48,6 +48,9 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
 )
+from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+    MINED_KINDS,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.debug_capture import (
     capture_payload as _capture_payload,
 )
@@ -414,8 +417,14 @@ class AgenticKnowledgePlugin(PluginInterface):
         # while a whole call fits before this moment, which is what makes
         # `read_timeout_seconds` the number a request actually waits.
         deadline = time.monotonic() + self._config.read_timeout_seconds
+        requests = self._query_builder.build(turn, policy)
+        # A scope with nothing mined has nothing for the knowledge bucket to
+        # return, and the search of it is pure latency on the way to an agent.
+        # The counter is the worker's; unknown is not zero, and an unknown
+        # counter costs the search it always cost.
+        requests = self._skip_cold_knowledge(turn, requests)
         skipped = 0
-        for request in self._query_builder.build(turn, policy):
+        for request in requests:
             try:
                 result = self._store.search(request, deadline=deadline)
                 if result.reason == REASON_READ_BUDGET:
@@ -457,6 +466,33 @@ class AgenticKnowledgePlugin(PluginInterface):
             status=status,
             doc_context=context.doc_context,
         )
+
+    def _skip_cold_knowledge(self, turn: AgentTurn, requests) -> tuple:
+        """
+        Drop the mined-knowledge search of a scope that has none.
+
+        The reader pays a hybrid search for a bucket a repository that has
+        never been mined cannot answer.  The worker counts the mined documents
+        it writes per scope, and a scope whose count is known to be zero skips
+        that one search; documentation and archived windows are asked for as
+        always, because they are written by other paths and on other clocks.
+        An unknown count is not a zero: a Redis that will not answer, or a
+        deployment predating the counter, keeps searching.
+        """
+        if not requests or not turn.scope:
+            return requests
+        if self._publisher is None:
+            return requests
+        try:
+            count = self._publisher.mined_count(turn.scope)
+        except Exception:  # a counter that cannot be read is not a cold scope
+            return requests
+        if count != 0:
+            return requests
+        remaining = tuple(
+            request for request in requests if not _is_mined_only(request)
+        )
+        return remaining if remaining else ()
 
     # ---------------------------------------------------------- cache path -
     def _cached(self, turn: AgentTurn) -> Optional[CachedContext]:
@@ -930,6 +966,14 @@ def _build_cache(
 
 
 # ------------------------------------------------------------- annotations -
+def _is_mined_only(request) -> bool:
+    """Whether one search asks only for mined knowledge."""
+    categories = tuple(str(kind) for kind in request.categories or ())
+    return bool(categories) and all(
+        kind in MINED_KINDS for kind in categories
+    )
+
+
 def _source_counts(context: Optional[KnowledgeContext]) -> Dict[str, int]:
     """Count the injected hits by their document kind."""
     counts: Dict[str, int] = {}

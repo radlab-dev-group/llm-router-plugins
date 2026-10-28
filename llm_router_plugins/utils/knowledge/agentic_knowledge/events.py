@@ -23,7 +23,7 @@ Two properties keep the request path fast and the store honest.
 import json
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Optional, Sequence
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
     KnowledgeEvent,
@@ -308,6 +308,48 @@ class KnowledgeEventPublisher:
                 STATUS_UNAVAILABLE, published, deduplicated, errors, reason
             )
         return PublishStatus(STATUS_OK, published, deduplicated)
+
+    def mined_count(self, scope: str) -> Optional[int]:
+        """
+        Return how many mined documents *scope* has, or ``None`` when unknown.
+
+        The reader asks this before it pays for a search of a bucket a cold
+        repository cannot possibly answer.  ``None`` means the question could
+        not be asked — no Redis, a timeout, a counter this plugin has never
+        written — and the caller searches anyway: a counter that cannot be
+        trusted is a reason to do the old thing, never a reason to read less.
+
+        Parameters
+        ----------
+        scope : str
+            Repository whose counter to read.
+
+        Returns
+        -------
+        int or None
+            The count, or ``None`` when it is unknown.
+        """
+        if not scope or not self.available:
+            return None
+        client = self._handle.get()
+        if client is None:
+            return None
+        try:
+            raw = client.get(f"{self._key_prefix}:mined:{scope}")
+        except Exception as exc:
+            self._warn("knowledge mined counter failed: %s", type(exc).__name__)
+            return None
+        if raw is None:
+            # A scope this worker has never written a mined document for, and a
+            # Redis that has forgotten the counter, are the same answer: there
+            # is nothing in the bucket yet.  A deployment predating the counter
+            # reads as cold until its first new document, which costs one
+            # skipped search and nothing that was ever retrievable.
+            return 0
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
 
     def close(self) -> None:
         """

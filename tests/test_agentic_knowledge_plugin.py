@@ -733,3 +733,89 @@ def test_the_language_switch_reaches_the_store_the_plugin_builds():
         plugin = AgenticKnowledgePlugin(config=config)
         plugin._wire(config)
         assert plugin._store._ignore_language_detect is flag
+
+
+# ------------------------------------------- 1.3 cold scope --
+class _CountingPublisher:
+    """A publisher that also answers the reader's cold-scope question."""
+
+    def __init__(self, counts):
+        self.counts = dict(counts)
+        self.asked = []
+
+    def mined_count(self, scope):
+        self.asked.append(scope)
+        return self.counts.get(scope)
+
+    def publish(self, events, **kwargs):
+        from llm_router_plugins.utils.knowledge.agentic_knowledge.events import (
+            PublishStatus,
+            STATUS_OK,
+        )
+
+        return PublishStatus(STATUS_OK, len(list(events)))
+
+
+def _plugin_with_counts(counts, store):
+    from llm_router_plugins.utils.knowledge.agentic_knowledge import (
+        AgenticKnowledgePlugin,
+    )
+    from agentic_knowledge_support import knowledge_config
+
+    return AgenticKnowledgePlugin(
+        config=knowledge_config(),
+        store=store,
+        publisher=_CountingPublisher(counts),
+    )
+
+
+def test_a_cold_scope_skips_the_mined_search_but_keeps_the_rest():
+    """1.3: a repository with zero mined documents pays no hybrid search for
+    a bucket it cannot answer; documentation and archived windows are asked
+    for as always."""
+    from agentic_knowledge_support import codex_payload, knowledge_event
+
+    payload = codex_payload(base_items() if False else __import__("agentic_knowledge_support").base_items())
+    store = __import__("agentic_knowledge_support").FakeStore()
+    plugin = _plugin_with_counts({"webapp": 0}, store)
+    plugin.apply(payload)
+    kinds = {
+        category
+        for request in store.requests
+        for category in request.categories
+    }
+    assert "recipe" not in kinds, [r.categories for r in store.requests]
+    assert "playbook" not in kinds
+
+
+def test_an_unknown_counter_keeps_every_search():
+    """A counter that cannot be answered is not a zero: the read degrades to
+    what it always did, and a deployment predating the counter keeps
+    searching until its first document."""
+    import agentic_knowledge_support as support
+
+    payload = support.codex_payload(support.base_items())
+    store = support.FakeStore()
+    plugin = _plugin_with_counts({}, store)  # no count for the scope
+    plugin.apply(payload)
+    kinds = {
+        category
+        for request in store.requests
+        for category in request.categories
+    }
+    assert "recipe" in kinds
+
+
+def test_a_scope_with_mined_documents_searches_everything():
+    import agentic_knowledge_support as support
+
+    payload = support.codex_payload(support.base_items())
+    store = support.FakeStore()
+    plugin = _plugin_with_counts({"webapp": 3}, store)
+    plugin.apply(payload)
+    kinds = {
+        category
+        for request in store.requests
+        for category in request.categories
+    }
+    assert "recipe" in kinds

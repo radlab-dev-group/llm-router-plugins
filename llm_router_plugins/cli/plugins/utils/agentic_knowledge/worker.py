@@ -78,6 +78,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     ENGINE_NAME_SUFFIX,
     KIND_DOC,
     KIND_SESSION_ARCHIVE,
+    MINED_KINDS,
     build_document_text,
     document_body,
     document_name,
@@ -371,7 +372,7 @@ class KnowledgeIndexWorker:
         except Exception as exc:
             self._settle_failure(entry_id, event, exc)
             return False
-        self._settle(entry_id)
+        self._settle(entry_id, event)
         return True
 
     def _index_documents_of(
@@ -431,17 +432,43 @@ class KnowledgeIndexWorker:
             for entry_id, event, _document in items:
                 self._settle_failure(entry_id, event, exc)
             return 0
-        for entry_id, _event, _document in items:
-            self._settle(entry_id)
+        for entry_id, event, _document in items:
+            self._settle(entry_id, event)
         self._last_heartbeat = time.monotonic()
         return len(items)
 
-    def _settle(self, entry_id: Any) -> None:
+    def _settle(self, entry_id: Any, event: Optional[KnowledgeEvent] = None) -> None:
         """An entry is written: count it, acknowledge it, forget its attempts."""
         self._forget(entry_id)
         self._ack(entry_id)
         self._indexed += 1
+        if event is not None and event.kind in MINED_KINDS:
+            # The reader asks the engine whether a scope has mined knowledge
+            # before it pays for the search; this is what it asks.  A counter
+            # that cannot be written is one the reader cannot trust, so the
+            # read degrades to searching — the old behaviour, never an error.
+            self._bump_mined_count(event.scope)
         self._last_heartbeat = time.monotonic()
+
+    def _mined_count_key(self, scope: str) -> str:
+        """The reader-facing counter of one scope's mined documents."""
+        return f"{self._config.key_prefix}:mined:{scope}"
+
+    def _bump_mined_count(self, scope: str) -> None:
+        """Add one mined document of *scope* to the reader's counter."""
+        if not scope:
+            return
+        try:
+            client = self._redis_client()
+            key = self._mined_count_key(scope)
+            client.incr(key)
+            client.expire(key, _TRIES_TTL_SECONDS)
+        except Exception:  # the read degrades to searching
+            self._log(
+                "warning",
+                "knowledge mined counter for %s could not be written",
+                scope,
+            )
 
     def _settle_failure(
         self, entry_id: Any, event: KnowledgeEvent, exc: Exception

@@ -69,6 +69,11 @@ KNOWLEDGE_KINDS: Tuple[str, ...] = (
 #: All kinds a reader may ask for.
 DOCUMENT_KINDS: Tuple[str, ...] = KNOWLEDGE_KINDS + (KIND_DOC,)
 
+#: Kinds the miner produces out of an episode — an archive is written on a
+#: compaction, not out of work, and documentation is scanned, not mined.  A
+#: scope with none of these has nothing for a mined-knowledge search to find.
+MINED_KINDS: Tuple[str, ...] = (KIND_RECIPE, KIND_PLAYBOOK, KIND_DEADEND)
+
 #: Tag of the header line embedded in the indexed text.
 HEADER_TAG = "agentic-kb"
 
