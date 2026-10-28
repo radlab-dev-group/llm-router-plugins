@@ -623,14 +623,26 @@ def doc_events(
     Tuple[KnowledgeEvent, ...]
         One event per file, kind ``doc``.
     """
-    day = today or datetime.date.today()
-    stamp = time.time() if now is None else float(now)
+    # The day each event names its document by is read from its own
+    # created_at, below; the *today* argument is kept for a caller that
+    # wants to name a batch by a fixed day.
+    today_day = today
     events: List[KnowledgeEvent] = []
     for record in records:
         if not record.text.strip() or not record.fingerprint:
             continue
         # The file goes out exactly as it was written: the engine splits it,
         # so a heading quoted in here twice would only be read twice.
+        # The name's day bucket is the event's creation day, not the scan's:
+        # the worker names the document from created_at, and a scan that
+        # crossed midnight would otherwise hand the worker a name in a bucket
+        # the worker never writes, a document the retention sweep can never
+        # find.
+        stamp = time.time() if now is None else float(now)
+        # The worker names the document from created_at in local time; the
+        # name must be built the same way, or a scan that crossed midnight
+        # hands the worker a bucket it never writes.
+        day = today_day or datetime.date.fromtimestamp(stamp)
         text = build_document_text(
             KIND_DOC,
             record.text,
@@ -1063,7 +1075,15 @@ class DocsIndexer:
         # and a prune that outlives its replacement is a document that vanished
         # until the text changes again.  A file the repository *lost* retires
         # now, because nothing is about to replace it.
-        day = datetime.date.today()
+        # One reading of the clock for the whole scan: the day the names are
+        # bucketed by, the day the header carries, and the timestamp the
+        # worker will read the day back from are all the same instant.  The
+        # worker names a document from the event's ``created_at``; a name
+        # bucketed by a *second* reading would be a bucket the worker never
+        # writes whenever the two readings straddled midnight, and the
+        # retention sweep would never find the document again.
+        published_at = time.time()
+        day = datetime.date.fromtimestamp(published_at)
         gone_stale, changed_stale = _stale_names_by_file(entries, by_file, changed)
         # A forced republish clears every claim of the scope before it
         # republishes, so every replacement is in the stream by construction
@@ -1092,6 +1112,7 @@ class DocsIndexer:
                 model=model,
                 generation=generation,
                 today=day,
+                now=published_at,
             )
             attempted = self._publish(
                 events, replace_scope=scope if republish else ""

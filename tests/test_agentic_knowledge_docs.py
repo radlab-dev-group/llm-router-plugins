@@ -11,6 +11,7 @@ request never pays for a scan twice in an hour.
 """
 
 import dataclasses
+import datetime
 import hashlib
 import inspect
 import os
@@ -759,6 +760,34 @@ def _prune(*names):
     )
 
     return prune_event("webapp", list(names))
+
+
+def test_a_document_is_named_by_the_day_its_event_was_created():
+    """The name's day bucket is the event's day, and the worker reads it the same way.
+
+    The scan used to bucket a name by ``date.today()`` at scan time while the
+    worker bucketed the document it indexes by the event's ``created_at``.
+    A scan that crossed midnight handed the worker a name in a bucket the
+    worker never writes, and the retention sweep could never find the
+    document again.  The ingestor now reads the day from the same timestamp
+    the worker will.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
+        doc_events,
+        _file_record,
+    )
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+        KIND_DOC,
+        document_name,
+    )
+
+    record = _file_record("docs/g.md", "# T\n\nbody\n", size=10, mtime=1.0, scope="demo")
+    stamp = 1_793_149_200.0
+    events = doc_events([record], scope="demo", now=stamp)
+    event_day = datetime.date.fromtimestamp(events[0].created_at).strftime("%Y%m%d")
+    name = document_name(KIND_DOC, datetime.date.fromtimestamp(stamp), record.fingerprint)
+    assert f":{event_day}:" in name
+    assert events[0].created_at == stamp
 
 
 def _today():
