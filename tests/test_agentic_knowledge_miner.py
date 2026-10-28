@@ -502,3 +502,53 @@ def test_diagnostics_count_a_change_that_was_never_rerun():
 def test_diagnostics_count_published_documents():
     result = mine(codex_payload(recipe_items()))
     assert _diag(result, "published") == 1
+
+
+# ------------------------------------------- 1.1 shell edits (weak) --
+def test_a_shell_write_that_tests_green_is_a_playbook():
+    """1.1: a CLI without a patch tool edits through ``cat >``; with no signal
+    for that, a turn that only did that mined nothing at all.  The write is a
+    weak edit, and a weak edit may write a playbook."""
+    from agentic_knowledge_support import exec_edit_playbook_items
+
+    result = mine(codex_payload(exec_edit_playbook_items(), mode="implement"))
+    kinds = [event.kind for event in result.events]
+    assert kinds == [KIND_PLAYBOOK], kinds
+    event = result.events[0]
+    assert "src/export.py" in event.text
+    # the reader can tell a weak-sourced document from an envelope one
+    assert event.metadata.get("edited_by") == "exec"
+
+
+def test_a_shell_write_never_closes_a_recipe():
+    """1.1: a weak edit is not proof anything was fixed.  A failure, a shell
+    write and a green run must not become a recipe — that claim needs an
+    envelope — and the stretch is owned by the recipe path, so nothing is
+    written."""
+    from agentic_knowledge_support import exec_edit_after_failure_items
+
+    result = mine(codex_payload(exec_edit_after_failure_items()))
+    kinds = [event.kind for event in result.events]
+    assert KIND_RECIPE not in kinds, kinds
+
+
+def test_a_shell_write_with_no_test_run_writes_nothing():
+    """A change nobody ran is an intention; the green run stays the only
+    thing that turns one into a document, weak edit or not."""
+    from agentic_knowledge_support import _shell_write
+
+    result = mine(
+        codex_payload(
+            base_items() + [_shell_write("w1", "we1", "src/export.py")],
+            mode="implement",
+        )
+    )
+    assert result.events == ()
+
+
+def test_an_envelope_still_writes_a_recipe_alongside():
+    """The strong path is untouched: an envelope over the same shape still
+    produces the recipe, with no weak marker on it."""
+    result = mine(codex_payload(recipe_items()))
+    assert [event.kind for event in result.events] == [KIND_RECIPE]
+    assert "edited_by" not in result.events[0].metadata

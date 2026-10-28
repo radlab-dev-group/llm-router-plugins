@@ -69,6 +69,7 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.phase import (
     EVIDENCE_COMMAND,
     EVIDENCE_PATCH,
     EVIDENCE_TEST_FAILURE,
+    STRENGTH_WEAK,
     PhaseEvidence,
     patch_envelopes,
 )
@@ -365,6 +366,12 @@ class EpisodeMiner:
             if latest is None:
                 continue
             if evidence.kind == EVIDENCE_PATCH:
+                if evidence.strength == STRENGTH_WEAK:
+                    # The episode is closed by envelopes only: a shell write
+                    # is a weak signal, and a "verified fix" built on one is a
+                    # guess the escalation policy would trust as proof.  The
+                    # write still counts for a procedure, which says less.
+                    continue
                 latest.patches.append(evidence)
                 latest.patch_positions.append(position)
             elif self._is_green_test(evidence):
@@ -460,7 +467,10 @@ class EpisodeMiner:
         if not patch_text.strip():
             return None
         command = self._command_text(turn, procedure.verified_by)[:200]
-        paths = _merge_paths(_patched_paths(patch_text), ())
+        paths = _merge_paths(
+            _patched_paths(patch_text),
+            _deduplicated(item for patch in patches for item in patch.paths),
+        )
         task = (turn.latest_user_text or "").strip().splitlines()
         body = "\n".join(
             part
@@ -483,6 +493,9 @@ class EpisodeMiner:
             test_command=command,
             paths=paths,
             phase=_phase_of_items(turn, procedure.items),
+            edited_by="exec"
+            if any(patch.strength == STRENGTH_WEAK for patch in patches)
+            else None,
         )
 
     @staticmethod
@@ -695,6 +708,7 @@ class EpisodeMiner:
         test_command: str = "",
         paths: Tuple[str, ...] = (),
         phase: str = "",
+        edited_by: Optional[str] = None,
     ) -> KnowledgeEvent:
         """Assemble one publishable event out of the parts."""
         digest = fingerprint(*parts)
@@ -719,6 +733,11 @@ class EpisodeMiner:
         }
         if phase:
             metadata["phase"] = phase
+        # A document built on a weak edit names its source, so a reader — or a
+        # policy — can weigh it, or drop it, in one filter: the paths it
+        # carries came off a shell command, not off a patch envelope.
+        if edited_by:
+            metadata["edited_by"] = edited_by
         if test_command:
             metadata["test_command"] = test_command
         return KnowledgeEvent(

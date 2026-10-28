@@ -548,3 +548,46 @@ def knowledge_event(
 def stream_message(event):
     """Encode an event the way the publisher writes it to the stream."""
     return {"event": json.dumps(event.to_dict())}
+
+
+def _shell_write(call_id, event_id, path="src/export.py", body="x = 2"):
+    """
+    A file the agent writes through the shell, with no patch tool involved.
+
+    This is how a build of the CLI without ``apply_patch`` edits code:
+    ``cat > path <<'EOF'`` carries the whole new file in the command, and
+    nothing about the call names it as an edit.
+    """
+    return _command(
+        call_id,
+        event_id,
+        f"cat > {path} <<'EOF'\n{body}\nEOF",
+    )
+
+
+def exec_edit_playbook_items(
+    paths=("src/export.py",),
+    command="pytest tests/test_a.py",
+):
+    """A shell-written file whose tests then pass, with no failure at all."""
+    items = base_items()
+    for index, path in enumerate(paths, start=1):
+        items.append(_shell_write(f"w{index}", f"we{index}", path))
+    items.append(_command("c1", "e1", command))
+    items.append(_command_output("c1", "o1", GREEN, code=0))
+    return items
+
+
+def exec_edit_after_failure_items(
+    failure=FAILING,
+    path="src/export.py",
+    command="pytest tests/test_a.py",
+):
+    """A failure, a shell-written change, and the same command passing."""
+    return base_items() + [
+        _command("c1", "e1", command),
+        _command_output("c1", "o1", failure, code=1),
+        _shell_write("w1", "we1", path),
+        _command("c2", "e2", command),
+        _command_output("c2", "o2", GREEN, code=0),
+    ]
