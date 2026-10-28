@@ -250,6 +250,26 @@ def test_a_heading_inside_a_code_block_is_not_a_title(tmp_path):
     assert record.heading == ""
 
 
+def test_a_long_fence_is_not_closed_by_a_shorter_example():
+    """A fence closes on its own marker, not on a prefix of it.
+
+    The outline tracker used to remember three characters of the opening
+    fence and close on a startswith, so a four-backtick fence holding a
+    three-backtick example closed early, and the ``#`` comment after the
+    example read as a heading — a "heading" the digest injected without
+    masking, out of a code block.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
+        document_headings,
+    )
+
+    text = "````text\nexample:\n```\n# not a heading\n````\n\n# real heading\n"
+    assert document_headings(text) == ("real heading",)
+    # a tilde fence of its own, and a mismatched marker that does not close
+    assert document_headings("~~~~\n# no\n~~~\n# no\n~~~~\n# yes\n") == ("yes",)
+    assert document_headings("```\n~~~\n# no\n```\n# yes\n") == ("yes",)
+
+
 def test_a_document_fingerprint_is_stable_and_content_bound():
     from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
         document_fingerprint,

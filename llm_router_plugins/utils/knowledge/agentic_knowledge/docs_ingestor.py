@@ -477,11 +477,17 @@ def document_headings(text: str) -> Tuple[str, ...]:
     for line in str(text or "").splitlines():
         opening = _FENCE_RE.match(line)
         if fence:
-            if line.strip().startswith(fence):
+            # A fence closes on its own marker: the same character, at least
+            # as long as the one that opened it.  A shorter run of backticks
+            # inside a ``` block is code, not a closing fence, and a closing
+            # line is never an opener.  Comparing the marker as a prefix
+            # (three characters of it) closed a ``` block on a ``` example in
+            # the prose and let the next # comment read as a heading.
+            if opening and opening.group(1)[0] == fence[0] and len(opening.group(1)) >= len(fence):
                 fence = ""
             continue
         if opening:
-            fence = opening.group(1)[:3]
+            fence = opening.group(1)
             continue
         title = _HEADING_RE.match(line)
         if title is None:
