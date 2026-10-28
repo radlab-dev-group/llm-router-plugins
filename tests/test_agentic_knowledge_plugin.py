@@ -819,3 +819,83 @@ def test_a_scope_with_mined_documents_searches_everything():
         for category in request.categories
     }
     assert "recipe" in kinds
+
+
+# ------------------------------------------------------------ parallel ---
+def test_a_slow_engine_is_waited_once_not_once_per_source():
+    """The mode's sources are independent; they are asked together.
+
+    A serial loop made a slow engine cost the transport timeout once per
+    source: with the budget at two calls, the third source never started and
+    the block read as an empty knowledge base.  The same budget, spent on
+    calls that run at the same moment, leaves the whole read inside it.
+    """
+    import time
+
+    from agentic_knowledge_support import knowledge_config
+
+    config = knowledge_config(read_timeout_seconds=3.0)
+    slow = 1.2  # seconds each call takes; three of them in a row are 3.6 s
+
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+        STATUS_OK,
+        SearchResult,
+    )
+
+    from agentic_knowledge_support import FakeStore, store_hit
+
+    class _SlowStore:
+        def __init__(self):
+            self.requests = []
+
+        def search(self, request, deadline=None):
+            self.requests.append(request)
+            time.sleep(slow)
+            if deadline is not None and time.monotonic() > deadline:
+                from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+                    REASON_READ_BUDGET,
+                )
+
+                return SearchResult(
+                    STATUS_UNAVAILABLE, reason=REASON_READ_BUDGET
+                )
+            return SearchResult(
+                STATUS_OK, hits=(store_hit("recipe", score=0.5),)
+            )
+
+    store = _SlowStore()
+    publisher = FakePublisher()
+    plugin = make_plugin(config, store=store, publisher=publisher)
+    started = time.monotonic()
+    out = plugin.apply(main_payload(mode="debug", failures=1))
+    spent = time.monotonic() - started
+
+    # every source of the mode was asked
+    assert len(store.requests) >= 3
+    # and the request did not pay the timeout per source: the whole read is
+    # inside one call's duration plus slack, not three times it.
+    assert spent < 3 * slow
+
+
+def test_one_failing_search_does_not_drop_the_others():
+    """A source that raises still leaves the rest of the block intact."""
+    from agentic_knowledge_support import knowledge_config, store_hit
+
+    config = knowledge_config()
+
+    class _HalfStore:
+        def search(self, request, deadline=None):
+            if "session_archive" in request.categories:
+                raise RuntimeError("engine_001")
+            from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+                STATUS_OK,
+                SearchResult,
+            )
+
+            return SearchResult(STATUS_OK, hits=(store_hit("recipe", score=0.5),))
+
+    plugin = make_plugin(config, store=_HalfStore(), publisher=FakePublisher())
+    out = plugin.apply(main_payload(mode="debug", failures=1))
+    knowledge = out["routing"]["knowledge"]
+    # the mined sources answered even though the archive request raised
+    assert knowledge["injected"] >= 1

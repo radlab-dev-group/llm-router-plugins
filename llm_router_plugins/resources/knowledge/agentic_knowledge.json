@@ -11,7 +11,7 @@
   },
   "read": {
     "enabled": true,
-    "timeout_seconds": 6.0,
+    "timeout_seconds": 3.0,
     "min_similarity": 0.35,
     "hybrid_search": true,
     "rerank_results": false,

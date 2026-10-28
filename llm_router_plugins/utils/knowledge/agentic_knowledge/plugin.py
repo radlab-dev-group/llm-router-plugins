@@ -431,21 +431,23 @@ class AgenticKnowledgePlugin(PluginInterface):
         # The counter is the worker's; unknown is not zero, and an unknown
         # counter costs the search it always cost.
         requests = self._skip_cold_knowledge(turn, requests)
-        skipped = 0
-        for request in requests:
-            try:
-                result = self._store.search(request, deadline=deadline)
-                if result.reason == REASON_READ_BUDGET:
-                    skipped += 1
-            except Exception as exc:
-                self._warn("knowledge search failed: %s", type(exc).__name__)
-                from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
-                    SearchResult as _SR,
-                )
-
-                result = _SR(STATUS_UNAVAILABLE, reason="search")
+        # The requests of one mode are independent: they ask different
+        # collections, with different filters, the same question.  Asked one
+        # after another a slow engine makes the request pay the transport
+        # timeout as many times as the mode has sources; asked together they
+        # pay it once.  The budget is the same, and the store still refuses a
+        # call that cannot fit before the deadline.
+        results = list(
+            self._search_requests_in_parallel(
+                requests,
+                deadline,
+            )
+        )
+        skipped = sum(
+            1 for result, _ in results if result.reason == REASON_READ_BUDGET
+        )
+        for result, _ in results:
             statuses.add(result.status)
-            results.append((result, request.categories))
         if skipped:
             # The reads the operator will otherwise conclude never happened.
             # Both numbers go in the line because the usual cause is not a
@@ -501,6 +503,41 @@ class AgenticKnowledgePlugin(PluginInterface):
             request for request in requests if not _is_mined_only(request)
         )
         return remaining if remaining else ()
+
+    def _search_requests_in_parallel(
+        self,
+        requests: Tuple[Any, ...],
+        deadline: float,
+    ):
+        """
+        Search every request at once, keeping the shared read budget.
+
+        A short-lived pool, one worker per request: the work is bounded by
+        the mode's own source list, and the pool is torn down before the
+        method returns, so a slow engine cannot hold a thread past the
+        request.  One request that fails or overruns the budget answers with
+        the same shape the serial loop used to produce — the other requests'
+        results are not lost with it.
+        """
+        if not requests:
+            return
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(request):
+            try:
+                result = self._store.search(request, deadline=deadline)
+            except Exception as exc:
+                self._warn("knowledge search failed: %s", type(exc).__name__)
+                from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+                    SearchResult as _SR,
+                )
+
+                result = _SR(STATUS_UNAVAILABLE, reason="search")
+            return (result, request.categories)
+
+        with ThreadPoolExecutor(max_workers=len(requests)) as pool:
+            for outcome in pool.map(one, requests):
+                yield outcome
 
     # ---------------------------------------------------------- cache path -
     def _cached(self, turn: AgentTurn) -> Optional[CachedContext]:
