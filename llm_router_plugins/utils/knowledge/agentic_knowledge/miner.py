@@ -263,9 +263,7 @@ class EpisodeMiner:
             signature_hash=loop.signature_hash,
             signature=loop.signature,
             tried=tried,
-            diagnostics=self._diagnostics(
-                turn, failures, events, covered_by_recipe
-            ),
+            diagnostics=self._diagnostics(turn, failures, events, covered_by_recipe),
         )
 
     def _diagnostics(
@@ -500,9 +498,11 @@ class EpisodeMiner:
             test_command=command,
             paths=paths,
             phase=_phase_of_items(turn, procedure.items),
-            edited_by="exec"
-            if any(patch.strength == STRENGTH_WEAK for patch in patches)
-            else None,
+            edited_by=(
+                "exec"
+                if any(patch.strength == STRENGTH_WEAK for patch in patches)
+                else None
+            ),
         )
 
     @staticmethod

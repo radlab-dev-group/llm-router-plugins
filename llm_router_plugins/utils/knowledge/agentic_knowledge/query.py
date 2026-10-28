@@ -129,7 +129,9 @@ class QueryBuilder:
                 # and an unfiltered archive is another team's conversation.
                 continue
             name = _bucket(kind)
-            collections.setdefault(name, str(self.collection_namer(turn.scope, kind)))
+            collections.setdefault(
+                name, str(self.collection_namer(turn.scope, kind))
+            )
             kinds = grouped.setdefault(name, [])
             # A policy may list one category twice; keeping it once means the
             # "archive-only?" test below reads the set of kinds, not their

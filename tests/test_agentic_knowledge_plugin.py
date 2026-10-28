@@ -152,9 +152,7 @@ def test_archive_source_is_restricted_to_the_thread():
     # The restriction is a filter on the request, not a name on the
     # collection: with one collection per repository the archive and the
     # mined knowledge are neighbours, and only the thread keeps them apart.
-    knowledge = [
-        r for r in store.requests if "session_archive" not in r.categories
-    ]
+    knowledge = [r for r in store.requests if "session_archive" not in r.categories]
     assert all(r.thread_id == "" for r in knowledge)
 
 
@@ -812,16 +810,18 @@ def test_a_cold_scope_skips_the_mined_search_but_keeps_the_rest():
     """1.3: a repository with zero mined documents pays no hybrid search for
     a bucket it cannot answer; documentation and archived windows are asked
     for as always."""
-    from agentic_knowledge_support import codex_payload, knowledge_event
+    from agentic_knowledge_support import codex_payload
 
-    payload = codex_payload(base_items() if False else __import__("agentic_knowledge_support").base_items())
+    payload = codex_payload(
+        base_items()
+        if False
+        else __import__("agentic_knowledge_support").base_items()
+    )
     store = __import__("agentic_knowledge_support").FakeStore()
     plugin = _plugin_with_counts({"webapp": 0}, store)
     plugin.apply(payload)
     kinds = {
-        category
-        for request in store.requests
-        for category in request.categories
+        category for request in store.requests for category in request.categories
     }
     assert "recipe" not in kinds, [r.categories for r in store.requests]
     assert "playbook" not in kinds
@@ -838,9 +838,7 @@ def test_an_unknown_counter_keeps_every_search():
     plugin = _plugin_with_counts({}, store)  # no count for the scope
     plugin.apply(payload)
     kinds = {
-        category
-        for request in store.requests
-        for category in request.categories
+        category for request in store.requests for category in request.categories
     }
     assert "recipe" in kinds
 
@@ -853,9 +851,7 @@ def test_a_scope_with_mined_documents_searches_everything():
     plugin = _plugin_with_counts({"webapp": 3}, store)
     plugin.apply(payload)
     kinds = {
-        category
-        for request in store.requests
-        for category in request.categories
+        category for request in store.requests for category in request.categories
     }
     assert "recipe" in kinds
 
@@ -917,7 +913,7 @@ def test_a_slow_engine_is_waited_once_not_once_per_source():
         SearchResult,
     )
 
-    from agentic_knowledge_support import FakeStore, store_hit
+    from agentic_knowledge_support import store_hit
 
     class _SlowStore:
         def __init__(self):
@@ -931,18 +927,14 @@ def test_a_slow_engine_is_waited_once_not_once_per_source():
                     REASON_READ_BUDGET,
                 )
 
-                return SearchResult(
-                    STATUS_UNAVAILABLE, reason=REASON_READ_BUDGET
-                )
-            return SearchResult(
-                STATUS_OK, hits=(store_hit("recipe", score=0.5),)
-            )
+                return SearchResult(STATUS_UNAVAILABLE, reason=REASON_READ_BUDGET)
+            return SearchResult(STATUS_OK, hits=(store_hit("recipe", score=0.5),))
 
     store = _SlowStore()
     publisher = FakePublisher()
     plugin = make_plugin(config, store=store, publisher=publisher)
     started = time.monotonic()
-    out = plugin.apply(main_payload(mode="debug", failures=1))
+    plugin.apply(main_payload(mode="debug", failures=1))
     spent = time.monotonic() - started
 
     # every source of the mode was asked

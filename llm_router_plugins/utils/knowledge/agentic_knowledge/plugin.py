@@ -311,9 +311,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         # still read below, because escalation persistence lives in it and has
         # its own switch.
         fresh = (
-            read_on
-            and cached is not None
-            and self._is_fresh(cached, turn, config)
+            read_on and cached is not None and self._is_fresh(cached, turn, config)
         )
         cache_miss_reason = ""
         if not fresh and cached is not None:
@@ -583,9 +581,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         return cache.get(turn.scope, turn.cache_generation)
 
     @staticmethod
-    def _is_fresh(
-        cached: CachedContext, turn: AgentTurn, config: Any
-    ) -> bool:
+    def _is_fresh(cached: CachedContext, turn: AgentTurn, config: Any) -> bool:
         """Whether the cached block still describes this turn."""
         if _evidence_moved(cached.evidence_fingerprint, turn):
             # New evidence is new facts: the block was built against a
@@ -768,11 +764,11 @@ class AgenticKnowledgePlugin(PluginInterface):
             "cache_miss_reason": (
                 context.cache_miss_reason if context is not None else ""
             ),
-            "mined_kinds": sorted(
-                {str(event.kind) for event in getattr(mining, "events", ())}
-            )
-            if mining is not None
-            else [],
+            "mined_kinds": (
+                sorted({str(event.kind) for event in getattr(mining, "events", ())})
+                if mining is not None
+                else []
+            ),
             "docs_publish_dropped_as_duplicate": int(
                 publish.deduplicated if publish is not None else 0
             ),
@@ -1096,9 +1092,7 @@ def _build_cache(
 def _is_mined_only(request) -> bool:
     """Whether one search asks only for mined knowledge."""
     categories = tuple(str(kind) for kind in request.categories or ())
-    return bool(categories) and all(
-        kind in MINED_KINDS for kind in categories
-    )
+    return bool(categories) and all(kind in MINED_KINDS for kind in categories)
 
 
 def _source_counts(context: Optional[KnowledgeContext]) -> Dict[str, int]:

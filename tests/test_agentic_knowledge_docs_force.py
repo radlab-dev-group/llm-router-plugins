@@ -469,9 +469,7 @@ def test_reverting_a_file_to_older_content_keeps_its_document(tmp_path):
     scope = "demo"
 
     def scan():
-        return service.index(
-            scope, str(tmp_path), agent="test", allow_prune=True
-        )
+        return service.index(scope, str(tmp_path), agent="test", allow_prune=True)
 
     # v1 indexed: one doc event, one claim
     first = scan()
@@ -489,18 +487,13 @@ def test_reverting_a_file_to_older_content_keeps_its_document(tmp_path):
     (tmp_path / "README.md").write_text("# V1\n\nOriginal.\n")
     third = scan()
     assert third.published == 1, (
-        "the reverted document was dropped as a duplicate: "
-        f"{third.as_dict()}"
+        "the reverted document was dropped as a duplicate: " f"{third.as_dict()}"
     )
     assert third.pruned == 1
 
     # the stream is a journal; replay it the way the worker would and the
     # collection must hold exactly one current document for the file, with the
     # v1 content, and the state must name the document that exists
-    from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
-        ENGINE_NAME_SUFFIX,
-    )
-
     import datetime
 
     from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
@@ -513,14 +506,21 @@ def test_reverting_a_file_to_older_content_keeps_its_document(tmp_path):
         event = json.loads(fields["event"])
         if event["kind"] == "doc":
             day = datetime.date.fromtimestamp(float(event["created_at"]))
-            engine[document_name(KIND_DOC, day, event["fingerprint"])] = event["text"]
+            engine[document_name(KIND_DOC, day, event["fingerprint"])] = event[
+                "text"
+            ]
         elif event["kind"] == "docs_prune":
             for name in event["metadata"]["names"]:
                 engine.pop(name, None)
-    assert len(engine) == 1, f"the collection holds {len(engine)} documents: {list(engine)}"
+    assert (
+        len(engine) == 1
+    ), f"the collection holds {len(engine)} documents: {list(engine)}"
     (only,) = list(engine.values())
     assert "Original." in only
     entries = state.load(scope, config.collection(scope, "doc"))
     names = entries.get("README.md", {}).get("n") or []
     assert names, "the state lost the file's document name"
-    assert all(any(name.split(":")[-1] == n.split(":")[-1] for n in names) for name in engine)
+    assert all(
+        any(name.split(":")[-1] == n.split(":")[-1] for n in names)
+        for name in engine
+    )

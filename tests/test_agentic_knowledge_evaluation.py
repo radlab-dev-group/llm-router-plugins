@@ -157,23 +157,18 @@ def test_the_synthetic_scenarios_mine_the_kinds_the_read_path_needs():
     # failure -> patch -> green: a recipe
     assert kinds_of(recipe_items()) == [KIND_RECIPE]
     # failure -> patch -> failure: the attempt is a dead end
-    deadend = (
-        base_items()
-        + [
-            _command("c1", "e1"),
-            _command_output("c1", "o1", FAILING, code=1),
-            _patch("p1", "pe"),
-            _command("c2", "e2"),
-            _command_output("c2", "o2", FAILING, code=1),
-        ]
-    )
+    deadend = base_items() + [
+        _command("c1", "e1"),
+        _command_output("c1", "o1", FAILING, code=1),
+        _patch("p1", "pe"),
+        _command("c2", "e2"),
+        _command_output("c2", "o2", FAILING, code=1),
+    ]
     assert kinds_of(deadend) == [KIND_DEADEND]
     # a failure fixed and, afterwards, a wider test run that accepted the
     # whole turn: the recipe covers the later change, so the procedure that
     # would repeat it is not written twice
-    assert kinds_of(
-        fix_then_procedure_items(), mode="implement"
-    ) == [KIND_PLAYBOOK]
+    assert kinds_of(fix_then_procedure_items(), mode="implement") == [KIND_PLAYBOOK]
     # patch -> green: a procedure
     assert kinds_of(procedure_items(), mode="implement") == [KIND_PLAYBOOK]
     # a shell edit is still an edit: the recipe closes on it

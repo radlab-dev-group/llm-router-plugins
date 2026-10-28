@@ -736,9 +736,7 @@ def test_retention_does_not_age_documentation_that_shares_the_collection():
     ]
     result = work.run_retention()
     assert result["deleted"] == 1
-    assert sse.deleted == [
-        ("agentic_kb_webapp", [f"session_archive:{old}:old"])
-    ]
+    assert sse.deleted == [("agentic_kb_webapp", [f"session_archive:{old}:old"])]
 
 
 def test_retention_never_touches_documents_outside_the_plugin_shape():

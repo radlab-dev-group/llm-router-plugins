@@ -781,11 +781,15 @@ def test_a_document_is_named_by_the_day_its_event_was_created():
         document_name,
     )
 
-    record = _file_record("docs/g.md", "# T\n\nbody\n", size=10, mtime=1.0, scope="demo")
+    record = _file_record(
+        "docs/g.md", "# T\n\nbody\n", size=10, mtime=1.0, scope="demo"
+    )
     stamp = 1_793_149_200.0
     events = doc_events([record], scope="demo", now=stamp)
     event_day = datetime.date.fromtimestamp(events[0].created_at).strftime("%Y%m%d")
-    name = document_name(KIND_DOC, datetime.date.fromtimestamp(stamp), record.fingerprint)
+    name = document_name(
+        KIND_DOC, datetime.date.fromtimestamp(stamp), record.fingerprint
+    )
     assert f":{event_day}:" in name
     assert events[0].created_at == stamp
 
@@ -974,9 +978,7 @@ def test_explicit_scope_that_normalizes_to_empty_is_refused(tmp_path, scope):
         ("Ścieżki", "sciezki"),
     ],
 )
-def test_explicit_non_ascii_scope_takes_the_derived_road(
-    tmp_path, scope, expected
-):
+def test_explicit_non_ascii_scope_takes_the_derived_road(tmp_path, scope, expected):
     """0.4: an operator-typed scope goes through the same transliteration as
     a derived one — diacritics survive as their ASCII, and a name with no
     ASCII at all keeps the deterministic digest the derived road gives it, so
@@ -1010,9 +1012,7 @@ def test_a_blank_explicit_scope_falls_back_to_the_derived_one(tmp_path):
         ("UPPER_CASE", "upper_case"),
     ],
 )
-def test_explicit_scope_is_normalized_like_the_proxy_path(
-    tmp_path, scope, expected
-):
+def test_explicit_scope_is_normalized_like_the_proxy_path(tmp_path, scope, expected):
     """The CLI scope takes the same normalization road as a scope derived from
     a directory: lowercased, unsafe runs reduced to hyphens, capped.  A scope
     that survives is printed by the dry-run."""

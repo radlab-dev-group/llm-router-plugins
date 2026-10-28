@@ -483,7 +483,11 @@ def document_headings(text: str) -> Tuple[str, ...]:
             # line is never an opener.  Comparing the marker as a prefix
             # (three characters of it) closed a ``` block on a ``` example in
             # the prose and let the next # comment read as a heading.
-            if opening and opening.group(1)[0] == fence[0] and len(opening.group(1)) >= len(fence):
+            if (
+                opening
+                and opening.group(1)[0] == fence[0]
+                and len(opening.group(1)) >= len(fence)
+            ):
                 fence = ""
             continue
         if opening:
@@ -1096,10 +1100,9 @@ class DocsIndexer:
                 for records in by_file.values()
                 for item in records
             }
-            gone_stale = (
-                gone_stale
-                + [name for name in changed_stale if name not in published_names]
-            )
+            gone_stale = gone_stale + [
+                name for name in changed_stale if name not in published_names
+            ]
             changed_stale = []
 
         published: int = 0

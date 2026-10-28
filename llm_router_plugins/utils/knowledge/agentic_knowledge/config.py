@@ -186,7 +186,9 @@ _SESSIONS_SUFFIX = "sessions"
 _DOCS_SUFFIX = "docs"
 
 
-def is_collection_of(name: str, prefix: str, layout: str = COLLECTION_LAYOUT_SPLIT) -> bool:
+def is_collection_of(
+    name: str, prefix: str, layout: str = COLLECTION_LAYOUT_SPLIT
+) -> bool:
     """
     Whether a collection *name* belongs to this plugin under *prefix*.
 
@@ -208,7 +210,9 @@ def is_collection_of(name: str, prefix: str, layout: str = COLLECTION_LAYOUT_SPL
         if not name.startswith(f"{prefix}{separator}"):
             continue
         rest = name[len(prefix) + 1 :]
-        if rest.endswith(f"_{_SESSIONS_SUFFIX}") or rest.endswith(f"-{_SESSIONS_SUFFIX}"):
+        if rest.endswith(f"_{_SESSIONS_SUFFIX}") or rest.endswith(
+            f"-{_SESSIONS_SUFFIX}"
+        ):
             return "sessions"
         if rest.endswith(f"_{_DOCS_SUFFIX}") or rest.endswith(f"-{_DOCS_SUFFIX}"):
             return "docs"

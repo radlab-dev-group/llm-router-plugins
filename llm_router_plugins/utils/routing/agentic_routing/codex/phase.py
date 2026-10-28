@@ -865,7 +865,8 @@ def _written_paths(words: List[str]) -> List[str]:
                 index += 1
             continue
         if PurePosixPath(word).name == "sed" and any(
-            argument == "-i" or (
+            argument == "-i"
+            or (
                 argument.startswith("-")
                 and not argument.startswith("--")
                 and "i" in argument[1:]

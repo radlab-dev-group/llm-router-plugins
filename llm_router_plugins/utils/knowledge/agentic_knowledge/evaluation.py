@@ -126,7 +126,9 @@ class _FakeStore:
             }
         )
 
-    def search(self, request: SearchRequest, min_similarity: float = 0.0) -> SearchResult:
+    def search(
+        self, request: SearchRequest, min_similarity: float = 0.0
+    ) -> SearchResult:
         """
         Return deterministic overlap-scored hits for *request*.
 

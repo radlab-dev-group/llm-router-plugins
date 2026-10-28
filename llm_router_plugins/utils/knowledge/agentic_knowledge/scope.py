@@ -325,9 +325,7 @@ def _transliterate(value: str) -> str:
     names is worse than a name no one can read.
     """
     decomposed = unicodedata.normalize("NFKD", value)
-    return "".join(
-        char for char in decomposed if unicodedata.category(char) != "Mn"
-    )
+    return "".join(char for char in decomposed if unicodedata.category(char) != "Mn")
 
 
 def _collides(key: str, original: str) -> None:
@@ -388,9 +386,7 @@ def _digest_of(original: str) -> str:
 
 def _is_a_name(value: str) -> bool:
     """Whether *value* carries a letter or a digit in any script."""
-    return any(
-        unicodedata.category(char).startswith(("L", "N")) for char in value
-    )
+    return any(unicodedata.category(char).startswith(("L", "N")) for char in value)
 
 
 def normalize_scope(value: str) -> str:

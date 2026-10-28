@@ -357,13 +357,19 @@ def test_deadend_freezes_failed_attempt_before_successful_patch(second_path):
     items = deadend_items()
     before = mine(codex_payload(items))
     original = next(event for event in before.events if event.kind == KIND_DEADEND)
+    second_patch = (
+        "*** Begin Patch\n"
+        f"*** Update File: {second_path}\n"
+        "@@\n-x = 2\n+x = 3\n"
+        "*** End Patch"
+    )
     items += [
         {
             "type": "function_call",
             "name": "apply_patch",
             "call_id": "p2",
             "id": "pe2",
-            "arguments": f"*** Begin Patch\n*** Update File: {second_path}\n@@\n-x = 2\n+x = 3\n*** End Patch",
+            "arguments": second_patch,
         },
         {
             "type": "function_call",
@@ -393,13 +399,19 @@ def test_deadend_freezes_failed_attempt_before_successful_patch(second_path):
 
 
 def test_pending_patch_is_not_part_of_an_earlier_deadend():
+    pending_patch = (
+        "*** Begin Patch\n"
+        "*** Update File: src/a.py\n"
+        "@@\n-x = 2\n+x = 3\n"
+        "*** End Patch"
+    )
     items = deadend_items() + [
         {
             "type": "function_call",
             "name": "apply_patch",
             "call_id": "p2",
             "id": "pe2",
-            "arguments": "*** Begin Patch\n*** Update File: src/a.py\n@@\n-x = 2\n+x = 3\n*** End Patch",
+            "arguments": pending_patch,
         }
     ]
     result = mine(codex_payload(items))
@@ -464,10 +476,19 @@ def test_diagnostics_read_an_empty_turn_as_no_failure_not_no_patch():
     """1.2: a turn with commands but no test failure is `no_failure`, not
     `no_patch` — today the two look identical, and an empty knowledge base
     could not say which one it was."""
-    result = mine(codex_payload(loop_items(failures=0) if False else base_items() + [
-        __import__("agentic_knowledge_support")._command("c1", "e1"),
-        __import__("agentic_knowledge_support")._command_output("c1", "o1", "ok", code=0),
-    ]))
+    result = mine(
+        codex_payload(
+            loop_items(failures=0)
+            if False
+            else base_items()
+            + [
+                __import__("agentic_knowledge_support")._command("c1", "e1"),
+                __import__("agentic_knowledge_support")._command_output(
+                    "c1", "o1", "ok", code=0
+                ),
+            ]
+        )
+    )
     assert _diag(result, "no_failure") == 1
     assert _diag(result, "no_patch") == 0
     assert _diag(result, "published") == 0
@@ -477,7 +498,9 @@ def test_diagnostics_read_a_failure_without_a_patch_as_no_patch():
     """1.2: a failure the turn never changed anything for is `no_patch`."""
     items = base_items() + [
         __import__("agentic_knowledge_support")._command("c1", "e1"),
-        __import__("agentic_knowledge_support")._command_output("c1", "o1", FAILING, code=1),
+        __import__("agentic_knowledge_support")._command_output(
+            "c1", "o1", FAILING, code=1
+        ),
     ]
     result = mine(codex_payload(items))
     assert _diag(result, "no_patch") == 1

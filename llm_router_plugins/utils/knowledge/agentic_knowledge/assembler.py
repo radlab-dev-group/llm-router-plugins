@@ -45,9 +45,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     parse_document_text,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
-    SCALE_COSINE,
     SCALE_RRF,
-    SCALE_RERANKER,
     SearchResult,
     StoreHit,
 )

@@ -366,7 +366,9 @@ class KnowledgeEventPublisher:
         """The deduplication key of one episode."""
         return f"{self._key_prefix}:seen:{event.fingerprint}"
 
-    def _claim(self, client: Any, event: KnowledgeEvent, *, refresh: bool = False) -> str:
+    def _claim(
+        self, client: Any, event: KnowledgeEvent, *, refresh: bool = False
+    ) -> str:
         """
         Take the one-time lock on an episode.
 

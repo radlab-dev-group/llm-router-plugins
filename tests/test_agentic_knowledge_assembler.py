@@ -161,7 +161,9 @@ def test_a_path_bonus_cannot_outvote_a_tenfold_better_base():
     from agentic_knowledge_support import StoreHit
 
     def hit(name, base, kind="recipe", paths=()):
-        text = build_document_text(kind, "body", date=datetime.date.today(), paths=paths)
+        text = build_document_text(
+            kind, "body", date=datetime.date.today(), paths=paths
+        )
         return StoreHit(
             collection="agentic_kb_webapp",
             document_name=f"{kind}:{day}:{name}",

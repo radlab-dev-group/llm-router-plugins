@@ -102,7 +102,6 @@ def test_archive_requests_are_restricted_to_the_thread():
     assert archive and all(r.thread_id == "thread-1" for r in archive)
 
 
-
 def test_non_archive_requests_are_not_thread_restricted():
     turn = turn_for(mode="debug")
     requests = builder().build(turn, knowledge_config().modes["debug"])
@@ -130,7 +129,9 @@ def test_a_thread_restriction_never_mixes_the_archive_with_knowledge():
 
 def test_one_repository_collection_still_answers_three_requests():
     """Merged collections, not merged requests: the filters do the separating."""
-    requests = builder().build(turn_for(mode="debug"), knowledge_config().modes["debug"])
+    requests = builder().build(
+        turn_for(mode="debug"), knowledge_config().modes["debug"]
+    )
     assert len(requests) == 3
     assert {request.collection for request in requests} == {"agentic_kb_webapp"}
     assert {tuple(sorted(request.categories)) for request in requests} == {
