@@ -631,8 +631,16 @@ knowledge base.  Because the questions run together, a budget of one call plus i
 the whole read of a mode, which is why the shipped policy budgets 3 s over the 2 s per-call
 default.  When a budget is spent mid-request the searches that do not fit are not started and one
 warning names the scope and how many were lost; raise the budget or shorten the mode's sources.
-Measured against a real engine on another host, a hybrid search takes a median of ~1.7 s, which
-is why a 1.5 s per-call ceiling lost every search it made.
+Measured against a real engine, a hybrid search takes a median of ~1.7 s (2.9 s at the 95th
+percentile), which is why a 1.5 s per-call ceiling lost every search it made — and the same
+measurement says the sources' queueing, not their calls, is what a ceiling must cover: the
+reference engine serves one search at a time, so the three questions of a mode asked together
+took 7.3 s wall while asked in a row they took 5.2 s, and a 2.0 s per-call ceiling cut all
+three of the parallel calls, injecting nothing where a serial read of the same request would
+have answered with its first source. On an engine that serves one request at a time the
+per-call ceiling must therefore be sized to the queue, `sources × the engine's median single
+call`, not to the call, or the engine scaled; `metrics.read_budget_skips` in the annotation
+says which side of that line a deployment sits on.
 
 The plugin also asks the engine **not to guess the language of the query**
 (`…_SSE_IGNORE_LANGUAGE_DETECT`, on by default).  The engine otherwise detects the language of the
