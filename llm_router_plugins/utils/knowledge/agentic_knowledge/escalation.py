@@ -29,11 +29,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
     ModePolicy,
 )
-from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
-    SCALE_COSINE,
-    SCALE_RERANKER,
-    SCALE_RRF,
-)
+from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import SCALE_RERANKER
 
 __all__ = [
     "EscalationDecision",
