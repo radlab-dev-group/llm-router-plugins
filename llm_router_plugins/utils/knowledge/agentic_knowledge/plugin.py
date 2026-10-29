@@ -487,7 +487,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             # starved configuration starves every request of every session,
             # and a warning that prints on every request is a warning nobody
             # reads.
-            self._warn_budget(turn.scope, skipped, len(results) + skipped)
+            self._warn_budget(turn.scope, skipped, len(results))
         status = _status_of(statuses)
 
         assembler = ContextAssembler(
@@ -505,7 +505,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             cache="miss",
             status=status,
             doc_context=context.doc_context,
-            searches=len(results) + skipped,
+            searches=len(results),
             budget_skipped=skipped,
             cache_miss_reason="cold",
         )

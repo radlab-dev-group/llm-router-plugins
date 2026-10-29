@@ -45,11 +45,25 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.signature import (
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
     REASON_READ_BUDGET,
+    STATUS_OK,
     STATUS_UNAVAILABLE,
     SearchResult,
 )
 
 MARKER = "<agentic_knowledge>"
+
+
+class _StarvedStore:
+    """A store the read budget refuses on one of the mode's sources."""
+
+    def __init__(self):
+        self.requests = []
+
+    def search(self, request, deadline=None):
+        self.requests.append(request)
+        if len(self.requests) == 2:
+            return SearchResult(STATUS_UNAVAILABLE, reason=REASON_READ_BUDGET)
+        return SearchResult(STATUS_OK, hits=(store_hit("recipe", score=0.5),))
 
 
 def make_plugin(config, store=None, publisher=None, cache=None, adapters=None):
@@ -876,6 +890,26 @@ def test_the_annotation_carries_the_numbers_a_deployment_reads():
     assert metrics["cache_miss_reason"] == "cold"
     assert "recipe" not in metrics["mined_kinds"]
     assert metrics["docs_publish_dropped_as_duplicate"] == 0
+
+
+def test_a_search_the_budget_refused_is_counted_once():
+    """A refused search is one search, not two.
+
+    The count of searches is every question the read asked of the engine,
+    whether or not the budget let it start, and the count of skips is the
+    subset of those that did not start. The two were added together, so a
+    starved read reported more searches than it made: an operator reading
+    `searches_per_request` as the engine's bill read a number the engine
+    never saw.
+    """
+    config = knowledge_config()
+    store = _StarvedStore()
+    plugin = make_plugin(config, store=store)
+    out = plugin.apply(main_payload(mode="debug", failures=1))
+    metrics = out["routing"]["knowledge"]["metrics"]
+    assert len(store.requests) >= 3
+    assert metrics["read_budget_skips"] == 1
+    assert metrics["searches_per_request"] == len(store.requests)
 
 
 def test_a_cache_hit_reports_no_searches_and_no_miss_reason():
