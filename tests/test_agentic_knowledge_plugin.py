@@ -934,13 +934,19 @@ def test_a_slow_engine_is_waited_once_not_once_per_source():
     source: with the budget at two calls, the third source never started and
     the block read as an empty knowledge base.  The same budget, spent on
     calls that run at the same moment, leaves the whole read inside it.
+
+    The store records how many calls were in flight at the same moment.  That
+    is the property under test: a machine that schedules threads badly is a
+    deployment problem, not a reason to read the sources one after another, so
+    the assertion is about overlap, not about how fast this runner is.
     """
+    import threading
     import time
 
     from agentic_knowledge_support import knowledge_config
 
     config = knowledge_config(read_timeout_seconds=3.0)
-    slow = 1.2  # seconds each call takes; three of them in a row are 3.6 s
+    slow = 0.4  # seconds each call takes; the overlap is the point, not the clock
 
     from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
         STATUS_OK,
@@ -952,30 +958,33 @@ def test_a_slow_engine_is_waited_once_not_once_per_source():
     class _SlowStore:
         def __init__(self):
             self.requests = []
+            self._lock = threading.Lock()
+            self._in_flight = 0
+            self.max_in_flight = 0
 
         def search(self, request, deadline=None):
-            self.requests.append(request)
+            with self._lock:
+                self.requests.append(request)
+                self._in_flight += 1
+                self.max_in_flight = max(self.max_in_flight, self._in_flight)
             time.sleep(slow)
-            if deadline is not None and time.monotonic() > deadline:
-                from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
-                    REASON_READ_BUDGET,
-                )
-
-                return SearchResult(STATUS_UNAVAILABLE, reason=REASON_READ_BUDGET)
+            with self._lock:
+                self._in_flight -= 1
             return SearchResult(STATUS_OK, hits=(store_hit("recipe", score=0.5),))
 
     store = _SlowStore()
     publisher = FakePublisher()
     plugin = make_plugin(config, store=store, publisher=publisher)
-    started = time.monotonic()
     plugin.apply(main_payload(mode="debug", failures=1))
-    spent = time.monotonic() - started
 
     # every source of the mode was asked
     assert len(store.requests) >= 3
-    # and the request did not pay the timeout per source: the whole read is
-    # inside one call's duration plus slack, not three times it.
-    assert spent < 3 * slow
+    # and they ran at the same moment: the whole read is one call's duration,
+    # not the sum of the calls, no matter how the machine schedules them.
+    assert store.max_in_flight >= 3, (
+        f"only {store.max_in_flight} of the {len(store.requests)} sources ran "
+        "at once: the slow engine was paid per source, not once"
+    )
 
 
 def test_one_failing_search_does_not_drop_the_others():
