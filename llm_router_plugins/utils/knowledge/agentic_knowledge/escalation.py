@@ -29,6 +29,11 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
     ModePolicy,
 )
+from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+    SCALE_COSINE,
+    SCALE_RERANKER,
+    SCALE_RRF,
+)
 
 __all__ = [
     "EscalationDecision",
@@ -41,6 +46,7 @@ __all__ = [
     "REASON_NO_LOOP",
     "REASON_NO_ESCALATION_MODEL",
     "REASON_STRONG_RECIPE",
+    "REASON_STRONG_RECIPE_IDENTITY",
     "REASON_LOOP_WITHOUT_RECIPE",
     "REASON_RECIPE_FAILED",
     "REASON_RECIPE_TRIAL_LIMIT",
@@ -69,6 +75,10 @@ REASON_NO_ESCALATION_MODEL = "no_escalation_model"
 
 #: A strong recipe for the failure was found; the context already has the fix.
 REASON_STRONG_RECIPE = "strong_recipe"
+
+#: A recipe for exactly this failure was found and verified, and the retrieval
+#: scale it was scored on cannot hold a threshold, so its identity decided.
+REASON_STRONG_RECIPE_IDENTITY = "strong_recipe_identity"
 
 #: The loop went on with no known fix; the model is replaced.
 REASON_LOOP_WITHOUT_RECIPE = "loop_without_recipe"
@@ -189,14 +199,14 @@ class EscalationPolicy:
                 loop_count,
                 signature_hash,
             )
-        strong_recipe = self.has_strong_recipe(context, signature_hash)
-        if strong_recipe and (
+        recipe_reason = self.strong_recipe_reason(context, signature_hash)
+        if recipe_reason and (
             recipe_offered_at is not None
             or loop_count == self._config.loop_threshold
         ):
             return EscalationDecision(
                 ACTION_KEEP,
-                REASON_STRONG_RECIPE,
+                recipe_reason,
                 None,
                 loop_count,
                 signature_hash,
@@ -205,7 +215,7 @@ class EscalationPolicy:
             ACTION_ESCALATE,
             (
                 REASON_RECIPE_TRIAL_LIMIT
-                if strong_recipe
+                if recipe_reason
                 else REASON_LOOP_WITHOUT_RECIPE
             ),
             policy.escalation_model_name,
@@ -216,19 +226,52 @@ class EscalationPolicy:
     def has_strong_recipe(
         self, context: KnowledgeContext, signature_hash: str
     ) -> bool:
-        """Require an injected recipe with matching identity and verification.
+        """Whether a recipe in *context* counts as a fix for this failure."""
+        return bool(self.strong_recipe_reason(context, signature_hash))
 
-        The command is a minimum provenance requirement, not an independent
-        confirmation count.  Legacy recipes without it remain readable, but
-        cannot suppress escalation just because retrieval ranked them highly.
+    def strong_recipe_reason(
+        self, context: KnowledgeContext, signature_hash: str
+    ) -> str:
+        """
+        Return why a recipe in *context* is a fix, or ``""`` when none is.
+
+        A recipe is a candidate for the fix of this failure when it carries
+        this failure's signature and a verification command: identity, not
+        similarity.  The command is a minimum provenance requirement, not an
+        independent confirmation count; legacy recipes without it remain
+        readable, but cannot suppress escalation just because retrieval ranked
+        them highly.
+
+        Whether being *retrieved* is enough is a question about the scale the
+        retrieval scored on, and the engine names that scale on every hit.
+        ``strong_recipe_score`` is a relevance threshold, and it means
+        something on a cosine similarity (an absolute relevance) and on a
+        fused rank the assembler has already remapped onto ``0…1`` (how near
+        the top of its set a recipe sits).  It means nothing on a cross-encoder
+        logit squashed onto ``[0, 1]``: measured against a real engine, a
+        recipe carrying the very signature that was asked about scored 0.731
+        with the reranker on and 1.0 with it off, so a threshold set for one
+        scale silently never fires on the other — the loop is then reported as
+        having no known fix while the block injected in front of the model
+        holds exactly that fix.  On such a scale identity and verification
+        decide, and the reason names which of the two routes was taken so
+        that the annotation shows it.  A hit whose scale the engine did not
+        state keeps the threshold, the conservative reading.
         """
         if context.empty or not signature_hash:
-            return False
-        return any(
-            hit.category == "recipe"
-            and hit.signature_hash == signature_hash
-            and bool(hit.test_command.strip())
-            and math.isfinite(hit.score)
-            and hit.score >= self._config.strong_recipe_score
-            for hit in context.hits
-        )
+            return ""
+        threshold = self._config.strong_recipe_score
+        for hit in context.hits:
+            if (hit.category or "") != "recipe":
+                continue
+            if hit.signature_hash != signature_hash:
+                continue
+            if not bool(hit.test_command.strip()):
+                continue
+            if not math.isfinite(hit.score):
+                continue
+            if hit.score_scale == SCALE_RERANKER:
+                return REASON_STRONG_RECIPE_IDENTITY
+            if hit.score >= threshold:
+                return REASON_STRONG_RECIPE
+        return ""

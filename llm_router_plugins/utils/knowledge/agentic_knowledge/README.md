@@ -506,9 +506,16 @@ not push a mode past its escalation threshold.
 4. no eligible recipe trial remains for this failure.
 
 Retrieval relevance (`best_recipe_score`) is **not** recipe reliability. To earn a trial, a recipe must actually
-be injected, match the current `signature_hash`, declare a nonempty `test_command`, and meet `strong_recipe_score`
-(default `0.75`). This is a minimum verification-provenance check, not a count of independent confirmations;
-legacy documents lacking these fields remain readable but cannot hold back escalation.
+be injected, match the current `signature_hash`, and declare a nonempty `test_command` — identity and
+verification, not similarity. On top of that, its score must meet `strong_recipe_score` (default `0.75`),
+except on the one scale where that number cannot be compared: with `read.rerank_results` on, a hit's score is a
+squashed cross-encoder logit, and the same `0.75` means something else there — measured against the reference
+engine, a recipe carrying the very signature asked about scored `0.731` with the reranker on and `1.0` with it
+off. On that scale the identity and the verification command decide, the decision names it
+(`strong_recipe_identity`), and the config warns at start that the threshold is set for a scale the read no
+longer produces. A hit whose scale the engine did not state keeps the threshold. This is a minimum
+verification-provenance check, not a count of independent confirmations; legacy documents lacking these fields
+remain readable but cannot hold back escalation.
 
 The generation cache records the failure count at the first qualifying injection, even before the loop threshold.
 After the threshold is reached, a higher count means `recipe_did_not_resolve_loop` and permits escalation regardless
@@ -517,7 +524,7 @@ of newly retrieved recipes. Replaying the same evidence does not consume the tri
 a recipe can keep the model only at `loop_threshold`; beyond it, `recipe_trial_limit` prevents indefinite suppression.
 
 Outcomes are `none`, `keep` (a qualifying recipe still has its trial) and `escalate`, with reasons `disabled`,
-`explicit_mode`, `no_loop`, `no_escalation_model`, `strong_recipe`, `loop_without_recipe`,
+`explicit_mode`, `no_loop`, `no_escalation_model`, `strong_recipe`, `strong_recipe_identity`, `loop_without_recipe`,
 `recipe_did_not_resolve_loop`, `recipe_trial_limit`. On `escalate` the adapter
 sets the model and `routing.model_before_knowledge` records the previous one. The policy is **off in the shipped
 config** (`escalation.enabled=false`) — enable it only after the replay shows the loop detection is right, because a

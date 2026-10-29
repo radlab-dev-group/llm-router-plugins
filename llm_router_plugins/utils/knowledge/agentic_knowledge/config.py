@@ -1044,18 +1044,41 @@ class AgenticKnowledgeConfig:
         Warn once when a threshold is set for a scale it cannot be met on.
 
         ``strong_recipe_score`` is compared against a recipe's normalized
-        retrieval score.  In the default deployment that score is a fused
-        rank rescaled onto ``[0, 1]`` only *within* the result set that
-        produced it, so a threshold above what a single set can express is
-        never met and the escalation rule "give the recipe a chance first"
-        silently never fires.  The mismatch is a configuration problem, and
-        a configuration problem that prints a warning at start is one an
-        operator can fix; a silent one is one nobody ever finds.
+        retrieval score, and the scale that score lives on depends on which
+        retrieval leg the read runs with.  In the default deployment it is a
+        fused rank rescaled onto ``[0, 1]`` only *within* the result set that
+        produced it; with the reranker leg it is a cross-encoder logit the
+        engine squashed onto ``[0, 1]`` — a different number under the same
+        name, and one a threshold tuned for the other scale does not apply
+        to.  A mismatch that prints a warning at start is one an operator can
+        fix; a silent one is one nobody ever finds.
         """
         import logging
 
+        logger = logging.getLogger("agentic_knowledge")
         if self.rerank_results:
-            return  # a cross-encoder logit squashed onto [0, 1] is the scale
+            # A squashed cross-encoder logit tops out at 1.0 in principle,
+            # but the band its relevant documents actually sit in is lower:
+            # measured against a real engine, a recipe carrying the very
+            # signature it was asked about scored 0.731 with the reranker on
+            # and 1.0 with it off.  A threshold at or above that band is
+            # therefore not a high bar, it is a bar the engine's own answers
+            # rarely clear, and the identity of a matching recipe — not its
+            # score — is what decides it.
+            if self.strong_recipe_score >= 0.75:
+                logger.warning(
+                    "escalation.strong_recipe_score=%s is set for a scale "
+                    "the read no longer runs on: rerank_results is on, so a "
+                    "recipe's score is a squashed cross-encoder logit whose "
+                    "relevant band the reference engine puts near 0.5–0.75, "
+                    "and the threshold is applied to that number.  Lower "
+                    "the threshold to the reranker's band or turn the "
+                    "reranker off; a recipe that matches the failure's own "
+                    "signature still counts, and the decision names it "
+                    "(reason strong_recipe_identity).",
+                    self.strong_recipe_score,
+                )
+            return
         # The fused rank of a hybrid search rescales the set's best hit to
         # 1.0, so any threshold in (0, 1] is reachable in principle.  What
         # is not reachable is a threshold the *engine* cannot express before
@@ -1064,7 +1087,7 @@ class AgenticKnowledgeConfig:
         # they set: warn when the default scale is in play and the
         # threshold sits in a band a two-leg fusion rarely reaches.
         if self.strong_recipe_score > 0.9:
-            logging.getLogger("agentic_knowledge").warning(
+            logger.warning(
                 "escalation.strong_recipe_score=%s is only reachable when "
                 "the engine reranks; a hybrid search rescales each result "
                 "set onto [0, 1], so a recipe must be the set's best hit "

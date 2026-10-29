@@ -705,3 +705,25 @@ def test_git_review_reads_the_documentation():
     # and the alias reads the same block
     alias = config.policy_for("review")
     assert [source.category for source in alias.sources] == categories
+
+
+def test_a_reranker_scale_threshold_warns_at_start(caplog):
+    # The threshold is a number on a scale; with the reranker leg on the read
+    # no longer produces that scale, and the mismatch must say so at start.
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="agentic_knowledge"):
+        knowledge_config(rerank_results=True)
+    assert any(
+        "strong_recipe_score" in r.message for r in caplog.records
+    ), caplog.text
+
+
+def test_the_hybrid_scale_threshold_does_not_warn_for_a_reachable_band(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="agentic_knowledge"):
+        knowledge_config(rerank_results=False)
+    assert not any(
+        "strong_recipe_score" in r.message for r in caplog.records
+    ), caplog.text
