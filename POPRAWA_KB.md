@@ -166,7 +166,8 @@ w minerze i w adapterze.
   długości — kwerenda nie przekracza 512 znaków i nie wciąga całego okna.
 
 ### 2.2 Skala wyników: przestać mieszać RRF z bonusami
-> Zrobione — `a8b996e` (ranga RRF remapowana do 0–1 wewnątrz zbioru, `score_scale` w trafieniu i w adnotacji, progi walidowane względem skali; `min_similarity` zostaje po stronie silnika)
+> Zrobione — `a8b996e` (ranga RRF remapowana do 0–1 wewnątrz zbioru, `score_scale` w trafieniu i w adnotacji, progi walidowane względem skali; `min_similarity` zostaje po stronie silnika).
+> Domknięte po pomiarze na żywym silniku — `f666970`: test obiecujący, że „przy włączonym rerankerze próg 0,75 jest osiągalny”, nie zachodził na silniku odniesienia: przepis niosący własną sygnaturę zapytania dawał `score=0,731` z rerankerem i `1,0` bez niego. Skala to nie nazwa — jest noszona na każdym trafieniu (`score_scale`) i decyzja eskalacji czyta próg tylko na skalach, na których on coś znaczy (cosine, remapowane RRF, brak skali = próg zostaje); na skali rerankera decyduje tożsamość sygnatury + `test_command`, a decyzja to nazywa (`strong_recipe_identity`), więc reguła nie znika cicho. Walidacja progu na starcie wypala też dla nogi rerankera (wcześniej wracała bez słowa).
 `assembler.py:400` liczy `vote = base * weight + bonus`, przy czym `base` to `score_normalized`,
 czyli **przy domyślnej konfiguracji (`hybrid_search: true`, `rerank_results: false`) ranga RRF
 o maksimum ~0,033**, a bonusy to 0,20–0,44 (`assembler.py:64-84`). Wykonany test: przy
@@ -288,8 +289,13 @@ włączone).
 1. `XPENDING` strumienia wiedzy nie rośnie; zdarzenia odrzucone mają limity prób i log.
 2. Na korpusie syntetycznym: `recipe > 0`, `playbook > 0`, `deadend > 0`; na korpusie prawdziwym
    `no_patch` < 20% żądań z dowodami poleceń.
-3. p95 dodatkowej latencji warstwy < 400 ms (cache trafiony) / < 1,5 s (pudło); ≤ 1,5 wywołania
-   silnika na żądanie.
+3. p95 dodatkowej latencji warstwy < 400 ms przy trafieniu cache; liczba wywołań silnika
+   na żądanie ≤ 3 (po jednym na kolekcję, odczyt równoległy). *Sformułowanie po pomiarze
+   (2026-10-29):* pierwotna obietnica „< 1,5 s przy pudle” nie jest osiągalna na silniku
+   odniesienia dla odczytu 3-źródłowego — warm read mierzony na 0,00 s (cel 400 ms spełniony),
+   zimne pudło na 5–7 s, bo silnik obsługuje zapytania sekwencyjnie; sufit, który ma sens,
+   to `read.timeout_seconds` (3,0 s) jako budżet całego odczytu, a nie latencja pojedynczego
+   pudła.
 4. Żaden dokument nie znika po `git checkout` pliku markdown; żaden dokument nie zostaje
    osierocony przez ucięty skan.
 5. Zero kolizji scope i zero pustych scope'ów dla ścieżek z polskimi i diakrytycznymi nazwami.
@@ -311,14 +317,19 @@ Testy repozytorium domykają zachowanie (testy regresji z każdej pozycji plus
 pełny zestaw `agentic`); kryteria, których test nie może zmierzyć, zostają do
 weryfikacji na prawdziwym silniku i na ruchu produkcyjnym:
 
-- **Kryterium 3** (p95 latencji < 400 ms cache / < 1,5 s pudło; ≤ 1,5 wywołania
-  na żądanie) — kod ma równoległe czytanie i jeden budżet, ale liczby przyjdą
-  z pomiaru na silniku; stąd pominięcie 2.4b (część) i 2.4c.
+- **Kryterium 3** — zmierzone (2026-10-29): cache trafiony = 0,00 s (cel 400 ms
+  spełniony), zimne pudło 3 źródeł = 5–7 s, bo silnik odniesienia serializuje
+  zapytania (3 równoległe = 7,3 s ścienne vs 5,2 s sekwencyjnie); hybrydowe
+  zapytanie mediana ~1,7 s, p95 ~2,9 s. Stąd sformułowanie kryterium wprost
+  (powyżej) i pominięcie 2.4b (część) i 2.4c.
 - **Kryterium 2 na korpusie prawdziwym** (`no_patch` < 20%) — liczniki (1.2) są
   na miejscu, wartość na 841 nagraniach trzeba zmierzyć jeszcze raz po etapie 1.
-- **Kryterium 6** (eskalacja: `keep` zamiast `loop_without_recipe`) — 2.2
-  dostarczyło skalę, na której próg ma sens; decyzja o włączeniu eskalacji na
-  produkcji zostaje świadomie poza tymi zmianami.
+- **Kryterium 6** (eskalacja: `keep` zamiast `loop_without_recipe`) — zweryfikowane
+  na żywym silniku (2026-10-29): ten sam przepis + pętla 3 → `keep/strong_recipe`
+  na gałęzi, `escalate/loop_without_recipe` na `main` z surowym RRF; po `f666970`
+  zachowanie jest to samo na obu skalach odczytu (reranker decyduje tożsamością,
+  powód `strong_recipe_identity`). Decyzja o włączeniu eskalacji na produkcji
+  zostaje świadomie poza tymi zmianami.
 - **Pominięte z priorytetu:** 3.2 (TTL `_docs`), 3.4 (odmowa nie-tekstu),
   3.7 (`--yes-unbounded`) — każda to osobna zmiana z własnym testem, żadna nie
   blokuje reszty.
