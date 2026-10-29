@@ -48,6 +48,9 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
 )
+from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+    MINED_KINDS,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.debug_capture import (
     capture_payload as _capture_payload,
 )
@@ -273,7 +276,14 @@ class AgenticKnowledgePlugin(PluginInterface):
         if turn.request_class == _REQUEST_CLASS_COMPACTION:
             # A window about to be summarized is written, never read from.
             self._annotate(
-                payload, adapter, turn, None, EscalationDecision(), publish, docs
+                payload,
+                adapter,
+                turn,
+                None,
+                EscalationDecision(),
+                publish,
+                docs,
+                mining,
             )
             return payload
         return self._serve_read(
@@ -300,7 +310,21 @@ class AgenticKnowledgePlugin(PluginInterface):
         # whatever a previous request cached for this generation.  The cache is
         # still read below, because escalation persistence lives in it and has
         # its own switch.
-        fresh = read_on and cached is not None and self._is_fresh(cached, turn)
+        fresh = (
+            read_on and cached is not None and self._is_fresh(cached, turn, config)
+        )
+        cache_miss_reason = ""
+        if not fresh and cached is not None:
+            # The block a request is shown is one thing, and why the cache did
+            # not serve it is another: a mode switch that reads the same
+            # question is a hit, a mode that reads a different question is a
+            # miss the operator can read as "the policy changed", and new
+            # evidence is a miss that is the turn actually moving.
+            cache_miss_reason = (
+                "evidence"
+                if _evidence_moved(cached.evidence_fingerprint, turn)
+                else "mode"
+            )
         if fresh:
             context = KnowledgeContext(
                 hits=cached.context.hits,
@@ -316,6 +340,13 @@ class AgenticKnowledgePlugin(PluginInterface):
             context = self._assemble(
                 turn, config, policy, mining, self._doc_context(turn, docs)
             )
+            # Nothing cached for this generation is a cold read; a switch to a
+            # mode that reads a different question is a policy change; new
+            # evidence is the turn moving.
+            if cache_miss_reason:
+                context = _with_miss_reason(context, cache_miss_reason)
+            elif context.cache == "miss":
+                context = _with_miss_reason(context, "cold")
 
         if not context.empty:
             payload = adapter.inject(payload, context.rendered)
@@ -380,8 +411,10 @@ class AgenticKnowledgePlugin(PluginInterface):
                 )
             ):
                 recipe_trials.setdefault(mining.signature_hash, mining.loop_count)
-            self._remember_context(turn, context, target, recipe_trials)
-        self._annotate(payload, adapter, turn, context, decision, publish, docs)
+            self._remember_context(turn, context, target, recipe_trials, config)
+        self._annotate(
+            payload, adapter, turn, context, decision, publish, docs, mining
+        )
         return payload
 
     def _assemble(
@@ -414,21 +447,37 @@ class AgenticKnowledgePlugin(PluginInterface):
         # while a whole call fits before this moment, which is what makes
         # `read_timeout_seconds` the number a request actually waits.
         deadline = time.monotonic() + self._config.read_timeout_seconds
-        skipped = 0
-        for request in self._query_builder.build(turn, policy):
-            try:
-                result = self._store.search(request, deadline=deadline)
-                if result.reason == REASON_READ_BUDGET:
-                    skipped += 1
-            except Exception as exc:
-                self._warn("knowledge search failed: %s", type(exc).__name__)
-                from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
-                    SearchResult as _SR,
-                )
-
-                result = _SR(STATUS_UNAVAILABLE, reason="search")
+        # The miner read the failure out of the turn on the writer's own
+        # normalization; the query asks with it, so the search is a question
+        # about the failure the agent is looking at and not a paraphrase of
+        # the user's sentence.
+        builder = _query_builder_with_failure(
+            self._query_builder,
+            getattr(mining, "signature", "") or "",
+        )
+        requests = builder.build(turn, policy)
+        # A scope with nothing mined has nothing for the knowledge bucket to
+        # return, and the search of it is pure latency on the way to an agent.
+        # The counter is the worker's; unknown is not zero, and an unknown
+        # counter costs the search it always cost.
+        requests = self._skip_cold_knowledge(turn, requests)
+        # The requests of one mode are independent: they ask different
+        # collections, with different filters, the same question.  Asked one
+        # after another a slow engine makes the request pay the transport
+        # timeout as many times as the mode has sources; asked together they
+        # pay it once.  The budget is the same, and the store still refuses a
+        # call that cannot fit before the deadline.
+        results = list(
+            self._search_requests_in_parallel(
+                requests,
+                deadline,
+            )
+        )
+        skipped = sum(
+            1 for result, _ in results if result.reason == REASON_READ_BUDGET
+        )
+        for result, _ in results:
             statuses.add(result.status)
-            results.append((result, request.categories))
         if skipped:
             # The reads the operator will otherwise conclude never happened.
             # Both numbers go in the line because the usual cause is not a
@@ -438,7 +487,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             # starved configuration starves every request of every session,
             # and a warning that prints on every request is a warning nobody
             # reads.
-            self._warn_budget(turn.scope, skipped, len(results) + skipped)
+            self._warn_budget(turn.scope, skipped, len(results))
         status = _status_of(statuses)
 
         assembler = ContextAssembler(
@@ -456,7 +505,72 @@ class AgenticKnowledgePlugin(PluginInterface):
             cache="miss",
             status=status,
             doc_context=context.doc_context,
+            searches=len(results),
+            budget_skipped=skipped,
+            cache_miss_reason="cold",
         )
+
+    def _skip_cold_knowledge(self, turn: AgentTurn, requests) -> tuple:
+        """
+        Drop the mined-knowledge search of a scope that has none.
+
+        The reader pays a hybrid search for a bucket a repository that has
+        never been mined cannot answer.  The worker counts the mined documents
+        it writes per scope, and a scope whose count is known to be zero skips
+        that one search; documentation and archived windows are asked for as
+        always, because they are written by other paths and on other clocks.
+        An unknown count is not a zero: a Redis that will not answer, or a
+        deployment predating the counter, keeps searching.
+        """
+        if not requests or not turn.scope:
+            return requests
+        if self._publisher is None:
+            return requests
+        try:
+            count = self._publisher.mined_count(turn.scope)
+        except Exception:  # a counter that cannot be read is not a cold scope
+            return requests
+        if count != 0:
+            return requests
+        remaining = tuple(
+            request for request in requests if not _is_mined_only(request)
+        )
+        return remaining if remaining else ()
+
+    def _search_requests_in_parallel(
+        self,
+        requests: Tuple[Any, ...],
+        deadline: float,
+    ):
+        """
+        Search every request at once, keeping the shared read budget.
+
+        A short-lived pool, one worker per request: the work is bounded by
+        the mode's own source list, and the pool is torn down before the
+        method returns, so a slow engine cannot hold a thread past the
+        request.  One request that fails or overruns the budget answers with
+        the same shape the serial loop used to produce — the other requests'
+        results are not lost with it.
+        """
+        if not requests:
+            return
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(request):
+            try:
+                result = self._store.search(request, deadline=deadline)
+            except Exception as exc:
+                self._warn("knowledge search failed: %s", type(exc).__name__)
+                from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+                    SearchResult as _SR,
+                )
+
+                result = _SR(STATUS_UNAVAILABLE, reason="search")
+            return (result, request.categories)
+
+        with ThreadPoolExecutor(max_workers=len(requests)) as pool:
+            for outcome in pool.map(one, requests):
+                yield outcome
 
     # ---------------------------------------------------------- cache path -
     def _cached(self, turn: AgentTurn) -> Optional[CachedContext]:
@@ -467,11 +581,24 @@ class AgenticKnowledgePlugin(PluginInterface):
         return cache.get(turn.scope, turn.cache_generation)
 
     @staticmethod
-    def _is_fresh(cached: CachedContext, turn: AgentTurn) -> bool:
+    def _is_fresh(cached: CachedContext, turn: AgentTurn, config: Any) -> bool:
         """Whether the cached block still describes this turn."""
-        return cached.mode == turn.mode and not _evidence_moved(
-            cached.evidence_fingerprint, turn
-        )
+        if _evidence_moved(cached.evidence_fingerprint, turn):
+            # New evidence is new facts: the block was built against a
+            # different turn than the one in front of it, whatever the mode.
+            return False
+        if cached.mode == turn.mode:
+            return True
+        # The mode switched, but a mode is a reading of the same facts:
+        # two modes that read the same sources on the same budget ask the
+        # same question of the knowledge base, and a switch between them
+        # changes the label of the answer, not the answer.  The block may
+        # keep being served.  A mode whose policy reads anything different
+        # is a different question, and the cache is a miss for it.
+        policy = config.policy_for(turn.mode) if config is not None else None
+        if policy is None or not cached.policy_signature:
+            return False
+        return cached.policy_signature == policy.policy_signature()
 
     @staticmethod
     def _persisted_escalation(
@@ -488,6 +615,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         context: KnowledgeContext,
         escalated_model: str,
         recipe_trials: Optional[Dict[str, int]] = None,
+        config: Any = None,
     ) -> None:
         """Remember the block for the rest of the generation, if caching is on."""
         cache = self._cache
@@ -500,6 +628,12 @@ class AgenticKnowledgePlugin(PluginInterface):
                 context=context,
                 evidence_fingerprint=_evidence_fingerprint(turn),
                 mode=turn.mode,
+                policy_signature=(
+                    config.policy_for(turn.mode).policy_signature()
+                    if config is not None
+                    and config.policy_for(turn.mode) is not None
+                    else ""
+                ),
                 escalated=bool(escalated_model),
                 escalated_model=escalated_model,
                 recipe_trials=dict(recipe_trials or {}),
@@ -595,6 +729,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         decision: EscalationDecision,
         publish: Optional[PublishStatus],
         docs: Optional[ScanOutcome] = None,
+        mining: Any = None,
     ) -> None:
         """Write the knowledge layer's decision into ``payload["routing"]``."""
         routing = payload.get("routing")
@@ -615,6 +750,30 @@ class AgenticKnowledgePlugin(PluginInterface):
             "cache": context.cache if context else "disabled",
             "loop_count": decision.loop_count,
         }
+        # The numbers a deployment needs to read the layer without its
+        # contents: how many searches the read made, how many the budget
+        # could not start, why the cache did not serve, what the turn mined,
+        # and how much of the write the stream already knew.
+        metrics: Dict[str, Any] = {
+            "searches_per_request": int(
+                getattr(context, "searches", 0) if context else 0
+            ),
+            "read_budget_skips": int(
+                getattr(context, "budget_skipped", 0) if context else 0
+            ),
+            "cache_miss_reason": (
+                context.cache_miss_reason if context is not None else ""
+            ),
+            "mined_kinds": (
+                sorted({str(event.kind) for event in getattr(mining, "events", ())})
+                if mining is not None
+                else []
+            ),
+            "docs_publish_dropped_as_duplicate": int(
+                publish.deduplicated if publish is not None else 0
+            ),
+        }
+        knowledge["metrics"] = metrics
         if decision.action != "none":
             knowledge["escalation"] = {
                 "action": decision.action,
@@ -930,6 +1089,12 @@ def _build_cache(
 
 
 # ------------------------------------------------------------- annotations -
+def _is_mined_only(request) -> bool:
+    """Whether one search asks only for mined knowledge."""
+    categories = tuple(str(kind) for kind in request.categories or ())
+    return bool(categories) and all(kind in MINED_KINDS for kind in categories)
+
+
 def _source_counts(context: Optional[KnowledgeContext]) -> Dict[str, int]:
     """Count the injected hits by their document kind."""
     counts: Dict[str, int] = {}
@@ -939,6 +1104,22 @@ def _source_counts(context: Optional[KnowledgeContext]) -> Dict[str, int]:
         key = hit.category or "doc"
         counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+def _with_miss_reason(context: KnowledgeContext, reason: str) -> KnowledgeContext:
+    """The context, saying why the cache did not serve it."""
+    import dataclasses
+
+    return dataclasses.replace(context, cache_miss_reason=reason)
+
+
+def _query_builder_with_failure(builder: Any, signature: str) -> Any:
+    """The query builder, carrying the failure the miner read off the turn."""
+    if not signature:
+        return builder
+    import dataclasses
+
+    return dataclasses.replace(builder, signature=signature)
 
 
 def _evidence_fingerprint(turn: AgentTurn) -> str:

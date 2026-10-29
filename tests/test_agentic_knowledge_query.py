@@ -34,6 +34,49 @@ def builder(config=None):
     )
 
 
+def test_a_debug_query_carries_the_failure_the_miner_read():
+    """The query asks with the readable signature, not only the digest.
+
+    The miner normalizes the failure on the writer's side and returns the
+    readable text; the reader must put that text into the query, because a
+    digest is not a question.  The test command travels with it for a mode
+    that verifies.
+    """
+    base = builder()
+    turn = turn_for(mode="debug", failures=2)
+    b = QueryBuilder(
+        collection_namer=base.collection_namer,
+        min_similarity=base.min_similarity,
+        signature="FAILED tests/test_a.py::test_x - KeyError: 'missing'",
+        test_command="pytest tests/test_a.py",
+    )
+    query = b.query_for(turn)
+    assert "KeyError: 'missing'" in query
+
+
+def test_test_mode_uses_the_test_command_it_was_given():
+    base = builder()
+    turn = turn_for(mode="test")
+    given = QueryBuilder(
+        collection_namer=base.collection_namer,
+        min_similarity=base.min_similarity,
+        test_command="go test ./...",
+    )
+    query = given.query_for(turn)
+    assert "go test ./..." in query
+
+
+def test_a_query_never_grows_past_the_ceiling():
+    base = builder()
+    turn = turn_for(mode="debug", failures=2)
+    b = QueryBuilder(
+        collection_namer=base.collection_namer,
+        min_similarity=base.min_similarity,
+        signature="x" * 2000,
+    )
+    assert len(b.query_for(turn)) <= 900
+
+
 def test_no_scope_means_no_requests():
     turn = turn_for()
     turn = _rebuild(turn, scope="")
@@ -57,7 +100,6 @@ def test_archive_requests_are_restricted_to_the_thread():
     requests = builder().build(turn, knowledge_config().modes["debug"])
     archive = [r for r in requests if "session_archive" in r.categories]
     assert archive and all(r.thread_id == "thread-1" for r in archive)
-
 
 
 def test_non_archive_requests_are_not_thread_restricted():
@@ -87,7 +129,9 @@ def test_a_thread_restriction_never_mixes_the_archive_with_knowledge():
 
 def test_one_repository_collection_still_answers_three_requests():
     """Merged collections, not merged requests: the filters do the separating."""
-    requests = builder().build(turn_for(mode="debug"), knowledge_config().modes["debug"])
+    requests = builder().build(
+        turn_for(mode="debug"), knowledge_config().modes["debug"]
+    )
     assert len(requests) == 3
     assert {request.collection for request in requests} == {"agentic_kb_webapp"}
     assert {tuple(sorted(request.categories)) for request in requests} == {

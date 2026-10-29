@@ -45,11 +45,25 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.signature import (
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
     REASON_READ_BUDGET,
+    STATUS_OK,
     STATUS_UNAVAILABLE,
     SearchResult,
 )
 
 MARKER = "<agentic_knowledge>"
+
+
+class _StarvedStore:
+    """A store the read budget refuses on one of the mode's sources."""
+
+    def __init__(self):
+        self.requests = []
+
+    def search(self, request, deadline=None):
+        self.requests.append(request)
+        if len(self.requests) == 2:
+            return SearchResult(STATUS_UNAVAILABLE, reason=REASON_READ_BUDGET)
+        return SearchResult(STATUS_OK, hits=(store_hit("recipe", score=0.5),))
 
 
 def make_plugin(config, store=None, publisher=None, cache=None, adapters=None):
@@ -152,9 +166,7 @@ def test_archive_source_is_restricted_to_the_thread():
     # The restriction is a filter on the request, not a name on the
     # collection: with one collection per repository the archive and the
     # mined knowledge are neighbours, and only the thread keeps them apart.
-    knowledge = [
-        r for r in store.requests if "session_archive" not in r.categories
-    ]
+    knowledge = [r for r in store.requests if "session_archive" not in r.categories]
     assert all(r.thread_id == "" for r in knowledge)
 
 
@@ -173,6 +185,45 @@ def test_injection_is_idempotent_within_one_generation():
     assert len(store.requests) == searches_after_first
     assert second["routing"]["knowledge"]["cache"] == "hit"
     assert json.dumps(second).count(MARKER) == 1
+
+
+def test_a_mode_switch_with_the_same_evidence_serves_the_cached_block():
+    """A mode is a reading of the same facts, not new facts.
+
+    The generation cache used to invalidate on every mode change, and the
+    mode of a command jumps on roughly half the requests — so a request
+    paid for a re-read of the knowledge base whose answer was already in
+    hand.  Two modes that read the same sources on the same budget ask the
+    same question, and the switch between them may serve the cached block
+    instead of re-reading.
+    """
+    config = knowledge_config()
+    store = FakeStore(hits=(store_hit("recipe"),))
+    plugin = make_plugin(config, store=store)
+    first = plugin.apply(main_payload(mode="git_review"))
+    searches_after_first = len(store.requests)
+    assert first["routing"]["knowledge"]["cache"] == "miss"
+    # `review` is an alias of `git_review`: the same sources, the same
+    # weights, the same budget.  The switch is a label, not a new question,
+    # and the block may be served from the cache.
+    second = plugin.apply(main_payload(mode="review"))
+    assert second["routing"]["knowledge"]["cache"] == "hit"
+    assert len(store.requests) == searches_after_first
+
+
+def test_a_mode_switch_to_a_differently_reading_mode_re_reads():
+    """A mode whose policy reads something else is a different question."""
+    config = knowledge_config()
+    store = FakeStore(hits=(store_hit("recipe"),))
+    plugin = make_plugin(config, store=store)
+    first = plugin.apply(main_payload(mode="implement"))
+    searches_after_first = len(store.requests)
+    assert first["routing"]["knowledge"]["cache"] == "miss"
+    # `plan` drops the deadend source `implement` reads; the switch changes
+    # what the mode asks for, and the cache is a miss for it.
+    second = plugin.apply(main_payload(mode="plan"))
+    assert second["routing"]["knowledge"]["cache"] == "miss"
+    assert len(store.requests) > searches_after_first
 
 
 def test_aux_title_is_never_enriched():
@@ -733,3 +784,228 @@ def test_the_language_switch_reaches_the_store_the_plugin_builds():
         plugin = AgenticKnowledgePlugin(config=config)
         plugin._wire(config)
         assert plugin._store._ignore_language_detect is flag
+
+
+# ------------------------------------------- 1.3 cold scope --
+class _CountingPublisher:
+    """A publisher that also answers the reader's cold-scope question."""
+
+    def __init__(self, counts):
+        self.counts = dict(counts)
+        self.asked = []
+
+    def mined_count(self, scope):
+        self.asked.append(scope)
+        return self.counts.get(scope)
+
+    def publish(self, events, **kwargs):
+        from llm_router_plugins.utils.knowledge.agentic_knowledge.events import (
+            PublishStatus,
+            STATUS_OK,
+        )
+
+        return PublishStatus(STATUS_OK, len(list(events)))
+
+
+def _plugin_with_counts(counts, store):
+    from llm_router_plugins.utils.knowledge.agentic_knowledge import (
+        AgenticKnowledgePlugin,
+    )
+    from agentic_knowledge_support import knowledge_config
+
+    return AgenticKnowledgePlugin(
+        config=knowledge_config(),
+        store=store,
+        publisher=_CountingPublisher(counts),
+    )
+
+
+def test_a_cold_scope_skips_the_mined_search_but_keeps_the_rest():
+    """1.3: a repository with zero mined documents pays no hybrid search for
+    a bucket it cannot answer; documentation and archived windows are asked
+    for as always."""
+    from agentic_knowledge_support import codex_payload
+
+    payload = codex_payload(
+        base_items()
+        if False
+        else __import__("agentic_knowledge_support").base_items()
+    )
+    store = __import__("agentic_knowledge_support").FakeStore()
+    plugin = _plugin_with_counts({"webapp": 0}, store)
+    plugin.apply(payload)
+    kinds = {
+        category for request in store.requests for category in request.categories
+    }
+    assert "recipe" not in kinds, [r.categories for r in store.requests]
+    assert "playbook" not in kinds
+
+
+def test_an_unknown_counter_keeps_every_search():
+    """A counter that cannot be answered is not a zero: the read degrades to
+    what it always did, and a deployment predating the counter keeps
+    searching until its first document."""
+    import agentic_knowledge_support as support
+
+    payload = support.codex_payload(support.base_items())
+    store = support.FakeStore()
+    plugin = _plugin_with_counts({}, store)  # no count for the scope
+    plugin.apply(payload)
+    kinds = {
+        category for request in store.requests for category in request.categories
+    }
+    assert "recipe" in kinds
+
+
+def test_a_scope_with_mined_documents_searches_everything():
+    import agentic_knowledge_support as support
+
+    payload = support.codex_payload(support.base_items())
+    store = support.FakeStore()
+    plugin = _plugin_with_counts({"webapp": 3}, store)
+    plugin.apply(payload)
+    kinds = {
+        category for request in store.requests for category in request.categories
+    }
+    assert "recipe" in kinds
+
+
+# ------------------------------------------------------------- metrics ---
+def test_the_annotation_carries_the_numbers_a_deployment_reads():
+    """The read path's health, without its contents, on every request.
+
+    The annotation is where an operator already looks, and the numbers
+    that say how the layer is doing without reading a block: how many
+    searches the read made, how many the budget could not start, why the
+    cache did not serve, what the turn mined, and how much of the write
+    the stream already knew.
+    """
+    config = knowledge_config()
+    store = FakeStore(hits=(store_hit("recipe"),))
+    plugin = make_plugin(config, store=store)
+    out = plugin.apply(main_payload(mode="debug", failures=1))
+    metrics = out["routing"]["knowledge"]["metrics"]
+    assert metrics["searches_per_request"] >= 3
+    assert metrics["read_budget_skips"] == 0
+    assert metrics["cache_miss_reason"] == "cold"
+    assert "recipe" not in metrics["mined_kinds"]
+    assert metrics["docs_publish_dropped_as_duplicate"] == 0
+
+
+def test_a_search_the_budget_refused_is_counted_once():
+    """A refused search is one search, not two.
+
+    The count of searches is every question the read asked of the engine,
+    whether or not the budget let it start, and the count of skips is the
+    subset of those that did not start. The two were added together, so a
+    starved read reported more searches than it made: an operator reading
+    `searches_per_request` as the engine's bill read a number the engine
+    never saw.
+    """
+    config = knowledge_config()
+    store = _StarvedStore()
+    plugin = make_plugin(config, store=store)
+    out = plugin.apply(main_payload(mode="debug", failures=1))
+    metrics = out["routing"]["knowledge"]["metrics"]
+    assert len(store.requests) >= 3
+    assert metrics["read_budget_skips"] == 1
+    assert metrics["searches_per_request"] == len(store.requests)
+
+
+def test_a_cache_hit_reports_no_searches_and_no_miss_reason():
+    """A served request made no search, and the cache serving is not a miss."""
+    config = knowledge_config()
+    store = FakeStore(hits=(store_hit("recipe"),))
+    plugin = make_plugin(config, store=store)
+    plugin.apply(main_payload(mode="debug", failures=1))
+    out = plugin.apply(main_payload(mode="debug", failures=1))
+    knowledge = out["routing"]["knowledge"]
+    assert knowledge["cache"] == "hit"
+    metrics = knowledge["metrics"]
+    assert metrics["searches_per_request"] == 0
+    assert metrics["cache_miss_reason"] == ""
+
+
+# ------------------------------------------------------------ parallel ---
+def test_a_slow_engine_is_waited_once_not_once_per_source():
+    """The mode's sources are independent; they are asked together.
+
+    A serial loop made a slow engine cost the transport timeout once per
+    source: with the budget at two calls, the third source never started and
+    the block read as an empty knowledge base.  The same budget, spent on
+    calls that run at the same moment, leaves the whole read inside it.
+
+    The store records how many calls were in flight at the same moment.  That
+    is the property under test: a machine that schedules threads badly is a
+    deployment problem, not a reason to read the sources one after another, so
+    the assertion is about overlap, not about how fast this runner is.
+    """
+    import threading
+    import time
+
+    from agentic_knowledge_support import knowledge_config
+
+    config = knowledge_config(read_timeout_seconds=3.0)
+    slow = 0.4  # seconds each call takes; the overlap is the point, not the clock
+
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+        STATUS_OK,
+        SearchResult,
+    )
+
+    from agentic_knowledge_support import store_hit
+
+    class _SlowStore:
+        def __init__(self):
+            self.requests = []
+            self._lock = threading.Lock()
+            self._in_flight = 0
+            self.max_in_flight = 0
+
+        def search(self, request, deadline=None):
+            with self._lock:
+                self.requests.append(request)
+                self._in_flight += 1
+                self.max_in_flight = max(self.max_in_flight, self._in_flight)
+            time.sleep(slow)
+            with self._lock:
+                self._in_flight -= 1
+            return SearchResult(STATUS_OK, hits=(store_hit("recipe", score=0.5),))
+
+    store = _SlowStore()
+    publisher = FakePublisher()
+    plugin = make_plugin(config, store=store, publisher=publisher)
+    plugin.apply(main_payload(mode="debug", failures=1))
+
+    # every source of the mode was asked
+    assert len(store.requests) >= 3
+    # and they ran at the same moment: the whole read is one call's duration,
+    # not the sum of the calls, no matter how the machine schedules them.
+    assert store.max_in_flight >= 3, (
+        f"only {store.max_in_flight} of the {len(store.requests)} sources ran "
+        "at once: the slow engine was paid per source, not once"
+    )
+
+
+def test_one_failing_search_does_not_drop_the_others():
+    """A source that raises still leaves the rest of the block intact."""
+    from agentic_knowledge_support import knowledge_config, store_hit
+
+    config = knowledge_config()
+
+    class _HalfStore:
+        def search(self, request, deadline=None):
+            if "session_archive" in request.categories:
+                raise RuntimeError("engine_001")
+            from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+                STATUS_OK,
+                SearchResult,
+            )
+
+            return SearchResult(STATUS_OK, hits=(store_hit("recipe", score=0.5),))
+
+    plugin = make_plugin(config, store=_HalfStore(), publisher=FakePublisher())
+    out = plugin.apply(main_payload(mode="debug", failures=1))
+    knowledge = out["routing"]["knowledge"]
+    # the mined sources answered even though the archive request raised
+    assert knowledge["injected"] >= 1

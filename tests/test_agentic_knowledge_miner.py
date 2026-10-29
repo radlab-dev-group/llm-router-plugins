@@ -357,13 +357,19 @@ def test_deadend_freezes_failed_attempt_before_successful_patch(second_path):
     items = deadend_items()
     before = mine(codex_payload(items))
     original = next(event for event in before.events if event.kind == KIND_DEADEND)
+    second_patch = (
+        "*** Begin Patch\n"
+        f"*** Update File: {second_path}\n"
+        "@@\n-x = 2\n+x = 3\n"
+        "*** End Patch"
+    )
     items += [
         {
             "type": "function_call",
             "name": "apply_patch",
             "call_id": "p2",
             "id": "pe2",
-            "arguments": f"*** Begin Patch\n*** Update File: {second_path}\n@@\n-x = 2\n+x = 3\n*** End Patch",
+            "arguments": second_patch,
         },
         {
             "type": "function_call",
@@ -393,13 +399,19 @@ def test_deadend_freezes_failed_attempt_before_successful_patch(second_path):
 
 
 def test_pending_patch_is_not_part_of_an_earlier_deadend():
+    pending_patch = (
+        "*** Begin Patch\n"
+        "*** Update File: src/a.py\n"
+        "@@\n-x = 2\n+x = 3\n"
+        "*** End Patch"
+    )
     items = deadend_items() + [
         {
             "type": "function_call",
             "name": "apply_patch",
             "call_id": "p2",
             "id": "pe2",
-            "arguments": "*** Begin Patch\n*** Update File: src/a.py\n@@\n-x = 2\n+x = 3\n*** End Patch",
+            "arguments": pending_patch,
         }
     ]
     result = mine(codex_payload(items))
@@ -453,3 +465,113 @@ def test_repeated_failure_revokes_green_without_duplicate_attempts():
     result = mine(codex_payload(items))
     assert [event.kind for event in result.events] == [KIND_DEADEND]
     assert result.loop_count == 3
+
+
+# -------------------------------------------------- 1.2 diagnostics --
+def _diag(result, name):
+    return dict(result.diagnostics).get(name, 0)
+
+
+def test_diagnostics_read_an_empty_turn_as_no_failure_not_no_patch():
+    """1.2: a turn with commands but no test failure is `no_failure`, not
+    `no_patch` — today the two look identical, and an empty knowledge base
+    could not say which one it was."""
+    result = mine(
+        codex_payload(
+            loop_items(failures=0)
+            if False
+            else base_items()
+            + [
+                __import__("agentic_knowledge_support")._command("c1", "e1"),
+                __import__("agentic_knowledge_support")._command_output(
+                    "c1", "o1", "ok", code=0
+                ),
+            ]
+        )
+    )
+    assert _diag(result, "no_failure") == 1
+    assert _diag(result, "no_patch") == 0
+    assert _diag(result, "published") == 0
+
+
+def test_diagnostics_read_a_failure_without_a_patch_as_no_patch():
+    """1.2: a failure the turn never changed anything for is `no_patch`."""
+    items = base_items() + [
+        __import__("agentic_knowledge_support")._command("c1", "e1"),
+        __import__("agentic_knowledge_support")._command_output(
+            "c1", "o1", FAILING, code=1
+        ),
+    ]
+    result = mine(codex_payload(items))
+    assert _diag(result, "no_patch") == 1
+    assert _diag(result, "no_failure") == 0
+
+
+def test_diagnostics_count_a_change_that_was_never_rerun():
+    """1.2: a failure the agent patched but never re-ran is `not_verified` —
+    the change is unproven, and neither a recipe nor a dead end can be read
+    from it.  A dead end (the same failure again) is a different outcome and
+    is not counted here."""
+    items = base_items() + [
+        _command("c1", "e1"),
+        _command_output("c1", "o1", FAILING, code=1),
+        _patch("p1", "pe"),
+    ]
+    result = mine(codex_payload(items))
+    assert _diag(result, "not_verified") == 1
+    assert _diag(result, "published") == 0
+
+
+def test_diagnostics_count_published_documents():
+    result = mine(codex_payload(recipe_items()))
+    assert _diag(result, "published") == 1
+
+
+# ------------------------------------------- 1.1 shell edits (weak) --
+def test_a_shell_write_that_tests_green_is_a_playbook():
+    """1.1: a CLI without a patch tool edits through ``cat >``; with no signal
+    for that, a turn that only did that mined nothing at all.  The write is a
+    weak edit, and a weak edit may write a playbook."""
+    from agentic_knowledge_support import exec_edit_playbook_items
+
+    result = mine(codex_payload(exec_edit_playbook_items(), mode="implement"))
+    kinds = [event.kind for event in result.events]
+    assert kinds == [KIND_PLAYBOOK], kinds
+    event = result.events[0]
+    assert "src/export.py" in event.text
+    # the reader can tell a weak-sourced document from an envelope one
+    assert event.metadata.get("edited_by") == "exec"
+
+
+def test_a_shell_write_never_closes_a_recipe():
+    """1.1: a weak edit is not proof anything was fixed.  A failure, a shell
+    write and a green run must not become a recipe — that claim needs an
+    envelope — and the stretch is owned by the recipe path, so nothing is
+    written."""
+    from agentic_knowledge_support import exec_edit_after_failure_items
+
+    result = mine(codex_payload(exec_edit_after_failure_items()))
+    kinds = [event.kind for event in result.events]
+    assert KIND_RECIPE not in kinds, kinds
+
+
+def test_a_shell_write_with_no_test_run_writes_nothing():
+    """A change nobody ran is an intention; the green run stays the only
+    thing that turns one into a document, weak edit or not."""
+    from agentic_knowledge_support import _shell_write
+
+    result = mine(
+        codex_payload(
+            base_items() + [_shell_write("w1", "we1", "src/export.py")],
+            mode="implement",
+        )
+    )
+    assert result.events == ()
+
+
+def test_an_envelope_still_writes_a_recipe_alongside():
+    """The strong path is untouched: an envelope over the same shape still
+    produces the recipe, with no weak marker on it."""
+    result = mine(codex_payload(recipe_items()))
+    assert [event.kind for event in result.events] == [KIND_RECIPE]
+    assert "edited_by" not in result.events[0].metadata

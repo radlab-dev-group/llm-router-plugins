@@ -182,3 +182,79 @@ def test_a_recipe_not_injected_cannot_hold_back_escalation():
         turn(), replace(context(0.95), rendered=""), policy_for(config), 3, "h"
     )
     assert decision.action == ACTION_ESCALATE
+
+
+def test_recipe_on_the_reranker_scale_counts_by_its_identity():
+    # The reranker's squashed logit tops out below a cosine-tuned threshold
+    # (measured 0.731 against a real engine for a matching recipe), so the
+    # threshold cannot be the deciding number there; identity decides, and
+    # the reason names it.
+    config = knowledge_config(escalation_enabled=True, rerank_results=True)
+    hits = (
+        KnowledgeHit(
+            category="recipe",
+            document_name="recipe:1:2",
+            text="x",
+            score=0.73,
+            weight=1.0,
+            signature_hash="h",
+            test_command="pytest tests/test_a.py",
+            score_scale="reranker",
+        ),
+    )
+    knowledge = KnowledgeContext(
+        hits=hits, rendered="x", chars=1, best_recipe_score=0.73, status="ok"
+    )
+    decision = EscalationPolicy(config).decide(
+        turn(), knowledge, policy_for(config, "debug"), 3, "h"
+    )
+    assert decision.action == ACTION_KEEP
+    assert decision.reason == "strong_recipe_identity"
+    assert EscalationPolicy(config).has_strong_recipe(knowledge, "h")
+
+
+def test_a_reranker_scale_recipe_without_a_matching_signature_still_escalates():
+    config = knowledge_config(escalation_enabled=True, rerank_results=True)
+    hits = (
+        KnowledgeHit(
+            category="recipe",
+            document_name="recipe:1:2",
+            text="x",
+            score=0.99,
+            weight=1.0,
+            signature_hash="other",
+            test_command="pytest tests/test_a.py",
+            score_scale="reranker",
+        ),
+    )
+    knowledge = KnowledgeContext(
+        hits=hits, rendered="x", chars=1, best_recipe_score=0.99, status="ok"
+    )
+    decision = EscalationPolicy(config).decide(
+        turn(), knowledge, policy_for(config, "debug"), 3, "h"
+    )
+    assert decision.action == ACTION_ESCALATE
+    assert decision.reason == "loop_without_recipe"
+
+
+def test_a_reranker_recipe_without_verification_does_not_keep():
+    config = knowledge_config(escalation_enabled=True, rerank_results=True)
+    hits = (
+        KnowledgeHit(
+            category="recipe",
+            document_name="recipe:1:2",
+            text="x",
+            score=0.99,
+            weight=1.0,
+            signature_hash="h",
+            test_command="",
+            score_scale="reranker",
+        ),
+    )
+    knowledge = KnowledgeContext(
+        hits=hits, rendered="x", chars=1, best_recipe_score=0.99, status="ok"
+    )
+    decision = EscalationPolicy(config).decide(
+        turn(), knowledge, policy_for(config, "debug"), 3, "h"
+    )
+    assert decision.action == ACTION_ESCALATE

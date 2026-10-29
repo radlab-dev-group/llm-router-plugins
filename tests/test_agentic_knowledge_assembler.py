@@ -12,6 +12,8 @@ import sys
 import pathlib
 import datetime
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from agentic_knowledge_support import knowledge_config, store_hit
@@ -141,6 +143,62 @@ def test_a_headerless_document_from_a_multi_kind_search_is_a_document():
     assert context.hits[0].category == "doc"
     assert "## Verified fixes in this repo" not in context.rendered
     assert context.best_recipe_score == 0.0
+
+
+def test_a_path_bonus_cannot_outvote_a_tenfold_better_base():
+    """A bonus is a shift, not a scale change.
+
+    Under a fused rank the engine's best hit sits at ~0.033.  Before the
+    rank was remapped onto its own scale, a documentation chunk that merely
+    named the file being edited (0.12) outranked a chunk ten times more
+    relevant, because the bonus was an order of magnitude larger than the
+    whole base.  After the remap the base is 1.0 against the other's 0.1,
+    and the bonus is what a bonus is allowed to do: move a close race.
+    """
+    import datetime
+
+    day = datetime.date.today().strftime("%Y%m%d")
+    from agentic_knowledge_support import StoreHit
+
+    def hit(name, base, kind="recipe", paths=()):
+        text = build_document_text(
+            kind, "body", date=datetime.date.today(), paths=paths
+        )
+        return StoreHit(
+            collection="agentic_kb_webapp",
+            document_name=f"{kind}:{day}:{name}",
+            text=text,
+            score=base,
+            score_normalized=base,
+        )
+
+    better = hit("aaa111", 0.033, kind="recipe")
+    pathy = hit("bbb222", 0.0033, kind="doc", paths=("src/export.py",))
+    result = SearchResult(STATUS_OK, hits=(better, pathy), score_scale="rrf")
+    context = assemble(
+        [(result, ("recipe", "doc"))], mode="debug", touched_paths=("src/export.py",)
+    )
+    assert context.hits[0].document_name.endswith("aaa111")
+    # The remap: the best fused rank of the set is the ceiling of its scale.
+    assert context.hits[0].score == pytest.approx(1.0, abs=1e-9)
+
+
+def test_a_cosine_scale_is_not_rescaled():
+    """Cosine already lives on [0, 1]; the engine's number is the number."""
+    day = datetime.date.today().strftime("%Y%m%d")
+    from agentic_knowledge_support import StoreHit
+
+    text = build_document_text("recipe", "body", date=datetime.date.today())
+    hit = StoreHit(
+        collection="agentic_kb_webapp",
+        document_name=f"recipe:{day}:ccc333",
+        text=text,
+        score=0.61,
+        score_normalized=0.61,
+    )
+    result = SearchResult(STATUS_OK, hits=(hit,), score_scale="cosine")
+    context = assemble([(result, ("recipe",))])
+    assert context.hits[0].score == pytest.approx(0.61, abs=1e-9)
 
 
 def test_a_forced_recipe_never_breaks_the_character_budget():

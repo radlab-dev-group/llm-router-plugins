@@ -35,7 +35,10 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
 from llm_router_plugins.utils.knowledge.agentic_knowledge.events import (
     KnowledgeEventPublisher,
 )
-from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import scope_key
+from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import (
+    normalize_scope,
+    scope_key,
+)
 
 __all__ = ["build_parser", "main"]
 
@@ -216,16 +219,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not os.path.isdir(root):
         logger.error("%s is not a directory", root)
         return 1
-    scope = str(args.scope or "") or scope_key(
-        root,
-        strategy=config.scope_strategy,
-        overrides=config.scope_overrides,
-        default=config.scope_default,
+    explicit = args.scope is not None and str(args.scope).strip() != ""
+    scope = (
+        normalize_scope(str(args.scope))
+        if explicit
+        else scope_key(
+            root,
+            strategy=config.scope_strategy,
+            overrides=config.scope_overrides,
+            default=config.scope_default,
+        )
     )
     if not scope:
         logger.error(
-            "no knowledge scope could be derived; pass --scope or configure "
-            "scope.default"
+            "no knowledge scope could be %s; pass --scope with a name the "
+            "repository actually has, or configure scope.default",
+            "normalized from --scope" if explicit else "derived",
         )
         return 1
     if not config.docs_enabled:

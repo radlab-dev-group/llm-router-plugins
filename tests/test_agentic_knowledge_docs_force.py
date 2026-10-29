@@ -443,3 +443,84 @@ def test_replacement_supports_binary_stream_ids(tmp_path):
     assert service.index("demo", str(tmp_path), republish=True).published == 1
     assert redis.deleted == ["1-0"]
     assert list(redis.entries) == ["2-0"]
+
+
+# ------------------------------------------------- 0.3 revert does not - -
+def test_reverting_a_file_to_older_content_keeps_its_document(tmp_path):
+    """0.3: the fingerprint is over content and the claim is SET NX for 7 days,
+    so v1 -> v2 -> git-checkout-back-to-v1 inside the dedup window published a
+    docs_prune for the v2 name and silently dropped the v1 re-publication as a
+    duplicate.  The document vanished and did not come back until the text
+    changed again.  A changed file's old names may only be pruned once its
+    replacement is known to be in the stream, and re-publishing content whose
+    claim holds a *different* document name must re-publish, not drop."""
+    (tmp_path / "README.md").write_text("# V1\n\nOriginal.\n")
+    config = knowledge_config()
+    config.docs_rescan_interval_seconds = 0
+    redis = StreamRedis()
+    publisher = KnowledgeEventPublisher(
+        connection=config.redis,
+        stream_key=config.stream_key,
+        key_prefix=config.key_prefix,
+        client=redis,
+    )
+    state = DocsScanState(key_prefix=config.key_prefix, client=redis)
+    service = DocsIndexer(config=config, publisher=publisher, state=state)
+    scope = "demo"
+
+    def scan():
+        return service.index(scope, str(tmp_path), agent="test", allow_prune=True)
+
+    # v1 indexed: one doc event, one claim
+    first = scan()
+    assert first.published == 1 and first.pruned == 0
+    claims = [k for k in redis.kv if ":seen:" in k]
+    assert len(claims) == 1
+
+    # v2: the v1 name is superseded and pruned
+    (tmp_path / "README.md").write_text("# V2\n\nChanged.\n")
+    second = scan()
+    assert second.published == 1 and second.pruned == 1
+
+    # back to v1 within the dedup window: the v2 name is superseded, and the
+    # v1 document must be re-published, not dropped as a duplicate
+    (tmp_path / "README.md").write_text("# V1\n\nOriginal.\n")
+    third = scan()
+    assert third.published == 1, (
+        "the reverted document was dropped as a duplicate: " f"{third.as_dict()}"
+    )
+    assert third.pruned == 1
+
+    # the stream is a journal; replay it the way the worker would and the
+    # collection must hold exactly one current document for the file, with the
+    # v1 content, and the state must name the document that exists
+    import datetime
+
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+        KIND_DOC,
+        document_name,
+    )
+
+    engine: dict = {}
+    for fields in redis.entries.values():
+        event = json.loads(fields["event"])
+        if event["kind"] == "doc":
+            day = datetime.date.fromtimestamp(float(event["created_at"]))
+            engine[document_name(KIND_DOC, day, event["fingerprint"])] = event[
+                "text"
+            ]
+        elif event["kind"] == "docs_prune":
+            for name in event["metadata"]["names"]:
+                engine.pop(name, None)
+    assert (
+        len(engine) == 1
+    ), f"the collection holds {len(engine)} documents: {list(engine)}"
+    (only,) = list(engine.values())
+    assert "Original." in only
+    entries = state.load(scope, config.collection(scope, "doc"))
+    names = entries.get("README.md", {}).get("n") or []
+    assert names, "the state lost the file's document name"
+    assert all(
+        any(name.split(":")[-1] == n.split(":")[-1] for n in names)
+        for name in engine
+    )

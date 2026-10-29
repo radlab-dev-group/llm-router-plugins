@@ -23,7 +23,7 @@ Two properties keep the request path fast and the store honest.
 import json
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Optional, Sequence
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
     KnowledgeEvent,
@@ -140,7 +140,12 @@ class KnowledgeEventPublisher:
         """Whether a publish can be attempted at all."""
         return self._handle.configured
 
-    def publish(self, events: Sequence[KnowledgeEvent]) -> PublishStatus:
+    def publish(
+        self,
+        events: Sequence[KnowledgeEvent],
+        *,
+        refresh_claims: bool = False,
+    ) -> PublishStatus:
         """
         Append *events* to the stream, once each.
 
@@ -154,6 +159,15 @@ class KnowledgeEventPublisher:
         ----------
         events : Sequence[KnowledgeEvent]
             Episodes mined from the request's turn.
+        refresh_claims : bool, optional
+            Re-publish an event whose claim already exists, refreshing the
+            claim instead of treating the event as a duplicate.  Documentation
+            needs this: a ``git checkout`` can bring a file back to a version
+            whose fingerprint was claimed days ago while its document has been
+            retired in the meantime, and an event refused as duplicate then
+            leaves the repository with no document for a file it has.  Mined
+            episodes keep the strict once-each rule, because a replayed turn
+            asks for the same episode on every request.
 
         Returns
         -------
@@ -180,7 +194,7 @@ class KnowledgeEventPublisher:
                 # stream that misses one.
                 deduplicated += 1
                 continue
-            outcome = self._claim(client, event)
+            outcome = self._claim(client, event, refresh=refresh_claims)
             if outcome == _ERROR:
                 errors += 1
                 reason = "claim"
@@ -295,6 +309,48 @@ class KnowledgeEventPublisher:
             )
         return PublishStatus(STATUS_OK, published, deduplicated)
 
+    def mined_count(self, scope: str) -> Optional[int]:
+        """
+        Return how many mined documents *scope* has, or ``None`` when unknown.
+
+        The reader asks this before it pays for a search of a bucket a cold
+        repository cannot possibly answer.  ``None`` means the question could
+        not be asked — no Redis, a timeout, a counter this plugin has never
+        written — and the caller searches anyway: a counter that cannot be
+        trusted is a reason to do the old thing, never a reason to read less.
+
+        Parameters
+        ----------
+        scope : str
+            Repository whose counter to read.
+
+        Returns
+        -------
+        int or None
+            The count, or ``None`` when it is unknown.
+        """
+        if not scope or not self.available:
+            return None
+        client = self._handle.get()
+        if client is None:
+            return None
+        try:
+            raw = client.get(f"{self._key_prefix}:mined:{scope}")
+        except Exception as exc:
+            self._warn("knowledge mined counter failed: %s", type(exc).__name__)
+            return None
+        if raw is None:
+            # A scope this worker has never written a mined document for, and a
+            # Redis that has forgotten the counter, are the same answer: there
+            # is nothing in the bucket yet.  A deployment predating the counter
+            # reads as cold until its first new document, which costs one
+            # skipped search and nothing that was ever retrievable.
+            return 0
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
     def close(self) -> None:
         """
         Release the connection, if one was built and knows how.
@@ -310,9 +366,16 @@ class KnowledgeEventPublisher:
         """The deduplication key of one episode."""
         return f"{self._key_prefix}:seen:{event.fingerprint}"
 
-    def _claim(self, client: Any, event: KnowledgeEvent) -> str:
+    def _claim(
+        self, client: Any, event: KnowledgeEvent, *, refresh: bool = False
+    ) -> str:
         """
         Take the one-time lock on an episode.
+
+        A claim already taken reads as a duplicate unless *refresh* is set, in
+        which case the claim is renewed and the event goes to the stream again;
+        a caller that can retire a document behind a claim (documentation)
+        cannot let the claim be the last word about what the engine holds.
 
         Returns
         -------
@@ -322,13 +385,12 @@ class KnowledgeEventPublisher:
             deduplication window, :data:`_ERROR` when Redis did not answer —
             the three are not the same thing and must not be counted alike.
         """
+        key = self._seen_key(event)
         try:
-            taken = client.set(
-                self._seen_key(event),
-                "1",
-                nx=True,
-                ex=self._dedup_ttl,
-            )
+            if refresh:
+                client.set(key, "1", ex=self._dedup_ttl)
+                return _CLAIMED
+            taken = client.set(key, "1", nx=True, ex=self._dedup_ttl)
         except Exception as exc:
             self._warn("knowledge dedup failed: %s", type(exc).__name__)
             return _ERROR

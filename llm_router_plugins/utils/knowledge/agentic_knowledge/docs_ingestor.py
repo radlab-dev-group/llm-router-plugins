@@ -477,11 +477,21 @@ def document_headings(text: str) -> Tuple[str, ...]:
     for line in str(text or "").splitlines():
         opening = _FENCE_RE.match(line)
         if fence:
-            if line.strip().startswith(fence):
+            # A fence closes on its own marker: the same character, at least
+            # as long as the one that opened it.  A shorter run of backticks
+            # inside a ``` block is code, not a closing fence, and a closing
+            # line is never an opener.  Comparing the marker as a prefix
+            # (three characters of it) closed a ``` block on a ``` example in
+            # the prose and let the next # comment read as a heading.
+            if (
+                opening
+                and opening.group(1)[0] == fence[0]
+                and len(opening.group(1)) >= len(fence)
+            ):
                 fence = ""
             continue
         if opening:
-            fence = opening.group(1)[:3]
+            fence = opening.group(1)
             continue
         title = _HEADING_RE.match(line)
         if title is None:
@@ -617,14 +627,26 @@ def doc_events(
     Tuple[KnowledgeEvent, ...]
         One event per file, kind ``doc``.
     """
-    day = today or datetime.date.today()
-    stamp = time.time() if now is None else float(now)
+    # The day each event names its document by is read from its own
+    # created_at, below; the *today* argument is kept for a caller that
+    # wants to name a batch by a fixed day.
+    today_day = today
     events: List[KnowledgeEvent] = []
     for record in records:
         if not record.text.strip() or not record.fingerprint:
             continue
         # The file goes out exactly as it was written: the engine splits it,
         # so a heading quoted in here twice would only be read twice.
+        # The name's day bucket is the event's creation day, not the scan's:
+        # the worker names the document from created_at, and a scan that
+        # crossed midnight would otherwise hand the worker a name in a bucket
+        # the worker never writes, a document the retention sweep can never
+        # find.
+        stamp = time.time() if now is None else float(now)
+        # The worker names the document from created_at in local time; the
+        # name must be built the same way, or a scan that crossed midnight
+        # hands the worker a bucket it never writes.
+        day = today_day or datetime.date.fromtimestamp(stamp)
         text = build_document_text(
             KIND_DOC,
             record.text,
@@ -814,11 +836,37 @@ class DocsScanState:
             if isinstance(entry, dict)
         }
 
+    def load_truncated(self, scope: str) -> bool:
+        """
+        Whether the last saved listing was cut short by a ceiling.
+
+        A listing written while the scan was truncated is not the whole
+        repository, and the files it never saw are not gone — they were not
+        counted.  Retiring their documents would delete them for no reason,
+        so the flag is read back and the prune is withheld while it is set.
+        """
+        client = self._handle.get()
+        if client is None:
+            return False
+        try:
+            raw = client.get(self.key(scope))
+        except Exception as exc:
+            self._warn("knowledge docs state unreadable: %s", type(exc).__name__)
+            return False
+        if not raw:
+            return False
+        try:
+            payload = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+        except (TypeError, ValueError):
+            return False
+        return bool(isinstance(payload, dict) and payload.get("truncated"))
+
     def save(
         self,
         scope: str,
         entries: Dict[str, Dict[str, Any]],
         collection: str = "",
+        truncated: bool = False,
     ) -> bool:
         """
         Write the listing of *scope*.
@@ -843,7 +891,12 @@ class DocsScanState:
         if client is None:
             return False
         payload = json.dumps(
-            {"v": _STATE_VERSION, "collection": collection, "files": entries},
+            {
+                "v": _STATE_VERSION,
+                "collection": collection,
+                "files": entries,
+                "truncated": bool(truncated),
+            },
             ensure_ascii=False,
         )
         try:
@@ -1012,13 +1065,48 @@ class DocsIndexer:
         # believe a listing of a collection nobody reads.
         collection = self.config.collection(scope, KIND_DOC)
         entries = self.state.load(scope, collection)
+        # A listing cut short by a ceiling is not the whole repository, and
+        # the files it never saw are not gone — they were not counted.  While
+        # the flag is set the prune is withheld: retiring a document for a
+        # file the listing never saw would delete it for no reason.
+        previous_truncated = self.state.load_truncated(scope)
         by_file = _group(report.records)
         changed = _changed_files(entries, by_file)
-        stale = _superseded_names(entries, by_file, changed)
         if republish:
             changed = list(by_file)
+        # A file the repository *has* in a new version is only retired once
+        # its replacement is in the stream: the two travel as separate events,
+        # and a prune that outlives its replacement is a document that vanished
+        # until the text changes again.  A file the repository *lost* retires
+        # now, because nothing is about to replace it.
+        # One reading of the clock for the whole scan: the day the names are
+        # bucketed by, the day the header carries, and the timestamp the
+        # worker will read the day back from are all the same instant.  The
+        # worker names a document from the event's ``created_at``; a name
+        # bucketed by a *second* reading would be a bucket the worker never
+        # writes whenever the two readings straddled midnight, and the
+        # retention sweep would never find the document again.
+        published_at = time.time()
+        day = datetime.date.fromtimestamp(published_at)
+        gone_stale, changed_stale = _stale_names_by_file(entries, by_file, changed)
+        # A forced republish clears every claim of the scope before it
+        # republishes, so every replacement is in the stream by construction
+        # and the old names retire with the rest of the scan.  A name the scan
+        # is itself re-publishing is not retired: an unchanged file gets the
+        # same name back, and deleting it would delete the new copy.
+        if republish:
+            published_names = {
+                document_name(KIND_DOC, day, item.fingerprint)
+                for records in by_file.values()
+                for item in records
+            }
+            gone_stale = gone_stale + [
+                name for name in changed_stale if name not in published_names
+            ]
+            changed_stale = []
 
         published: int = 0
+        replacement_landed: bool = True
         if changed or republish:
             events = doc_events(
                 _records_of(by_file, changed),
@@ -1026,6 +1114,8 @@ class DocsIndexer:
                 agent=agent,
                 model=model,
                 generation=generation,
+                today=day,
+                now=published_at,
             )
             attempted = self._publish(
                 events, replace_scope=scope if republish else ""
@@ -1038,15 +1128,25 @@ class DocsIndexer:
                     truncated=report.truncated,
                 )
             published = attempted
+            # A republish that the stream fully deduplicated has no document
+            # behind the names it is about to retire, so its prune is withheld.
+            replacement_landed = republish or published > 0
 
         pruned = 0
-        if stale and allow_prune and not report.truncated:
-            pruned = self._publish_prune(
-                scope, stale, agent=agent, generation=generation
-            )
+        if allow_prune and not report.truncated and not previous_truncated:
+            stale = gone_stale
+            if replacement_landed:
+                stale = list(stale) + changed_stale
+            if stale:
+                pruned = self._publish_prune(
+                    scope, stale, agent=agent, generation=generation
+                )
 
         if not self.state.save(
-            scope, _next_entries(entries, by_file, changed), collection
+            scope,
+            _next_entries(entries, by_file, changed, day),
+            collection,
+            truncated=report.truncated,
         ):
             self._warn("knowledge docs state not saved for %d file(s)", len(by_file))
         context = self._refresh_context(scope, report, by_file)
@@ -1136,7 +1236,16 @@ class DocsIndexer:
     def _publish(
         self, events: Sequence[KnowledgeEvent], *, replace_scope: str = ""
     ) -> Optional[int]:
-        """Hand events to the worker; ``None`` when the stream refused them."""
+        """
+        Hand events to the worker; ``None`` when the stream refused them.
+
+        A documentation claim is renewed rather than respected, because a
+        claim is not evidence that the engine still holds the document: a
+        ``git checkout`` can return a file to content whose claim is days old
+        while its document was retired in the meantime.  Refusing that as a
+        duplicate would leave a file the repository has with no document until
+        its text changes again.
+        """
         if not events and not replace_scope:
             return 0
         try:
@@ -1145,7 +1254,9 @@ class DocsIndexer:
                     replace_scope, events
                 )
             else:
-                status = self.publisher.publish(events)  # type: ignore[union-attr]
+                status = self.publisher.publish(  # type: ignore[union-attr]
+                    events, refresh_claims=True
+                )
         except Exception as exc:
             self._warn("knowledge docs publish failed: %s", type(exc).__name__)
             return None
@@ -1247,6 +1358,39 @@ def _changed_files(
     return changed
 
 
+def _stale_names_by_file(
+    entries: Dict[str, Dict[str, Any]],
+    by_file: Dict[str, List[DocRecord]],
+    changed: Sequence[str],
+) -> Tuple[List[str], List[str]]:
+    """
+    Split the retired names into the safe-now and the gated ones.
+
+    Returns ``(gone, changed)``: the names of files the repository no longer
+    has, and the names of files it has in a new version.  The first bucket may
+    be pruned immediately; the second only once the replacement document is
+    known to be in the stream, because a prune that lands before its
+    replacement (or instead of it) is a document that disappears until the
+    text changes again.  Both buckets are only computed against a complete
+    scan, which is the caller's concern, not this function's.
+    """
+    gone: List[str] = []
+    changing: List[str] = []
+    changing_set = set(changed)
+    for source_file, entry in entries.items():
+        names = entry.get("n") if isinstance(entry, dict) else None
+        if not isinstance(names, list):
+            continue
+        names = [str(name) for name in names if str(name)]
+        if not names:
+            continue
+        if source_file not in by_file:
+            gone.extend(names)
+        elif source_file in changing_set:
+            changing.extend(names)
+    return gone, changing
+
+
 def _superseded_names(
     entries: Dict[str, Dict[str, Any]],
     by_file: Dict[str, List[DocRecord]],
@@ -1288,6 +1432,7 @@ def _next_entries(
     entries: Dict[str, Dict[str, Any]],
     by_file: Dict[str, List[DocRecord]],
     changed: Sequence[str],
+    day: Optional[datetime.date] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """
     The listing to remember after a scan.
@@ -1309,7 +1454,9 @@ def _next_entries(
                 "s": int(record.size),
                 "m": float(record.mtime),
                 "n": [
-                    document_name(KIND_DOC, datetime.date.today(), item.fingerprint)
+                    document_name(
+                        KIND_DOC, day or datetime.date.today(), item.fingerprint
+                    )
                     for item in records
                 ],
             }

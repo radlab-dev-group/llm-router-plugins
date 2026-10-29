@@ -87,6 +87,12 @@ REASON_CONSISTENT = "consistent"
 #: Reason of a phase recognized from a script the agent piped into an editor.
 REASON_SCRIPTED_EDIT = "scripted edit"
 
+#: Reason of an edit read from a shell command that writes a file directly —
+#: a redirection, ``tee`` or an in-place edit — where no patch envelope is
+#: present.  A weak signal: it says a file changed, not how, and it is counted
+#: separately so its false positives can be measured.
+REASON_EXEC_EDIT = "exec edit"
+
 #: Separates the sequential segments of a compound command.
 _SEQUENCE_OPERATORS = (";", "&&", "||")
 
@@ -182,6 +188,10 @@ class PhaseEvidence:
         :data:`STRENGTH_STRONG` when the evidence names the work itself,
         :data:`STRENGTH_WEAK` when it only accompanies it.  A strong signal of
         the turn outranks a weak one however recent the weak one is.
+    paths : Tuple[str, ...]
+        Files the evidence names as written, when it names any: the targets of
+        a shell edit, read straight off the command.  Empty for everything the
+        rule table recognizes, which does not look at paths at all.
     """
 
     mode: str
@@ -192,6 +202,7 @@ class PhaseEvidence:
     completed: bool = False
     succeeded: Optional[bool] = None
     strength: str = STRENGTH_STRONG
+    paths: Tuple[str, ...] = ()
 
     def settle(self, succeeded: Optional[bool]) -> "PhaseEvidence":
         """
@@ -740,6 +751,147 @@ def _here_document_phase(
     return None, ""
 
 
+_SEQUENCE_OPERATORS_RE = re.compile(r"\s*(?:;|&&|\|\||\||\n)\s*")
+
+
+def _command_text(text: str) -> str:
+    """The shell text of one call's JSON arguments, or the text itself."""
+    try:
+        arguments = json.loads(text)
+    except (ValueError, TypeError):
+        return str(text or "")
+    if isinstance(arguments, str):
+        return arguments
+    if isinstance(arguments, dict):
+        for key in ("cmd", "command"):
+            value = arguments.get(key)
+            if isinstance(value, str):
+                return value
+    return ""
+
+
+def _shell_words(segment: str) -> List[str]:
+    """
+    Tokenize one shell segment, keeping the redirections.
+
+    The routing lexer drops redirections as noise — where the output of a
+    command went says nothing about which command ran.  Reading an edit is the
+    opposite question, so the segment is lexed on its own here, with quotes
+    resolved and an unclosed quote dropping the segment rather than guessing.
+    """
+    lexer = shlex.shlex(segment, posix=True, punctuation_chars=";&|<>")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        return list(lexer)
+    except ValueError:
+        return []
+
+
+def _exec_edit_phase(text: str, rules: CodexPhaseConfig):
+    """
+    Return the edit a shell command makes to a file, when it names one.
+
+    A build of the CLI that has no patch tool edits through the shell:
+    ``cat > src/a.py <<'EOF'``, ``… | tee src/a.py`` and ``sed -i`` all change
+    a file without a patch envelope, and without a signal for them a turn that
+    only did that carries no evidence of the change at all.  The signal is
+    deliberately weak — it says *a file was written*, not what was written —
+    and carries a reason of its own, so a reader can count how often it fired
+    and how often it was right.
+
+    A write the command does not name (a redirect into a substitution, a
+    ``/dev/null``, a ``2>`` stream descriptor) is not an edit of the
+    repository, and a command that only reads or prints is not an edit either.
+
+    Parameters
+    ----------
+    text : str
+        The raw JSON arguments of the call, or the command itself.
+    rules : CodexPhaseConfig
+        Validated phase rules; the interpreter's write patterns.
+
+    Returns
+    -------
+    Optional[Tuple[str, str, str, Tuple[str, ...]]]
+        ``(implement_mode, REASON_EXEC_EDIT, STRENGTH_WEAK, paths)`` when a
+        named file is written, otherwise ``None``.
+    """
+    command = _command_text(text)
+    if not command:
+        return None
+    shell, _body = _without_here_document(command)
+    for segment in _SEQUENCE_OPERATORS_RE.split(shell):
+        if not segment.strip():
+            continue
+        paths = tuple(_written_paths(_shell_words(segment)))
+        if paths:
+            return rules.implement_mode, REASON_EXEC_EDIT, STRENGTH_WEAK, paths
+    return None
+
+
+def _written_paths(words: List[str]) -> List[str]:
+    """
+    The files one shell segment writes, in the order it names them.
+
+    A segment writes a file when it redirects output to a path, feeds
+    ``tee`` one, or edits one in place with ``sed -i``.  A redirection whose
+    target is a substitution, a stream descriptor (``2>``) or ``/dev/null``
+    writes nothing the repository holds, and a command that only reads is not
+    an edit at all.
+    """
+    paths: List[str] = []
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word in (">", ">>"):
+            # A bare digit before the operator is a file descriptor (2>), not
+            # a path; the descriptor of a stream is never an edit.
+            previous = words[index - 1] if index else ""
+            target = words[index + 1] if index + 1 < len(words) else ""
+            if not previous.isdigit() and _is_write_target(target):
+                paths.append(target)
+            index += 2
+            continue
+        if PurePosixPath(word).name == "tee":
+            index += 1
+            while index < len(words):
+                candidate = words[index]
+                if candidate.startswith("-"):
+                    index += 1
+                    continue
+                if _is_write_target(candidate):
+                    paths.append(candidate)
+                index += 1
+            continue
+        if PurePosixPath(word).name == "sed" and any(
+            argument == "-i"
+            or (
+                argument.startswith("-")
+                and not argument.startswith("--")
+                and "i" in argument[1:]
+            )
+            for argument in words[index + 1 :]
+        ):
+            for argument in words[index + 1 :]:
+                if _is_write_target(argument):
+                    paths.append(argument)
+            break
+        index += 1
+    return paths
+
+
+def _is_write_target(word: str) -> bool:
+    """Whether one shell word names a file a redirect or ``tee`` writes."""
+    if not word or word.startswith(("-", "$", "`", "(", "<", "1", "2")):
+        return False
+    if word in ("/dev/null", "/dev/stdout", "/dev/stderr"):
+        return False
+    if word == _SUBSTITUTION_PLACEHOLDER:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9._/-]+", word))
+
+
 def _test_path(path: str, rules: CodexPhaseConfig) -> bool:
     """Whether *path* names a test file under the configured test layout."""
     parts = PurePosixPath(path).parts
@@ -1031,6 +1183,7 @@ def collect_phase_evidence(
                     )
                 )
         elif item.kind == "function_call":
+            edited_paths: Tuple[str, ...] = ()
             if item.name in rules.command_tools:
                 # A command that pipes an envelope to ``apply_patch`` patches,
                 # whatever the tools of this CLI release are called: the
@@ -1047,21 +1200,33 @@ def collect_phase_evidence(
                     signal = _command_signal(item.text, rules)
                     if signal is None:
                         scripted = _here_document_phase(item.text, rules)
-                        signal = (
-                            (scripted[0], scripted[1], STRENGTH_STRONG)
-                            if scripted[0] is not None
-                            else None
-                        )
-                    if signal is None:
-                        continue
-                    mode, reason, strength = signal
-                    kind = EVIDENCE_COMMAND
+                        if scripted[0] is not None:
+                            mode, reason = scripted[0], scripted[1]
+                            strength = STRENGTH_STRONG
+                            kind = EVIDENCE_PATCH
+                        else:
+                            # Nothing named the command and no script wrote a
+                            # file; the last shape left is an edit the shell
+                            # itself made — the one sign of changed code a CLI
+                            # without a patch tool leaves behind, and only as a
+                            # weak signal with a reason of its own.
+                            exec_edit = _exec_edit_phase(item.text, rules)
+                            if exec_edit is None:
+                                continue
+                            mode, reason = exec_edit[0], exec_edit[1]
+                            strength = STRENGTH_WEAK
+                            kind = EVIDENCE_PATCH
+                            edited_paths = exec_edit[3]
+                    else:
+                        mode, reason, strength = signal
+                        kind = EVIDENCE_COMMAND
             elif item.name in rules.patch_tools:
                 mode, reason = _patch_phase(item.text, rules)
                 strength = STRENGTH_STRONG
                 kind = EVIDENCE_PATCH
             else:
                 continue
+            edited_paths = edited_paths if kind == EVIDENCE_PATCH else ()
             if mode is None:
                 continue
             if item.call_id:
@@ -1074,6 +1239,7 @@ def collect_phase_evidence(
                     event_id=item.event_id,
                     call_id=item.call_id,
                     strength=strength,
+                    paths=edited_paths,
                 )
             )
         elif item.kind == "function_call_output" and item.call_id and item.name:

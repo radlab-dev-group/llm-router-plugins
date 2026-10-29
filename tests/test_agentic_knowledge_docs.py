@@ -11,6 +11,8 @@ request never pays for a scan twice in an hour.
 """
 
 import dataclasses
+import datetime
+import hashlib
 import inspect
 import os
 import pathlib
@@ -249,6 +251,26 @@ def test_a_heading_inside_a_code_block_is_not_a_title(tmp_path):
     assert record.heading == ""
 
 
+def test_a_long_fence_is_not_closed_by_a_shorter_example():
+    """A fence closes on its own marker, not on a prefix of it.
+
+    The outline tracker used to remember three characters of the opening
+    fence and close on a startswith, so a four-backtick fence holding a
+    three-backtick example closed early, and the ``#`` comment after the
+    example read as a heading — a "heading" the digest injected without
+    masking, out of a code block.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
+        document_headings,
+    )
+
+    text = "````text\nexample:\n```\n# not a heading\n````\n\n# real heading\n"
+    assert document_headings(text) == ("real heading",)
+    # a tilde fence of its own, and a mismatched marker that does not close
+    assert document_headings("~~~~\n# no\n~~~\n# no\n~~~~\n# yes\n") == ("yes",)
+    assert document_headings("```\n~~~\n# no\n```\n# yes\n") == ("yes",)
+
+
 def test_a_document_fingerprint_is_stable_and_content_bound():
     from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
         document_fingerprint,
@@ -419,6 +441,33 @@ def test_a_truncated_scan_retires_nothing(tmp_path):
     )
     assert outcome.truncated is True
     assert outcome.pruned == 0
+    assert not any(e.kind == CONTROL_DOCS_PRUNE for e in publisher.published)
+
+
+def test_a_truncated_listing_holds_the_prune_until_the_repository_is_whole(tmp_path):
+    """A listing cut short is not the repository, and its unseen files are not gone.
+
+    The scan stopped at the ceiling, so the listing it saved holds only the
+    files it saw.  The next scan — whole — would retire every file the
+    listing never saw as "gone", deleting documents for no reason.  The
+    truncated flag is written with the listing and read back, and the prune
+    is withheld while it is set: the unseen files are not gone, they were
+    not counted.
+    """
+    root = demo_repo(tmp_path)
+    state = scanning_state()
+    config = knowledge_config(docs_max_files=1)
+    outcome = indexer(config=config, publisher=FakePublisher(), state=state).index(
+        "demo", root, force=True
+    )
+    assert outcome.truncated is True
+
+    # A later, whole scan sees every file the truncated one never counted.
+    # The documents for them must not be retired on that scan.
+    publisher = FakePublisher()
+    whole = indexer(publisher=publisher, state=state).index("demo", root)
+    assert whole.truncated is False
+    assert whole.pruned == 0
     assert not any(e.kind == CONTROL_DOCS_PRUNE for e in publisher.published)
 
 
@@ -713,6 +762,38 @@ def _prune(*names):
     return prune_event("webapp", list(names))
 
 
+def test_a_document_is_named_by_the_day_its_event_was_created():
+    """The name's day bucket is the event's day, and the worker reads it the same way.
+
+    The scan used to bucket a name by ``date.today()`` at scan time while the
+    worker bucketed the document it indexes by the event's ``created_at``.
+    A scan that crossed midnight handed the worker a name in a bucket the
+    worker never writes, and the retention sweep could never find the
+    document again.  The ingestor now reads the day from the same timestamp
+    the worker will.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.docs_ingestor import (
+        doc_events,
+        _file_record,
+    )
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+        KIND_DOC,
+        document_name,
+    )
+
+    record = _file_record(
+        "docs/g.md", "# T\n\nbody\n", size=10, mtime=1.0, scope="demo"
+    )
+    stamp = 1_793_149_200.0
+    events = doc_events([record], scope="demo", now=stamp)
+    event_day = datetime.date.fromtimestamp(events[0].created_at).strftime("%Y%m%d")
+    name = document_name(
+        KIND_DOC, datetime.date.fromtimestamp(stamp), record.fingerprint
+    )
+    assert f":{event_day}:" in name
+    assert events[0].created_at == stamp
+
+
 def _today():
     import datetime
 
@@ -858,3 +939,84 @@ def test_the_documentation_search_is_not_the_failure_query():
     assert documented
     assert "rename the export helper" in documented[0].query
     assert "AssertionError" not in documented[0].query
+
+
+# --------------------------------------------------------- CLI --scope - -
+def _cli_exit(tmp_path, *argv):
+    import contextlib
+    import io
+
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge import (
+        docs as docs_cli,
+    )
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = docs_cli.main(["--path", str(tmp_path), "--dry-run", *argv])
+    return code, buffer.getvalue()
+
+
+@pytest.mark.parametrize("scope", ["-", "___", "....", ".", "____-___"])
+def test_explicit_scope_that_normalizes_to_empty_is_refused(tmp_path, scope):
+    """0.2: an explicit --scope used to reach config.collection() literally;
+    one that normalizes to empty is a scope the engine refuses — the exact
+    wedge 0.1 removed.  It is refused with a validation error before anything
+    is written to the stream."""
+    demo_repo(tmp_path)
+    code, out = _cli_exit(tmp_path, "--scope", scope)
+    assert code == 1
+    assert "scope=" not in out
+
+
+@pytest.mark.parametrize(
+    "scope,expected",
+    [
+        ("проект", None),
+        ("日本", None),
+        ("repo-ą", "repo-a"),
+        ("repo-ę", "repo-e"),
+        ("Ścieżki", "sciezki"),
+    ],
+)
+def test_explicit_non_ascii_scope_takes_the_derived_road(tmp_path, scope, expected):
+    """0.4: an operator-typed scope goes through the same transliteration as
+    a derived one — diacritics survive as their ASCII, and a name with no
+    ASCII at all keeps the deterministic digest the derived road gives it, so
+    the command indexes into the same collection the proxy would use."""
+    demo_repo(tmp_path)
+    code, out = _cli_exit(tmp_path, "--scope", scope)
+    assert code == 0
+    if expected is None:
+        digest = hashlib.sha1(scope.strip().encode("utf-8")).hexdigest()[:8]
+        assert f"scope={digest}" in out
+    else:
+        assert f"scope={expected}" in out
+
+
+def test_a_blank_explicit_scope_falls_back_to_the_derived_one(tmp_path):
+    """A --scope of only whitespace is not a scope at all: it takes the
+    derived-from-path road rather than being refused."""
+    demo_repo(tmp_path)
+    code, out = _cli_exit(tmp_path, "--scope", "   ")
+    assert code == 0
+    assert f"scope={tmp_path.name.lower()}" in out
+
+
+@pytest.mark.parametrize(
+    "scope,expected",
+    [
+        ("MyRepo", "myrepo"),
+        ("repo-ą", "repo"),
+        ("../x", "x"),
+        ("a/b", "a-b"),
+        ("UPPER_CASE", "upper_case"),
+    ],
+)
+def test_explicit_scope_is_normalized_like_the_proxy_path(tmp_path, scope, expected):
+    """The CLI scope takes the same normalization road as a scope derived from
+    a directory: lowercased, unsafe runs reduced to hyphens, capped.  A scope
+    that survives is printed by the dry-run."""
+    demo_repo(tmp_path)
+    code, out = _cli_exit(tmp_path, "--scope", scope)
+    assert code == 0
+    assert f"scope={expected}" in out

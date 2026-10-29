@@ -20,7 +20,18 @@ setup(
     package_data={"llm_router_plugins.resources": ["*.json"]},
     include_package_data=True,
     python_requires=">=3.10",
-    install_requires=["radlab-pii-classification>=0.1.0"],
+    install_requires=[
+        "radlab-pii-classification>=0.1.0",
+        # The core plugin interface is HTTP-based; every built-in plugin
+        # imports it, so the client is not optional.
+        "requests>=2.28",
+        # FastMasker's mapping DataFrame and the Excel mapping import are
+        # module-level features, not extras.
+        "pandas>=1.5",
+        # The routing embedder builds and normalises its vectors with numpy;
+        # the ml/rag extras build on top of it.
+        "numpy>=1.23",
+    ],
     extras_require={
         # Shared session memory for the Codex router (optional; routing stays
         # stateless without it).

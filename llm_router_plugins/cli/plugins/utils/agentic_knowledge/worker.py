@@ -78,6 +78,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     ENGINE_NAME_SUFFIX,
     KIND_DOC,
     KIND_SESSION_ARCHIVE,
+    MINED_KINDS,
     build_document_text,
     document_body,
     document_name,
@@ -248,14 +249,39 @@ class KnowledgeIndexWorker:
         if now - self._last_heartbeat < HEARTBEAT_SECONDS:
             return
         self._last_heartbeat = now
+        pending, oldest = self._pending_age()
         self._log(
             "info",
-            "knowledge worker idle (indexed=%d dropped=%d stream=%s group=%s)",
+            "knowledge worker idle (indexed=%d dropped=%d pending=%d"
+            " oldest_age_s=%d stream=%s group=%s)",
             self._indexed,
             self._dropped,
+            pending,
+            oldest,
             self._stream,
             self._group,
         )
+
+    def _pending_age(self) -> Tuple[int, int]:
+        """
+        How many stream entries are waiting, and how long the oldest is.
+
+        A worker that keeps up shows ``pending=0``; one that is behind shows a
+        growing count and an age that is the time between an episode happening
+        and it being indexed.  The number an operator needs to read the write
+        path's health, and it is measured on the heartbeat clock so an idle
+        worker pays for it once a minute, not once a batch.
+        """
+        try:
+            client = self._redis_client()
+            if client is None:
+                return 0, 0
+            summary = client.xpending(self._stream, self._group)
+        except Exception:
+            return 0, 0
+        pending = _pending_count(summary) or 0
+        oldest = _oldest_pending_age(summary, time.time())
+        return int(pending), int(oldest)
 
     def run_once(self, block_ms: Optional[int] = None) -> int:
         """
@@ -371,7 +397,7 @@ class KnowledgeIndexWorker:
         except Exception as exc:
             self._settle_failure(entry_id, event, exc)
             return False
-        self._settle(entry_id)
+        self._settle(entry_id, event)
         return True
 
     def _index_documents_of(
@@ -387,10 +413,21 @@ class KnowledgeIndexWorker:
         """
         groups: Dict[str, List[Tuple[Any, KnowledgeEvent, Dict[str, Any]]]] = {}
         for entry_id, event in pending:
-            collection = self._config.collection(event.scope, event.kind)
             try:
+                # The scope arrives from the agent and may name a directory the
+                # engine will not accept in a collection name; naming the
+                # collection is part of the preparation, so its failure settles
+                # the entry like any other instead of escaping the batch.
+                collection = self._config.collection(event.scope, event.kind)
                 document = self._document(self._prepare(event), event)
-            except Exception as exc:  # masking is per document; so is its failure
+            except Exception as exc:  # preparation is per document; so is failure
+                self._log(
+                    "warning",
+                    "knowledge entry %s of scope=%s could not be prepared: %s",
+                    entry_id,
+                    event.scope,
+                    _describe(exc),
+                )
                 self._settle_failure(entry_id, event, exc)
                 continue
             groups.setdefault(collection, []).append((entry_id, event, document))
@@ -420,17 +457,43 @@ class KnowledgeIndexWorker:
             for entry_id, event, _document in items:
                 self._settle_failure(entry_id, event, exc)
             return 0
-        for entry_id, _event, _document in items:
-            self._settle(entry_id)
+        for entry_id, event, _document in items:
+            self._settle(entry_id, event)
         self._last_heartbeat = time.monotonic()
         return len(items)
 
-    def _settle(self, entry_id: Any) -> None:
+    def _settle(self, entry_id: Any, event: Optional[KnowledgeEvent] = None) -> None:
         """An entry is written: count it, acknowledge it, forget its attempts."""
         self._forget(entry_id)
         self._ack(entry_id)
         self._indexed += 1
+        if event is not None and event.kind in MINED_KINDS:
+            # The reader asks the engine whether a scope has mined knowledge
+            # before it pays for the search; this is what it asks.  A counter
+            # that cannot be written is one the reader cannot trust, so the
+            # read degrades to searching — the old behaviour, never an error.
+            self._bump_mined_count(event.scope)
         self._last_heartbeat = time.monotonic()
+
+    def _mined_count_key(self, scope: str) -> str:
+        """The reader-facing counter of one scope's mined documents."""
+        return f"{self._config.key_prefix}:mined:{scope}"
+
+    def _bump_mined_count(self, scope: str) -> None:
+        """Add one mined document of *scope* to the reader's counter."""
+        if not scope:
+            return
+        try:
+            client = self._redis_client()
+            key = self._mined_count_key(scope)
+            client.incr(key)
+            client.expire(key, _TRIES_TTL_SECONDS)
+        except Exception:  # the read degrades to searching
+            self._log(
+                "warning",
+                "knowledge mined counter for %s could not be written",
+                scope,
+            )
 
     def _settle_failure(
         self, entry_id: Any, event: KnowledgeEvent, exc: Exception
@@ -1288,11 +1351,35 @@ def _pending_count(summary: Any) -> Optional[int]:
     """Read the pending depth of an ``XPENDING`` summary, if it states one."""
     if not isinstance(summary, dict):
         return None
-    for key in ("pending", b"pending"):
+    for key in ("pending", b"pending", "count"):
         value = summary.get(key)
         if isinstance(value, int):
             return value
     return None
+
+
+def _oldest_pending_age(summary: Any, now: float) -> int:
+    """
+    Seconds the oldest pending entry has been waiting, ``0`` when it is unknown.
+
+    The ``XPENDING`` summary states the oldest entry's stream id when it has
+    one; the id's first field is its millisecond timestamp, and the difference
+    to now is the age.  A summary without the field — an older client — says
+    nothing, and a summary nobody can read is not worth a number.
+    """
+    if not isinstance(summary, dict):
+        return 0
+    for key in ("min", b"min", "oldest"):
+        value = summary.get(key)
+        if not value:
+            continue
+        try:
+            stamped = float(str(value).split("-", 1)[0])
+        except (TypeError, ValueError):
+            continue
+        if stamped > 0:
+            return int(max(0.0, now - stamped / 1000.0))
+    return 0
 
 
 def _is_busy_group(exc: Exception) -> bool:

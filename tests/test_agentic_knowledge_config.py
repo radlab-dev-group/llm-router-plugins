@@ -644,3 +644,86 @@ def test_a_ceiling_below_its_floor_is_a_configuration_error():
     )
     with pytest.raises(ValueError, match="worker.chunk_overlap"):
         config.validate()
+
+
+# ------------------------------------------------------------- modes ---
+def test_every_mode_the_router_can_emit_has_a_policy_that_reads_something():
+    """A policy is dead configuration when the router never emits its mode.
+
+    The mode list is computed from the routing configuration, not retyped
+    here, so it cannot drift from what the router actually decides.  Every
+    emitted mode must resolve to a policy with at least one source, and a
+    review policy must not read an empty documentation source: the whole
+    point of the review block is the repository's own rules.
+    """
+    import json
+    import pathlib
+
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        AgenticKnowledgeConfig,
+    )
+
+    routing = json.loads(
+        (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "llm_router_plugins"
+            / "resources"
+            / "routing"
+            / "agentic_routing_codex.json"
+        ).read_text(encoding="utf-8")
+    )
+    emitted = {
+        str(mode["name"])
+        for mode in routing.get("codex_modes", ())
+        if isinstance(mode, dict) and mode.get("name")
+    }
+    emitted.add(routing.get("settings", {}).get("fallback_mode", ""))
+    emitted.discard("")
+
+    config = AgenticKnowledgeConfig.from_file()
+    for mode in sorted(emitted):
+        policy = config.policy_for(mode)
+        assert policy is not None, f"router emits mode {mode!r}, no policy"
+        assert policy.sources, f"mode {mode!r} reads no source"
+
+
+def test_git_review_reads_the_documentation():
+    """The review policy was written for code review but had no doc source.
+
+    A review whose only sources are mined episodes cannot surface the
+    repository's own contributing and security rules, which is what a
+    review is for.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        AgenticKnowledgeConfig,
+    )
+
+    config = AgenticKnowledgeConfig.from_file()
+    policy = config.policy_for("git_review")
+    categories = [source.category for source in policy.sources]
+    assert "doc" in categories
+    # and the alias reads the same block
+    alias = config.policy_for("review")
+    assert [source.category for source in alias.sources] == categories
+
+
+def test_a_reranker_scale_threshold_warns_at_start(caplog):
+    # The threshold is a number on a scale; with the reranker leg on the read
+    # no longer produces that scale, and the mismatch must say so at start.
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="agentic_knowledge"):
+        knowledge_config(rerank_results=True)
+    assert any(
+        "strong_recipe_score" in r.message for r in caplog.records
+    ), caplog.text
+
+
+def test_the_hybrid_scale_threshold_does_not_warn_for_a_reachable_band(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="agentic_knowledge"):
+        knowledge_config(rerank_results=False)
+    assert not any(
+        "strong_recipe_score" in r.message for r in caplog.records
+    ), caplog.text

@@ -66,13 +66,35 @@ rodzaj. Domyślna polityka:
 | `implement`   | `readme`, `guide`, `contributing`          |
 | `plan`        | `readme`, `guide`, `changelog`, `note`     |
 | `review`      | `guide`, `contributing`, `security`        |
-| `git_review`  | (bez źródła dokumentacji)                  |
+| `git_review`  | `guide`, `contributing`, `security`        |
 | `*`           | każdy rodzaj                               |
 
 Repozytorium z samym `README` nie da więc `debug` i `test` nic do
-przeczytania, za to `implement` znajdzie `readme`. To decyzja polityki, nie
-usterka — ale to pierwsza rzecz do sprawdzenia, gdy wyszukiwanie wraca puste w
-jednym trybie, a w innym nie.
+przeczytania, za to `implement` znajdzie `readme`. `git_review` czyta te
+same strony co `review` — to jego alias. To decyzja polityki, nie usterka —
+ale to pierwsza rzecz do sprawdzenia, gdy wyszukiwanie wraca puste w jednym
+trybie, a w innym nie.
+
+## Na jakiej skali czytać wyniki
+
+Wyszukiwanie hybrydowe zwraca rangę połączoną (RRF), która żyje na własnej
+skali — jej sufit to najlepszy wynik faktycznie w rękach, a nie jedynka.
+Zanim trafienie pójdzie pod wagę trybu albo pod próg, ranga jest remapowana
+do 0–1 wewnątrz zbioru, który ją wytworzył, a każde trafienie nosi nazwę
+skali, na której żyje jego wynik (`score_scale`: `rrf`, `reranker` lub
+`cosine`). `strong_recipe_score` jest progiem na tej remapowanej skali;
+`min_similarity` zostaje tam, gdzie stosuje go silnik.
+
+## Ile czytania kosztuje
+
+Źródła trybu — wiedza wydobytą, archiwum i dokumentacja — są czytane
+równolegle wewnątrz jednego wywołania pod jednym wspólnym budżetem, nie po
+kolei: wolne źródło nie wydaje budżetu, który miały zużyć pozostałe.
+Domyślny `read.timeout_seconds` wynosi 3.0. Adnotacja pod
+`routing.knowledge` nosi blok `metrics` z liczbą wyszukiwań, które odczyt
+zrobił dla żądania, i liczbą tych, których budżet nie zdążył wystartować —
+to liczba, z której deployment odczytuje, ile warstwa kosztuje silnika na
+żądanie.
 
 ## Jak klasyfikowana jest dokumentacja
 
