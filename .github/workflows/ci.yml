@@ -31,14 +31,15 @@ jobs:
             requirements-extra.txt
 
       - name: Install package and test dependencies
-        # The package plus what the test suites import beyond it: the
-        # agentic-knowledge extras (SSE client, stream backend) and the
-        # embedding stack conftest reaches for.  The Redis-backed integration
-        # tests stay skipped on purpose — they opt in with
-        # CODEX_ROUTING_REDIS_URL and belong in a service job, not here.
+        # Declared metadata only: the core dependencies plus the
+        # agentic-knowledge and ml extras the suites exercise.  If a module
+        # starts importing a package that is not declared, this step fails
+        # here instead of at collection.  The Redis-backed integration tests
+        # stay skipped on purpose — they opt in with CODEX_ROUTING_REDIS_URL
+        # and belong in a service job, not here.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e .[agentic-knowledge] pytest numpy scipy sentence-transformers
+          python -m pip install -e ".[agentic-knowledge,ml]" pytest
 
       - name: Run the test suite
         run: python -m pytest tests/ -q -rs
