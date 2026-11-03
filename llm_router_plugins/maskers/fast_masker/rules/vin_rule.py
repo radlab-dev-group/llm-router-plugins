@@ -14,7 +14,10 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import (
+    BaseRule,
+    _format_pseudo,
+)
 from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_vin
 
 
@@ -73,7 +76,7 @@ class VinRule(BaseRule):
                 if anonymizer_fn:
                     pseudo = anonymizer_fn(vin, self.tag_type)
                     mappings.append({"original": vin, "replacement": pseudo})
-                    return "{" + pseudo + "}"
+                    return _format_pseudo(pseudo)
                 mappings.append({"original": vin, "replacement": self.placeholder})
                 return self.placeholder
             # Invalid VIN – leave it untouched.

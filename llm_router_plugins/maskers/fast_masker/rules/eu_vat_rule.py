@@ -15,7 +15,10 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import (
+    BaseRule,
+    _format_pseudo,
+)
 from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_eu_vat
 
 
@@ -64,7 +67,7 @@ class EuVatRule(BaseRule):
                 if anonymizer_fn:
                     pseudo = anonymizer_fn(vat, self.tag_type)
                     mappings.append({"original": vat, "replacement": pseudo})
-                    return "{" + pseudo + "}"
+                    return _format_pseudo(pseudo)
                 mappings.append({"original": vat, "replacement": self.placeholder})
                 return self.placeholder
             # Invalid VAT – keep original text.

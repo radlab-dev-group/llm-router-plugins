@@ -14,7 +14,10 @@ its result (wrapped in ``{}``) is used instead of the static placeholder.
 import re
 from typing import Optional, Callable, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import (
+    BaseRule,
+    _format_pseudo,
+)
 from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_krs
 
 
@@ -63,7 +66,7 @@ class KrsRule(BaseRule):
                 if anonymizer_fn:
                     pseudo = anonymizer_fn(raw_krs, self.tag_type)
                     mappings.append({"original": raw_krs, "replacement": pseudo})
-                    return "{" + pseudo + "}"
+                    return _format_pseudo(pseudo)
                 mappings.append(
                     {"original": raw_krs, "replacement": self.placeholder}
                 )

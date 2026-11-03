@@ -300,3 +300,22 @@ class TestPhoneRulesIntegration:
             + result_dom.count("{{PHONE_INTERNATIONAL}}")
             == 2
         )
+
+    def test_infoline_and_parenthesized_intl_phone(self):
+        """Infoline 801 and intl number with area code in parentheses."""
+        text = (
+            "[URL_1] • tel. 801 307 307*/**\n"
+            "801 307 307 lub +48 (81) 535 60 60 */**\n"
+            "* informacje są dostępne po poprawnym zalogowaniu w serwisie telefonicznym\n"
+            "** opłata zgodna z taryfą operatora"
+        )
+        result_intl, mappings_intl = self.rule_intl.apply(text)
+        assert len(mappings_intl) == 1
+        assert mappings_intl[0]["original"] == "+48 (81) 535 60 60"
+
+        result_dom, mappings_dom = self.rule_dom.apply(result_intl)
+        assert len(mappings_dom) == 2
+        assert mappings_dom[0]["original"] == "801 307 307"
+        assert mappings_dom[1]["original"] == "801 307 307"
+        assert "{{PHONE}}" in result_dom
+        assert "{{PHONE_INTERNATIONAL}}" in result_dom

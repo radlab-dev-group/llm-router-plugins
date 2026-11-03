@@ -290,22 +290,62 @@ def is_valid_ssn(ssn: str) -> bool:
     return True
 
 
-def is_valid_eu_vat(vat: str) -> bool:
-    """Validate EU VAT identifier (e.g. ``PL1234567890``).
+_EU_VAT_PATTERNS = {
+    "AT": re.compile(r"^U\d{8}$"),
+    "BE": re.compile(r"^[01]\d{9}$"),
+    "BG": re.compile(r"^\d{9,10}$"),
+    "CY": re.compile(r"^\d{8}[A-Z]$"),
+    "CZ": re.compile(r"^\d{8,10}$"),
+    "DE": re.compile(r"^\d{9}$"),
+    "DK": re.compile(r"^\d{8}$"),
+    "EE": re.compile(r"^\d{9}$"),
+    "EL": re.compile(r"^\d{9}$"),
+    "GR": re.compile(r"^\d{9}$"),
+    "ES": re.compile(r"^[A-Z0-9]\d{7}[A-Z0-9]$"),
+    "FI": re.compile(r"^\d{8}$"),
+    "FR": re.compile(r"^[A-Z0-9]{2}\d{9}$"),
+    "HR": re.compile(r"^\d{11}$"),
+    "HU": re.compile(r"^\d{8}$"),
+    "IE": re.compile(r"^(?:\d{7}[A-W][A-I]?|\d[A-Z\d\*\+]\d{5}[A-W])$"),
+    "IT": re.compile(r"^\d{11}$"),
+    "LT": re.compile(r"^(?:\d{9}|\d{12})$"),
+    "LU": re.compile(r"^\d{8}$"),
+    "LV": re.compile(r"^\d{11}$"),
+    "MT": re.compile(r"^\d{8}$"),
+    "NL": re.compile(r"^\d{9}B\d{2}$"),
+    "PL": re.compile(r"^\d{10}$"),
+    "PT": re.compile(r"^\d{9}$"),
+    "RO": re.compile(r"^\d{2,10}$"),
+    "SE": re.compile(r"^\d{12}$"),
+    "SI": re.compile(r"^\d{8}$"),
+    "SK": re.compile(r"^\d{10}$"),
+    "XI": re.compile(r"^(?:\d{9}|\d{12})$"),
+    "EU": re.compile(r"^\d{9}$"),
+}
 
-    Requires exactly 2 leading letters followed by 8-12 alphanumeric characters,
-    with at least 4 digits (reduced from 6 to accommodate country-specific formats
-    like Maltese VAT which can have as few as 8 total characters).
+
+def is_valid_eu_vat(vat: str) -> bool:
+    """Validate EU VAT identifier (e.g. ``PL5260250995``, ``DE123456789``).
+
+    Requires a valid 2-letter EU country code (plus XI/EU) followed by the
+    country-specific format of alphanumeric / numeric characters.
+    For Poland (PL), also verifies the NIP checksum algorithm.
     """
     if not isinstance(vat, str):
         return False
-    vat_upper = vat.upper()
-    # Must be 2 letters + digits/letters (10-14 total chars)
-    if not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{8,12}", vat_upper):
+    vat_upper = vat.upper().strip()
+    if len(vat_upper) < 4:
         return False
-    # Count digits - must have at least 4 digits to avoid matching regular words
-    digit_count = sum(c.isdigit() for c in vat_upper[2:])
-    return digit_count >= 4
+    country = vat_upper[:2]
+    body = vat_upper[2:]
+    pattern = _EU_VAT_PATTERNS.get(country)
+    if not pattern:
+        return False
+    if not pattern.match(body):
+        return False
+    if country == "PL":
+        return is_valid_nip(body)
+    return True
 
 
 # ============================================================================
@@ -428,17 +468,15 @@ def is_possible_transaction_ref(ref: str) -> bool:
 # Phone numbers
 # ============================================================================
 
-# Valid Polish mobile prefix ranges (second digit of the 3-digit prefix).
-_POLISH_MOBILE_PREFIXES = frozenset(
+# Valid Polish phone prefix ranges (mobile, landline area codes, infolines / special).
+_POLISH_PHONE_PREFIXES = frozenset(
     {
         # Mobile
+        "45",
         "50",
         "51",
         "53",
         "57",
-        "58",
-        "59",
-        "45",
         "60",
         "66",
         "69",
@@ -446,25 +484,78 @@ _POLISH_MOBILE_PREFIXES = frozenset(
         "73",
         "78",
         "79",
-        # Unified Emergency Numbers
-        "800",
+        "88",
+        # Landline (strefowe)
+        "12",
+        "13",
+        "14",
+        "15",
+        "16",
+        "17",
+        "18",
+        "22",
+        "23",
+        "24",
+        "25",
+        "29",
+        "32",
+        "33",
+        "34",
+        "41",
+        "42",
+        "43",
+        "44",
+        "46",
+        "48",
+        "52",
+        "54",
+        "55",
+        "56",
+        "58",
+        "59",
+        "61",
+        "62",
+        "63",
+        "65",
+        "67",
+        "68",
+        "71",
+        "74",
+        "75",
+        "76",
+        "77",
+        "81",
+        "82",
+        "83",
+        "84",
+        "85",
+        "86",
+        "87",
+        "89",
+        "91",
+        "94",
+        "95",
+        # Special / Infolines / VoIP
+        "39",
+        "70",
+        "80",
+        "64",
     }
 )
+_POLISH_MOBILE_PREFIXES = _POLISH_PHONE_PREFIXES
 
 
 def is_valid_polish_phone(phone: str) -> bool:
-    """Validate a Polish phone number (9 digits without country code).
+    """Validate a Polish phone number (9 digits without country code, or with optional legacy leading 0).
 
-    Checks that the first 2-3 digits form a valid Polish mobile prefix.
-    This reduces false positives from random 9-digit sequences.
+    Checks that the first 2 digits form a valid Polish area code, mobile prefix,
+    or special/infoline prefix (e.g. 801, 800).
     """
     if not isinstance(phone, str):
         return False
-    cleaned = re.sub(r"[\s\-]", "", phone)
+    cleaned = re.sub(r"[\s\-\(\)\./]", "", phone)
+    if len(cleaned) == 10 and cleaned.startswith("0"):
+        cleaned = cleaned[1:]
     if not (cleaned.isdigit() and len(cleaned) == 9):
         return False
-    # Check mobile prefixes: first 2 digits always, plus third if it's an 800 number
-    prefix_2 = cleaned[:2]
-    if prefix_2 in ("80",) and cleaned[:3] in _POLISH_MOBILE_PREFIXES:
-        return True
-    return cleaned[:2] in _POLISH_MOBILE_PREFIXES
+    return cleaned[:2] in _POLISH_PHONE_PREFIXES

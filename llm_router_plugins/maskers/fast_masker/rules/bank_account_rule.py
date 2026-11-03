@@ -27,7 +27,10 @@ length table in ``_IBAN_LENGTHS``.
 import re
 from typing import Optional, Callable, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import (
+    BaseRule,
+    _format_pseudo,
+)
 from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_iban
 
 # ── Country-code alternation (sorted to ensure longest match first) ───────
@@ -418,7 +421,7 @@ class BankAccountRule(BaseRule):
             if anonymizer_fn:
                 pseudo = anonymizer_fn(candidate, self.tag_type)
                 mappings.append({"original": candidate, "replacement": pseudo})
-                result.append("{" + pseudo + "}")
+                result.append(_format_pseudo(pseudo))
             else:
                 mappings.append(
                     {"original": candidate, "replacement": self.placeholder}
