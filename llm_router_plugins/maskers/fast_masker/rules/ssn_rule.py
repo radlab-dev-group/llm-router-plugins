@@ -15,7 +15,10 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import (
+    BaseRule,
+    _format_pseudo,
+)
 from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_ssn
 
 
@@ -65,7 +68,7 @@ class SsnRule(BaseRule):
                 if anonymizer_fn:
                     pseudo = anonymizer_fn(ssn, self.tag_type)
                     mappings.append({"original": ssn, "replacement": pseudo})
-                    return "{" + pseudo + "}"
+                    return _format_pseudo(pseudo)
                 mappings.append({"original": ssn, "replacement": self.placeholder})
                 return self.placeholder
             # Invalid SSN – keep original text.

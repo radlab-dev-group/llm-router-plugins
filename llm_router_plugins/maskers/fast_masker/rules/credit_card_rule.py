@@ -16,7 +16,10 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import (
+    BaseRule,
+    _format_pseudo,
+)
 from llm_router_plugins.maskers.fast_masker.utils.validators import (
     is_valid_credit_card,
 )
@@ -77,7 +80,7 @@ class CreditCardRule(BaseRule):
                 if anonymizer_fn:
                     pseudo = anonymizer_fn(candidate, self.tag_type)
                     mappings.append({"original": candidate, "replacement": pseudo})
-                    return "{" + pseudo + "}"
+                    return _format_pseudo(pseudo)
                 mappings.append(
                     {"original": candidate, "replacement": self.placeholder}
                 )

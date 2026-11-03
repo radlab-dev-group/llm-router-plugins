@@ -5,7 +5,10 @@ Rule that masks valid Polish NIP numbers.
 import re
 from typing import Optional, Callable, Match, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import (
+    BaseRule,
+    _format_pseudo,
+)
 from llm_router_plugins.maskers.fast_masker.utils.validators import is_valid_nip
 
 
@@ -60,7 +63,7 @@ class NipRule(BaseRule):
                 if anonymizer_fn:
                     pseudo = anonymizer_fn(raw_nip, self.tag_type)
                     mappings.append({"original": raw_nip, "replacement": pseudo})
-                    replacement = "{" + pseudo + "}"
+                    replacement = _format_pseudo(pseudo)
                 else:
                     mappings.append(
                         {"original": raw_nip, "replacement": self.placeholder}

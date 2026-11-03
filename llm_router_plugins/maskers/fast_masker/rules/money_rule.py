@@ -21,7 +21,10 @@ replaced with the placeholder ``{{MONEY}}``.
 import re
 from typing import Optional, Callable, Match, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import (
+    BaseRule,
+    _format_pseudo,
+)
 
 
 class MoneyRule(BaseRule):
@@ -117,7 +120,7 @@ class MoneyRule(BaseRule):
             if anonymizer_fn:
                 pseudo = anonymizer_fn(val, self.tag_type)
                 mappings.append({"original": val, "replacement": pseudo})
-                return "{" + pseudo + "}"
+                return _format_pseudo(pseudo)
             mappings.append({"original": val, "replacement": self.placeholder})
             return self.placeholder
 

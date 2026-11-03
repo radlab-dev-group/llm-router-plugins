@@ -5,7 +5,10 @@ Rule that mask IPv4 and IPv6 addresses.
 import re
 from typing import Optional, Callable, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import (
+    BaseRule,
+    _format_pseudo,
+)
 
 
 def _is_valid_ipv4_octet(octet: str) -> bool:
@@ -106,7 +109,7 @@ class IpRule(BaseRule):
             if anonymizer_fn:
                 pseudo_addr = anonymizer_fn(addr, "IP")
                 mappings.append({"original": addr, "replacement": pseudo_addr})
-                result = "{" + pseudo_addr + "}"
+                result = _format_pseudo(pseudo_addr)
             else:
                 mappings.append(
                     {"original": addr, "replacement": self._IP_PLACEHOLDER}
@@ -118,7 +121,7 @@ class IpRule(BaseRule):
                 if anonymizer_fn:
                     pseudo_port = anonymizer_fn(port, "PORT")
                     mappings.append({"original": port, "replacement": pseudo_port})
-                    port_replacement = "{" + pseudo_port + "}"
+                    port_replacement = _format_pseudo(pseudo_port)
                 else:
                     mappings.append(
                         {"original": port, "replacement": self._PORT_PLACEHOLDER}

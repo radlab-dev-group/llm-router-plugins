@@ -9,6 +9,14 @@ from typing import Pattern, Optional, Callable, Tuple, List
 from llm_router_plugins.maskers.fast_masker.core.rule_interface import MaskerRuleI
 
 
+def _format_pseudo(pseudo: str) -> str:
+    if (pseudo.startswith("[") and pseudo.endswith("]")) or (
+        pseudo.startswith("{") and pseudo.endswith("}")
+    ):
+        return pseudo
+    return "{" + pseudo + "}"
+
+
 class BaseRule(MaskerRuleI, abc.ABC):
     """
     Simple base class that stores a compiled regular expression and a
@@ -58,7 +66,7 @@ class BaseRule(MaskerRuleI, abc.ABC):
             if anonymizer_fn:
                 pseudo = anonymizer_fn(val, self.tag_type)
                 mappings.append({"original": val, "replacement": pseudo})
-                return "{" + pseudo + "}"
+                return _format_pseudo(pseudo)
             mappings.append({"original": val, "replacement": self.placeholder})
             return self.placeholder
 

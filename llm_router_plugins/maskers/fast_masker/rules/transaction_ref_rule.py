@@ -15,7 +15,10 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import (
+    BaseRule,
+    _format_pseudo,
+)
 from llm_router_plugins.maskers.fast_masker.utils.validators import (
     is_possible_transaction_ref,
 )
@@ -77,7 +80,7 @@ class TransactionRefRule(BaseRule):
                 if anonymizer_fn:
                     pseudo = anonymizer_fn(ref, self.tag_type)
                     mappings.append({"original": ref, "replacement": pseudo})
-                    return "{" + pseudo + "}"
+                    return _format_pseudo(pseudo)
                 mappings.append({"original": ref, "replacement": self.placeholder})
                 return self.placeholder
             # Invalid reference – keep original text.

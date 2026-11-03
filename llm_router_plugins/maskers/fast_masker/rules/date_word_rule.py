@@ -18,7 +18,10 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import (
+    BaseRule,
+    _format_pseudo,
+)
 
 
 class DateWordRule(BaseRule):
@@ -112,7 +115,7 @@ class DateWordRule(BaseRule):
                 # Custom anonymisation – wrap the result in curly braces.
                 pseudo = anonymizer_fn(original, self.tag_type)
                 mappings.append({"original": original, "replacement": pseudo})
-                return "{" + pseudo + "}"
+                return _format_pseudo(pseudo)
             # Default behaviour – static placeholder.
             mappings.append({"original": original, "replacement": self.placeholder})
             return self.placeholder

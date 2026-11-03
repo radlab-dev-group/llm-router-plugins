@@ -13,7 +13,10 @@ The rule:
 import re
 from typing import Optional, Callable, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import (
+    BaseRule,
+    _format_pseudo,
+)
 from llm_router_plugins.maskers.fast_masker.utils.validators import is_possible_jwt
 
 
@@ -62,7 +65,7 @@ class JwtRule(BaseRule):
                 if anonymizer_fn:
                     pseudo = anonymizer_fn(token, self.tag_type)
                     mappings.append({"original": token, "replacement": pseudo})
-                    return "{" + pseudo + "}"
+                    return _format_pseudo(pseudo)
                 mappings.append({"original": token, "replacement": self.placeholder})
                 return self.placeholder
             # Not a valid JWT – keep original text.

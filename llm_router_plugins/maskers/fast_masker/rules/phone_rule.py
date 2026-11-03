@@ -5,7 +5,10 @@ Rule that masks Polish domestic phone numbers (9 digits).
 import re
 from typing import Optional, Callable, Tuple, List
 
-from llm_router_plugins.maskers.fast_masker.rules.base_rule import BaseRule
+from llm_router_plugins.maskers.fast_masker.rules.base_rule import (
+    BaseRule,
+    _format_pseudo,
+)
 from llm_router_plugins.maskers.fast_masker.utils.validators import (
     is_valid_polish_phone,
 )
@@ -31,8 +34,8 @@ class PhoneRule(BaseRule):
         \b\d{9}\b                            # plain 9 consecutive digits
         |                                    # OR
         # digit groups (min. 3 total, max ~15 chars)
-        (?<!\S)\d{2,5}(?:[\s\-]\d{1,4}){2,4}
-        (?!\S)
+        (?<!\d)\d{2,5}(?:[\s\-]\d{1,4}){2,4}
+        (?!\d)
     """
 
     _PHONE_PLACEHOLDER = "{{PHONE}}"
@@ -58,7 +61,7 @@ class PhoneRule(BaseRule):
                 if anonymizer_fn:
                     pseudo = anonymizer_fn(val, self.tag_type)
                     mappings.append({"original": val, "replacement": pseudo})
-                    return "{" + pseudo + "}"
+                    return _format_pseudo(pseudo)
                 mappings.append({"original": val, "replacement": self.placeholder})
                 return self.placeholder
             # Invalid phone number — keep original text.
