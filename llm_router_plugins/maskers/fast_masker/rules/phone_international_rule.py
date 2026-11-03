@@ -20,13 +20,10 @@ class PhoneInternationalRule(BaseRule):
     """
 
     _PHONE_INTL_REGEX = r"""
-        \+                   # leading +
-        \d{1,3}              # country code (1-3 digits)
-        # 2-5 groups of subscriber digits with optional separator
-        (?:[\s\-]?\d{1,4}){2,5}
-        # not followed by another digit (allows trailing punctuation
-        # like ) , . etc.)
-        (?!\d)
+        (?<!\w)                              # not preceded by a word character
+        (?:\(\+?\d{1,3}\)|\+\d{1,3})        # country code: (+48), +48
+        (?:[\s\-\.]*\(0?\d{1,4}\)|(?:[\s\-\.]*\d{1,4})){2,5} # subscriber groups (with optional parens around area code)
+        (?!\d)                               # not followed by another digit
     """
 
     def __init__(self):

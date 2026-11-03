@@ -31,10 +31,16 @@ class PhoneRule(BaseRule):
     """
 
     _PHONE_REGEX = r"""
-        \b\d{9}\b                            # plain 9 consecutive digits
-        |                                    # OR
-        # digit groups (min. 3 total, max ~15 chars)
-        (?<!\d)\d{2,5}(?:[\s\-]\d{1,4}){2,4}
+        (?<!\d)
+        (?:
+            \b\d{9}\b                            # plain 9 consecutive digits
+            |
+            (?:\(0?[\s\-]?\d{2,3}\)[\s\-]?)      # area code in parentheses, e.g. (81), (081), (0-81), (22)
+            (?:\d{7}|\d{2,4}(?:[\s\-\.]\d{1,4}){1,3})
+            |
+            # digit groups (min. 3 total, max ~15 chars)
+            \d{2,5}(?:[\s\-\.]\d{1,4}){2,4}
+        )
         (?!\d)
     """
 

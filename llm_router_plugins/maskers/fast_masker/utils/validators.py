@@ -428,17 +428,15 @@ def is_possible_transaction_ref(ref: str) -> bool:
 # Phone numbers
 # ============================================================================
 
-# Valid Polish mobile prefix ranges (second digit of the 3-digit prefix).
-_POLISH_MOBILE_PREFIXES = frozenset(
+# Valid Polish phone prefix ranges (mobile, landline area codes, infolines / special).
+_POLISH_PHONE_PREFIXES = frozenset(
     {
         # Mobile
+        "45",
         "50",
         "51",
         "53",
         "57",
-        "58",
-        "59",
-        "45",
         "60",
         "66",
         "69",
@@ -446,25 +444,78 @@ _POLISH_MOBILE_PREFIXES = frozenset(
         "73",
         "78",
         "79",
-        # Unified Emergency Numbers
-        "800",
+        "88",
+        # Landline (strefowe)
+        "12",
+        "13",
+        "14",
+        "15",
+        "16",
+        "17",
+        "18",
+        "22",
+        "23",
+        "24",
+        "25",
+        "29",
+        "32",
+        "33",
+        "34",
+        "41",
+        "42",
+        "43",
+        "44",
+        "46",
+        "48",
+        "52",
+        "54",
+        "55",
+        "56",
+        "58",
+        "59",
+        "61",
+        "62",
+        "63",
+        "65",
+        "67",
+        "68",
+        "71",
+        "74",
+        "75",
+        "76",
+        "77",
+        "81",
+        "82",
+        "83",
+        "84",
+        "85",
+        "86",
+        "87",
+        "89",
+        "91",
+        "94",
+        "95",
+        # Special / Infolines / VoIP
+        "39",
+        "70",
+        "80",
+        "64",
     }
 )
+_POLISH_MOBILE_PREFIXES = _POLISH_PHONE_PREFIXES
 
 
 def is_valid_polish_phone(phone: str) -> bool:
-    """Validate a Polish phone number (9 digits without country code).
+    """Validate a Polish phone number (9 digits without country code, or with optional legacy leading 0).
 
-    Checks that the first 2-3 digits form a valid Polish mobile prefix.
-    This reduces false positives from random 9-digit sequences.
+    Checks that the first 2 digits form a valid Polish area code, mobile prefix,
+    or special/infoline prefix (e.g. 801, 800).
     """
     if not isinstance(phone, str):
         return False
-    cleaned = re.sub(r"[\s\-]", "", phone)
+    cleaned = re.sub(r"[\s\-\(\)\./]", "", phone)
+    if len(cleaned) == 10 and cleaned.startswith("0"):
+        cleaned = cleaned[1:]
     if not (cleaned.isdigit() and len(cleaned) == 9):
         return False
-    # Check mobile prefixes: first 2 digits always, plus third if it's an 800 number
-    prefix_2 = cleaned[:2]
-    if prefix_2 in ("80",) and cleaned[:3] in _POLISH_MOBILE_PREFIXES:
-        return True
-    return cleaned[:2] in _POLISH_MOBILE_PREFIXES
+    return cleaned[:2] in _POLISH_PHONE_PREFIXES
