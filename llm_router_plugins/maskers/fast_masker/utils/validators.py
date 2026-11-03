@@ -290,22 +290,62 @@ def is_valid_ssn(ssn: str) -> bool:
     return True
 
 
-def is_valid_eu_vat(vat: str) -> bool:
-    """Validate EU VAT identifier (e.g. ``PL1234567890``).
+_EU_VAT_PATTERNS = {
+    "AT": re.compile(r"^U\d{8}$"),
+    "BE": re.compile(r"^[01]\d{9}$"),
+    "BG": re.compile(r"^\d{9,10}$"),
+    "CY": re.compile(r"^\d{8}[A-Z]$"),
+    "CZ": re.compile(r"^\d{8,10}$"),
+    "DE": re.compile(r"^\d{9}$"),
+    "DK": re.compile(r"^\d{8}$"),
+    "EE": re.compile(r"^\d{9}$"),
+    "EL": re.compile(r"^\d{9}$"),
+    "GR": re.compile(r"^\d{9}$"),
+    "ES": re.compile(r"^[A-Z0-9]\d{7}[A-Z0-9]$"),
+    "FI": re.compile(r"^\d{8}$"),
+    "FR": re.compile(r"^[A-Z0-9]{2}\d{9}$"),
+    "HR": re.compile(r"^\d{11}$"),
+    "HU": re.compile(r"^\d{8}$"),
+    "IE": re.compile(r"^(?:\d{7}[A-W][A-I]?|\d[A-Z\d\*\+]\d{5}[A-W])$"),
+    "IT": re.compile(r"^\d{11}$"),
+    "LT": re.compile(r"^(?:\d{9}|\d{12})$"),
+    "LU": re.compile(r"^\d{8}$"),
+    "LV": re.compile(r"^\d{11}$"),
+    "MT": re.compile(r"^\d{8}$"),
+    "NL": re.compile(r"^\d{9}B\d{2}$"),
+    "PL": re.compile(r"^\d{10}$"),
+    "PT": re.compile(r"^\d{9}$"),
+    "RO": re.compile(r"^\d{2,10}$"),
+    "SE": re.compile(r"^\d{12}$"),
+    "SI": re.compile(r"^\d{8}$"),
+    "SK": re.compile(r"^\d{10}$"),
+    "XI": re.compile(r"^(?:\d{9}|\d{12})$"),
+    "EU": re.compile(r"^\d{9}$"),
+}
 
-    Requires exactly 2 leading letters followed by 8-12 alphanumeric characters,
-    with at least 4 digits (reduced from 6 to accommodate country-specific formats
-    like Maltese VAT which can have as few as 8 total characters).
+
+def is_valid_eu_vat(vat: str) -> bool:
+    """Validate EU VAT identifier (e.g. ``PL5260250995``, ``DE123456789``).
+
+    Requires a valid 2-letter EU country code (plus XI/EU) followed by the
+    country-specific format of alphanumeric / numeric characters.
+    For Poland (PL), also verifies the NIP checksum algorithm.
     """
     if not isinstance(vat, str):
         return False
-    vat_upper = vat.upper()
-    # Must be 2 letters + digits/letters (10-14 total chars)
-    if not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{8,12}", vat_upper):
+    vat_upper = vat.upper().strip()
+    if len(vat_upper) < 4:
         return False
-    # Count digits - must have at least 4 digits to avoid matching regular words
-    digit_count = sum(c.isdigit() for c in vat_upper[2:])
-    return digit_count >= 4
+    country = vat_upper[:2]
+    body = vat_upper[2:]
+    pattern = _EU_VAT_PATTERNS.get(country)
+    if not pattern:
+        return False
+    if not pattern.match(body):
+        return False
+    if country == "PL":
+        return is_valid_nip(body)
+    return True
 
 
 # ============================================================================

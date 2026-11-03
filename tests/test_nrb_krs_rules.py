@@ -21,6 +21,9 @@ from llm_router_plugins.maskers.fast_masker.rules.nrb_rule import (
 from llm_router_plugins.maskers.fast_masker.rules.krs_rule import (
     KrsRule,
 )  # noqa: E402
+from llm_router_plugins.maskers.fast_masker.rules.eu_vat_rule import (
+    EuVatRule,
+)  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # NRB tests
@@ -227,3 +230,40 @@ class TestKrsRule:
         """Rule should work without explicit flags (delegated to BaseRule)."""
         rule = KrsRule()
         assert rule.pattern is not None
+
+
+# ---------------------------------------------------------------------------
+# EU VAT tests
+# ---------------------------------------------------------------------------
+
+class TestEuVatRule:
+    def setup_method(self):
+        self.rule = EuVatRule()
+
+    def test_valid_pl_vat_masked(self):
+        # 5260250995 is a valid Polish NIP
+        text = "VAT: PL5260250995"
+        result, mappings = self.rule.apply(text)
+        assert result == "VAT: {{EU_VAT}}"
+        assert len(mappings) == 1
+        assert mappings[0]["original"] == "PL5260250995"
+
+    def test_valid_de_vat_masked(self):
+        text = "USt-IdNr.: DE123456789"
+        result, mappings = self.rule.apply(text)
+        assert result == "USt-IdNr.: {{EU_VAT}}"
+        assert len(mappings) == 1
+        assert mappings[0]["original"] == "DE123456789"
+
+    def test_concatenated_polish_words_with_year_not_masked(self):
+        # Edge cases where text extraction joins word and year
+        text = "Data waluty2026-08-06 oraz Data operacji2026-08-06, a także stycznia2024"
+        result, mappings = self.rule.apply(text)
+        assert result == text
+        assert mappings == []
+
+    def test_invalid_country_code_not_masked(self):
+        text = "ZZ123456789"
+        result, mappings = self.rule.apply(text)
+        assert result == text
+        assert mappings == []
