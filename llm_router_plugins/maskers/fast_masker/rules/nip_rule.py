@@ -17,23 +17,28 @@ class NipRule(BaseRule):
     Detects NIP numbers in the following forms:
 
     * Plain 10‑digit string: ``1234567890``
-    * Hyphen‑separated: ``123-456-78-90``
+    * Hyphen‑separated (3-3-2-2): ``123-456-78-90``
+    * Space‑separated (3-3-2-2): ``123 456 78 90``
+    * Hyphen‑separated (3-2-2-3): ``123-45-67-890``
+    * Space‑separated (3-2-2-3): ``123 45 67 890``
     * Embedded in letters: ``b1234567890b``
     * Wrapped with markdown emphasis: ``_b1234567890b*_``
 
     Only valid NIPs (correct checksum) are replaced with ``{{NIP}}``.
     """
 
-    # The regex captures the digit part (with optional hyphens) in a named group
+    # The regex captures the digit part (with optional hyphens or spaces) in a named group
     # ``digits``.  It allows optional leading/trailing markdown markers (`_` or `*`)
     # and letters around the digits.
     _NIP_REGEX = r"""
         (?<!\d)                     # not preceded by another digit
         (?:[_*]+)?                  # optional leading markdown markers
         (?P<digits>
-            (?:\d{3}-?\d{3}-?\d{2}-?\d{2})   # optional hyphens
+            (?:\d{3}[-\s]?\d{3}[-\s]?\d{2}[-\s]?\d{2})   # 3-3-2-2 format
             |
-            \d{10}                           # plain 10‑digit string
+            (?:\d{3}[-\s]?\d{2}[-\s]?\d{2}[-\s]?\d{3})   # 3-2-2-3 format
+            |
+            \d{10}                                        # plain 10‑digit string
         )
         (?:[_*]+)?                  # optional trailing markdown markers
         (?!\d)                      # not followed by another digit

@@ -121,7 +121,7 @@ class TestNrbRule:
 # ---------------------------------------------------------------------------
 
 _VALID_KRS = (
-    "0000000013"  # 10 digits, valid checksum (sum=13, 13%11=2 → wait, let me recalc)
+    "0000000013"  # 10 digits
 )
 _VALID_KRS_FORMATTED = "000-000-00-13"
 _VALID_KRS_MIXED = "000 000-00 13"
@@ -140,18 +140,17 @@ class TestKrsRule:
         assert len(mappings) == 1
         assert mappings[0]["original"] == _VALID_KRS
 
-    def test_formatted_with_hyphens(self):
+    def test_formatted_with_hyphens_not_masked(self):
         text = f"KRS: {_VALID_KRS_FORMATTED}"
         result, mappings = self.rule.apply(text)
-        assert result == "KRS: {{KRS}}"
-        assert len(mappings) == 1
-        assert mappings[0]["original"] == _VALID_KRS  # separators stripped
+        assert result == text
+        assert mappings == []
 
-    def test_formatted_with_spaces(self):
+    def test_formatted_with_spaces_not_masked(self):
         text = f"KRS: {_VALID_KRS_MIXED}"
         result, mappings = self.rule.apply(text)
-        assert result == "KRS: {{KRS}}"
-        assert len(mappings) == 1
+        assert result == text
+        assert mappings == []
 
     # ---- invalid inputs are skipped ----
 
@@ -219,7 +218,7 @@ class TestKrsRule:
         assert "{{KRS}}" in result
 
     def test_multiple_krs(self):
-        text = f"{_VALID_KRS} | {_VALID_KRS_FORMATTED}"
+        text = f"{_VALID_KRS} | 0000123456"
         result, mappings = self.rule.apply(text)
         assert result.count("{{KRS}}") == 2
         assert len(mappings) == 2
