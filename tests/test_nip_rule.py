@@ -97,3 +97,30 @@ class TestNipRule:
         assert result == f"NIP: {{anon_{_VALID_NIP_3322_SPACE}}}"
         assert len(mappings) == 1
         assert mappings[0]["original"] == _VALID_NIP_3322_SPACE
+
+
+class TestNipKrsPipelineInteraction:
+    """Ensure NIP formats are not hijacked by KRS rule in FastMasker pipeline."""
+
+    def test_spaced_nip_masked_as_nip_not_krs(self):
+        from llm_router_plugins.maskers.fast_masker.core.masker import FastMasker
+
+        masker = FastMasker()
+        text = "Firma ABC, NIP 118 193 42 72, wpis do rejestru."
+        masked_text, mappings = masker.mask(text)
+
+        assert "NIP_" in masked_text
+        assert "KRS_" not in masked_text
+        assert "118 193 42 72" in masker.mapping
+
+    def test_invalid_spaced_nip_not_masked_as_krs(self):
+        from llm_router_plugins.maskers.fast_masker.core.masker import FastMasker
+
+        masker = FastMasker()
+        text = "Niepoprawny NIP 118 193 42 73 w dokumencie."
+        masked_text, mappings = masker.mask(text)
+
+        assert "KRS_" not in masked_text
+        assert "NIP_" not in masked_text
+        assert masked_text == text
+        assert mappings == {}

@@ -3,8 +3,6 @@ Rule that masks valid Polish KRS numbers.
 
 Supported formats:
 * Plain ``1234567890`` (10 digits)
-* Formatted with optional hyphens **or** spaces, e.g.
-  ``123-456-78-90`` or ``123 456 78 90`` or mixed ``123-456 78-90``
 
 The rule validates the checksum via :func:`is_valid_krs` and replaces
 **valid** numbers with ``{{KRS}}``.  If an ``anonymizer_fn`` is supplied,
@@ -28,8 +26,7 @@ class KrsRule(BaseRule):
 
     _REGEX = (
         r"(?<!\w)"
-        r"(?:(?:\d{3}[-\s]?\d{3}[-\s]?\d{2}[-\s]?\d{2})"
-        r"|\d{10})"
+        r"\d{10}"
         r"(?!\w)"
     )
 
