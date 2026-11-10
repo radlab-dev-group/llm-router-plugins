@@ -372,9 +372,8 @@ fallback or new quarantine queue; after the retry limit the event is dropped. Th
 
 ### Compaction archive
 
-A request classified `compaction` is **written, never read from**: the full window is chunked at message/tool-result
-boundaries (`archive.max_chunk_chars`) and indexed into the repository's collection with category
-`session_archive` and the metadata `thread_id`, `window_id` and `position`. The next `main` request of the same
+A request classified `compaction` is **written, never read from**: the full window is indexed whole into the repository's collection with category
+`session_archive` and the metadata `thread_id` and `window_id` (the engine splits it into chunks using the collection's chunking rules, exactly as it does for documentation). The next `main` request of the same
 thread reads that category filtered by `thread_id`, so the exact lines a summary dropped come back as
 `## Exact context from before compaction`. The filter is what keeps the archive to one thread: the mined knowledge in
 the same collection carries a `thread_id` of its own, so a request that asked for both categories and one thread
