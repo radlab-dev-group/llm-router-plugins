@@ -22,6 +22,8 @@ plugin cannot serve comes back the very object it was given.
 import logging
 import time
 
+from collections import OrderedDict
+from dataclasses import replace
 from typing import Any, Dict, Optional, Tuple
 
 from llm_router_plugins.plugin_interface import PluginInterface
@@ -41,6 +43,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
     CachedContext,
+    FeedbackTracker,
     GenerationContextCache,
     InMemoryContextCache,
     LookupLimiter,
@@ -49,6 +52,10 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+    KIND_PLAYBOOK,
+    KIND_RECIPE,
+    KIND_TASK_SOLUTION,
+    KIND_TOOL_RECIPE,
     MINED_KINDS,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.debug_capture import (
@@ -78,6 +85,14 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
     STATUS_OK,
     STATUS_UNAVAILABLE,
 )
+
+#: Kinds of knowledge whose injection is worth scoring: they propose a way
+#: forward, so what the agent did next says whether they helped.  A document
+#: that only recalls (an archive, a dead end) is not credited either way.
+_SCORED_KINDS = (KIND_RECIPE, KIND_PLAYBOOK, KIND_TASK_SOLUTION, KIND_TOOL_RECIPE)
+
+#: How many sessions may wait one turn for their injection to be scored.
+_FEEDBACK_PENDING_LIMIT = 512
 
 __all__ = ["AgenticKnowledgePlugin"]
 
@@ -146,6 +161,12 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._escalation: Optional[EscalationPolicy] = None
         self._limiter: Optional[LookupLimiter] = None
         self._docs: Optional[DocsIndexer] = None
+        self._feedback_tracker: Optional[FeedbackTracker] = None
+        #: Per session: the knowledge documents injected on the previous
+        #: request, and the failure signature the request was stuck on.
+        self._pending_feedback: "OrderedDict[str, Tuple[Tuple[str, ...], str]]" = (
+            OrderedDict()
+        )
         self._budget_warnings: Dict[str, float] = {}
         self._wire(self._config)
 
@@ -194,6 +215,8 @@ class AgenticKnowledgePlugin(PluginInterface):
             archive_max_chunk_chars=config.archive_max_chunk_chars,
             archive_ttl_seconds=config.archive_ttl_seconds,
             test_mode=_test_mode(self._adapters),
+            task_solutions_enabled=config.task_solutions_enabled,
+            tool_recipes_enabled=config.tool_recipes_enabled,
         )
         self._query_builder = QueryBuilder(
             collection_namer=config.collection,
@@ -209,6 +232,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._docs = DocsIndexer(
             config=config, publisher=self._publisher, logger=self._logger
         )
+        self._feedback_tracker = FeedbackTracker(key_prefix=config.key_prefix)
         if self._logger is not None:
             # One line per process, at a level an operator actually reads.  The
             # layer fails open everywhere, so without it a plugin that loaded
@@ -325,6 +349,12 @@ class AgenticKnowledgePlugin(PluginInterface):
                 if _evidence_moved(cached.evidence_fingerprint, turn)
                 else "mode"
             )
+        # What the previous request of this session was shown is scored by
+        # what happened since: this turn's mining either mined a fix (the
+        # injected knowledge held) or repeats the failure it was shown how
+        # to avoid (it did not).  Settled before this request assembles, so
+        # the verdict already weighs what this request ranks.
+        self._settle_feedback(turn, mining)
         if fresh:
             context = KnowledgeContext(
                 hits=cached.context.hits,
@@ -412,6 +442,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             ):
                 recipe_trials.setdefault(mining.signature_hash, mining.loop_count)
             self._remember_context(turn, context, target, recipe_trials, config)
+        self._remember_injected(turn, context, mining)
         self._annotate(
             payload, adapter, turn, context, decision, publish, docs, mining
         )
@@ -473,6 +504,7 @@ class AgenticKnowledgePlugin(PluginInterface):
                 deadline,
             )
         )
+        results = self._widen_empty_scoped_searches(requests, results, deadline)
         skipped = sum(
             1 for result, _ in results if result.reason == REASON_READ_BUDGET
         )
@@ -494,6 +526,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             signature_hash=mining.signature_hash,
             touched_paths=turn.touched_paths,
             local_deadends=mining.tried,
+            feedback=self._feedback_weights(),
         )
         context = assembler.assemble(results, policy, doc_context=doc_context)
         return KnowledgeContext(
@@ -609,6 +642,95 @@ class AgenticKnowledgePlugin(PluginInterface):
             return ""
         return cached.escalated_model or ""
 
+    def _widen_empty_scoped_searches(
+        self, requests: Tuple[Any, ...], results: list, deadline: float
+    ) -> list:
+        """
+        Retry a path-scoped search that answered nothing, without its scope.
+
+        The directory of the touched paths is the narrowest question worth
+        asking first, and an empty answer to it says nothing about the rest
+        of the repository: one unscoped retry keeps the narrow first look
+        free of false negatives, at the price of a second call only for the
+        searches that came back empty.  The store refuses a call that no
+        longer fits the read budget, so the widening never overspends it.
+        """
+        if not requests:
+            return results
+        widened = list(results)
+        for index, request in enumerate(requests):
+            if not getattr(request, "relative_path_contains", ""):
+                continue
+            result = widened[index][0]
+            if result.hits or result.status != STATUS_OK:
+                continue
+            try:
+                retry = self._store.search(
+                    replace(request, relative_path_contains=""),
+                    deadline=deadline,
+                )
+            except Exception as exc:
+                self._warn("knowledge search failed: %s", type(exc).__name__)
+                continue
+            widened[index] = (retry, request.categories)
+        return widened
+
+    def _feedback_weights(self) -> Optional[Dict[str, Dict[str, int]]]:
+        """Reinforcement recorded so far; a debunked recipe ranks lower."""
+        if self._feedback_tracker is None:
+            return None
+        try:
+            return self._feedback_tracker.all_feedback() or None
+        except Exception:
+            return None
+
+    def _settle_feedback(self, turn: AgentTurn, mining: Any) -> None:
+        """
+        Score the knowledge injected on the previous request of this session.
+
+        The turn carries what happened since the injection: a recipe or a
+        playbook mined out of it means a failure was verified fixed with the
+        injected guidance on screen; the very same failure signature coming
+        back means the loop survived it.  A turn that proves neither — the
+        agent simply moved on — neither credits nor blames, and the pending
+        entry is spent either way: one turn is the whole window of
+        attribution the plugin claims.
+        """
+        tracker = self._feedback_tracker
+        if tracker is None:
+            return
+        pending = self._pending_feedback.pop(turn.session_id, None)
+        if not pending:
+            return
+        doc_names, previous_signature = pending
+        repeated = bool(previous_signature) and (
+            mining.signature_hash == previous_signature
+        )
+        resolved = any(
+            event.kind in (KIND_RECIPE, KIND_PLAYBOOK) for event in mining.events
+        )
+        if not doc_names or not (repeated or resolved):
+            return
+        for doc_name in doc_names:
+            tracker.record_feedback(doc_name, success=resolved)
+
+    def _remember_injected(
+        self, turn: AgentTurn, context: KnowledgeContext, mining: Any
+    ) -> None:
+        """Remember what this request injected so the next one can score it."""
+        if self._feedback_tracker is None or not turn.session_id:
+            return
+        doc_names = tuple(
+            hit.document_name
+            for hit in context.hits
+            if hit.document_name and hit.category in _SCORED_KINDS
+        )
+        if not doc_names:
+            return
+        self._pending_feedback[turn.session_id] = (doc_names, mining.signature_hash)
+        while len(self._pending_feedback) > _FEEDBACK_PENDING_LIMIT:
+            self._pending_feedback.popitem(last=False)
+
     def _remember_context(
         self,
         turn: AgentTurn,
@@ -637,6 +759,9 @@ class AgenticKnowledgePlugin(PluginInterface):
                 escalated=bool(escalated_model),
                 escalated_model=escalated_model,
                 recipe_trials=dict(recipe_trials or {}),
+                injected_doc_ids=tuple(
+                    hit.document_name for hit in context.hits if hit.document_name
+                ),
             ),
         )
 

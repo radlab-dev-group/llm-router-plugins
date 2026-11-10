@@ -43,6 +43,8 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
 )
 
 __all__ = [
+    "CachedContext",
+    "FeedbackTracker",
     "GenerationContextCache",
     "InMemoryContextCache",
     "LookupLimiter",
@@ -105,6 +107,7 @@ class CachedContext:
     #: Identity of the questions the block was built with; a mode switch
     #: that keeps the same signature serves the block instead of re-reading.
     policy_signature: str = ""
+    injected_doc_ids: Tuple[str, ...] = ()
 
 
 class GenerationContextCache:
@@ -379,6 +382,56 @@ class LookupLimiter:
             self._order.clear()
 
 
+class FeedbackTracker:
+    """Tracks reinforcement feedback (upvotes/downvotes) for knowledge documents."""
+
+    def __init__(self, client: Any = None, key_prefix: str = "agentic-kb") -> None:
+        self._client = client
+        self._key_prefix = key_prefix
+        self._local: Dict[str, Dict[str, int]] = {}
+        self._lock = threading.Lock()
+
+    def record_feedback(self, doc_name: str, success: bool) -> None:
+        if not doc_name:
+            return
+        field_name = "upvotes" if success else "downvotes"
+        with self._lock:
+            stats = self._local.setdefault(doc_name, {"upvotes": 0, "downvotes": 0})
+            stats[field_name] = stats.get(field_name, 0) + 1
+        if self._client is not None:
+            try:
+                key = f"{self._key_prefix}:fb:{doc_name}"
+                self._client.hincrby(key, field_name, 1)
+            except Exception:
+                pass
+
+    def get_feedback(self, doc_name: str) -> Dict[str, int]:
+        if not doc_name:
+            return {"upvotes": 0, "downvotes": 0}
+        with self._lock:
+            local_stats = self._local.get(doc_name)
+            if local_stats:
+                return dict(local_stats)
+        if self._client is not None:
+            try:
+                key = f"{self._key_prefix}:fb:{doc_name}"
+                raw = self._client.hgetall(key)
+                if raw:
+                    up = raw.get(b"upvotes") or raw.get("upvotes") or 0
+                    down = raw.get(b"downvotes") or raw.get("downvotes") or 0
+                    return {
+                        "upvotes": int(up),
+                        "downvotes": int(down),
+                    }
+            except Exception:
+                pass
+        return {"upvotes": 0, "downvotes": 0}
+
+    def all_feedback(self) -> Dict[str, Dict[str, int]]:
+        with self._lock:
+            return {k: dict(v) for k, v in self._local.items()}
+
+
 def _encode(entry: CachedContext) -> str:
     """Serialize one cache entry."""
     payload = {
@@ -389,6 +442,7 @@ def _encode(entry: CachedContext) -> str:
         "escalated": bool(entry.escalated),
         "escalated_model": str(entry.escalated_model or ""),
         "recipe_trials": dict(entry.recipe_trials),
+        "injected_doc_ids": list(entry.injected_doc_ids),
         "chars": int(entry.context.chars),
         "status": entry.context.status,
         "rendered": entry.context.rendered,
@@ -599,6 +653,9 @@ def _decode(raw: Any) -> Optional[CachedContext]:
             escalated=bool(payload.get("escalated")),
             escalated_model=str(payload.get("escalated_model", "")),
             recipe_trials=recipe_trials,
+            injected_doc_ids=tuple(
+                str(doc) for doc in payload.get("injected_doc_ids") or ()
+            ),
         )
     except (TypeError, ValueError):
         return None

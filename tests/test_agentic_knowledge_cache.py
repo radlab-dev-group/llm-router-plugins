@@ -266,3 +266,130 @@ def test_invalid_recipe_trial_counts_are_not_used():
         }
     )
     assert decoded.recipe_trials == {"e": 2}
+
+
+# ------------------------------------------------------------ feedback -----
+
+class _FakeHashClient:
+    """A redis-shaped client that remembers one hash per key."""
+
+    def __init__(self):
+        self.hashes = {}
+        self.increments = []
+
+    def hincrby(self, key, field, amount):
+        bucket = self.hashes.setdefault(key, {})
+        bucket[field] = int(bucket.get(field, 0)) + amount
+        self.increments.append((key, field, amount))
+
+    def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
+
+
+def test_feedback_tracker_counts_upvotes_and_downvotes():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
+        FeedbackTracker,
+    )
+
+    tracker = FeedbackTracker()
+    tracker.record_feedback("recipe:20260101:abc", success=True)
+    tracker.record_feedback("recipe:20260101:abc", success=True)
+    tracker.record_feedback("recipe:20260101:abc", success=False)
+    stats = tracker.get_feedback("recipe:20260101:abc")
+    assert stats == {"upvotes": 2, "downvotes": 1}
+    assert tracker.all_feedback() == {
+        "recipe:20260101:abc": {"upvotes": 2, "downvotes": 1}
+    }
+    # A document nobody scored is an empty record, not an error.
+    assert tracker.get_feedback("recipe:20260101:other") == {
+        "upvotes": 0,
+        "downvotes": 0,
+    }
+    assert tracker.get_feedback("") == {"upvotes": 0, "downvotes": 0}
+
+
+def test_feedback_tracker_writes_through_to_redis():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
+        FeedbackTracker,
+    )
+
+    client = _FakeHashClient()
+    tracker = FeedbackTracker(client=client, key_prefix="agentic-kb")
+    tracker.record_feedback("recipe:20260101:abc", success=False)
+    tracker.record_feedback("recipe:20260101:abc", success=False)
+    assert client.hashes["agentic-kb:fb:recipe:20260101:abc"] == {
+        "downvotes": 2
+    }
+    assert len(client.increments) == 2
+
+
+def test_feedback_tracker_reads_redis_when_local_is_empty():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
+        FeedbackTracker,
+    )
+
+    client = _FakeHashClient()
+    client.hashes["agentic-kb:fb:recipe:20260101:abc"] = {
+        "upvotes": 5,
+        "downvotes": 1,
+    }
+    tracker = FeedbackTracker(client=client, key_prefix="agentic-kb")
+    assert tracker.get_feedback("recipe:20260101:abc") == {
+        "upvotes": 5,
+        "downvotes": 1,
+    }
+
+
+def test_a_broken_client_fails_open():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
+        FeedbackTracker,
+    )
+
+    class _Broken:
+        def hincrby(self, *args):
+            raise RuntimeError("down")
+
+        def hgetall(self, *args):
+            raise RuntimeError("down")
+
+    tracker = FeedbackTracker(client=_Broken())
+    tracker.record_feedback("recipe:20260101:abc", success=True)
+    # The local count survives a dead client.
+    assert tracker.get_feedback("recipe:20260101:abc") == {
+        "upvotes": 1,
+        "downvotes": 0,
+    }
+
+
+def test_injected_document_ids_survive_the_cache_round_trip():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
+        KnowledgeContext,
+        KnowledgeHit,
+    )
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
+        _decode,
+        _encode,
+    )
+
+    original = CachedContext(
+        context=KnowledgeContext(
+            hits=(
+                KnowledgeHit(
+                    category="recipe",
+                    document_name="recipe:20260101:abc",
+                    score=0.9,
+                ),
+            ),
+            rendered="a fix",
+        ),
+        injected_doc_ids=("recipe:20260101:abc",),
+    )
+    decoded = _decode(_encode(original))
+    assert decoded.injected_doc_ids == ("recipe:20260101:abc",)
+    # A cache entry written before the field existed decodes without one.
+    legacy = _decode(
+        '{"schema": 3, "evidence_fingerprint": "", "mode": "debug", '
+        '"escalated": false, "escalated_model": "", "recipe_trials": {}, '
+        '"chars": 1, "status": "ok", "rendered": ""}'
+    )
+    assert legacy.injected_doc_ids == ()
