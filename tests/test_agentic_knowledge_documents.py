@@ -182,3 +182,39 @@ def test_a_header_without_a_phase_parses_to_none_of_one():
     text = build_document_text(KIND_RECIPE, "body", date=DAY)
     assert "phase" not in text.splitlines()[0]
     assert parse_document_text(text)[0].phase == ""
+
+
+def test_the_verification_and_task_fields_round_trip():
+    text = build_document_text(
+        KIND_RECIPE,
+        "fix body",
+        date=datetime.date(2026, 10, 16),
+        verification_type="compiler",
+        task_summary="add the export endpoint",
+        modified_modules=("src/export.py", "tests/test_export.py"),
+    )
+    meta, body = parse_document_text(text)
+    assert meta.verification_type == "compiler"
+    assert meta.task_summary == "add the export endpoint"
+    assert meta.modified_modules == ("src/export.py", "tests/test_export.py")
+    assert body.strip() == "fix body"
+
+
+def test_a_task_solution_name_round_trips():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+        KIND_TASK_SOLUTION,
+        document_name,
+        parse_document_name,
+    )
+
+    name = document_name(
+        KIND_TASK_SOLUTION,
+        datetime.date(2026, 10, 16),
+        "fingerprint",
+    )
+    meta = parse_document_name(name)
+    assert meta.kind == KIND_TASK_SOLUTION
+    assert meta.date == datetime.date(2026, 10, 16)
+    # The name keeps the three-part shape the retention pass recognizes.
+    assert name.startswith("task_solution:20261016:")
+    assert is_knowledge_document(name) is True

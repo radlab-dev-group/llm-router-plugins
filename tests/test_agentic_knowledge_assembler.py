@@ -612,3 +612,140 @@ def test_a_pointer_never_pushes_the_block_over_the_budget():
     )
     policy = knowledge_config().modes["debug"]
     assert context.chars <= policy.max_chars
+
+
+# ------------------------------------------------------- presentation -----
+
+def test_a_recipe_diff_is_rendered_as_a_markdown_block():
+    """A fix keeps its diff readable: fences, not a flattened 420-char blob."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
+        _format_entry_content,
+    )
+
+    body = (
+        "Failure: KeyError: 'x' in src/export.py:12\n"
+        "Diff that made it pass:\n"
+        "-import os\n"
+        "+import os\n"
+        "+os.environ.setdefault('K', 'v')\n"
+    )
+    formatted = _format_entry_content(body, "recipe")
+    assert "```diff" in formatted
+    assert formatted.count("```") == 2
+    assert "-import os" in formatted
+
+
+def test_a_task_solution_diff_is_rendered_as_a_markdown_block():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
+        _format_entry_content,
+    )
+
+    body = "Task: add the export endpoint\nSolution diff:\n+def export(): pass"
+    formatted = _format_entry_content(body, "task_solution")
+    assert "```diff" in formatted
+    assert "+def export(): pass" in formatted
+
+
+def test_truncation_keeps_code_fence_pairs_closed():
+    """Cutting an entry mid-diff never leaves an unclosed code fence."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
+        _truncate_with_code_blocks,
+    )
+
+    text = "intro\n```diff\n" + "\n".join(f"+line{index}" for index in range(40))
+    truncated = _truncate_with_code_blocks(text, 60)
+    assert truncated.count("```") % 2 == 0
+    assert len(truncated) <= 64
+
+
+def test_the_anti_pattern_block_warns_about_dead_ends_on_touched_files():
+    """A dead end naming a touched file becomes a do-not-repeat warning."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
+        ContextAssembler,
+        _Candidate,
+    )
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+        DocumentMeta,
+    )
+
+    assembler = ContextAssembler(
+        touched_paths=("src/auth/login.py",),
+    )
+    block = assembler._anti_patterns_block(
+        [
+            _Candidate(
+                hit=KnowledgeHit(
+                    category="deadend",
+                    text="Removing the token refresh mutex caused a deadlock",
+                    paths=("src/auth/login.py",),
+                ),
+                meta=DocumentMeta(kind="deadend"),
+            )
+        ]
+    )
+    assert "<anti_patterns_warning>" in block
+    assert "src/auth/login.py" in block
+    assert "DO NOT repeat" in block
+
+
+def test_the_anti_pattern_block_is_silent_without_dead_ends():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
+        ContextAssembler,
+    )
+
+    assembler = ContextAssembler(touched_paths=("src/a.py",))
+    assert assembler._anti_patterns_block([]) == ""
+
+
+def test_feedback_downvotes_sink_a_recipe():
+    """A debunked recipe ranks lower than its untried twin."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
+        ContextAssembler,
+    )
+
+    assembler = ContextAssembler(
+        feedback={
+            "recipe:20260101:bad": {"upvotes": 0, "downvotes": 4},
+            "recipe:20260101:good": {"upvotes": 3, "downvotes": 0},
+        }
+    )
+    bad = assembler._feedback_multiplier("recipe:20260101:bad")
+    good = assembler._feedback_multiplier("recipe:20260101:good")
+    untouched = assembler._feedback_multiplier("recipe:20260101:new")
+    assert bad < 1.0 < good
+    assert untouched == 1.0
+
+
+def test_the_reranker_scale_is_trusted_when_normalized():
+    """A normalized cross-encoder score is used as is, not sigmoid-squashed."""
+    config = knowledge_config()
+    policy = config.modes["debug"]
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
+        ContextAssembler,
+    )
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+        SCALE_RERANKER,
+        SearchResult,
+    )
+    from agentic_knowledge_support import StoreHit
+
+    store = StoreHit(
+        collection="agentic_kb_webapp",
+        document_name="recipe:20260101:abc",
+        text=build_document_text("recipe", "a fix", date=datetime.date.today()),
+        score=2.5,
+        score_normalized=0.82,
+    )
+    results = (
+        (
+            SearchResult(
+                STATUS_OK, hits=(store,), score_scale=SCALE_RERANKER
+            ),
+            ("recipe",),
+        ),
+    )
+    assembler = ContextAssembler()
+    context = assembler.assemble(results, policy)
+    assert context.hits
+    # The normalized 0.82 is what decided, not a sigmoid of the raw 2.5.
+    assert 0.7 <= context.hits[0].score <= 0.85

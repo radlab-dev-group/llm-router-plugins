@@ -93,6 +93,9 @@ REASON_SCRIPTED_EDIT = "scripted edit"
 #: separately so its false positives can be measured.
 REASON_EXEC_EDIT = "exec edit"
 
+#: A build, lint, or type check ran: a verification of the work, named by no phase.
+REASON_VERIFICATION = "verification command"
+
 #: Separates the sequential segments of a compound command.
 _SEQUENCE_OPERATORS = (";", "&&", "||")
 
@@ -788,6 +791,28 @@ def _shell_words(segment: str) -> List[str]:
         return []
 
 
+def _verification_command(text: str, rules: CodexPhaseConfig) -> bool:
+    """
+    Whether a command runs a build, lint, or type check without naming a phase.
+
+    The configured verification executables carry a phase-less signal: a green
+    run of them verifies the work for the knowledge miner, and says nothing to
+    routing — the evidence they produce carries an empty mode, which the
+    dominant-phase count skips, so a ``tsc`` after ``git log`` is still a
+    review.  A segment the phase rules already named is not a verification
+    here, because the caller only asks when no segment named a phase at all.
+    """
+    if not rules.verify_executables:
+        return False
+    segments = _split_command(text, rules)
+    if not segments:
+        return False
+    return any(
+        words and _matches_executable(words[0], rules.verify_executables)
+        for words in segments
+    )
+
+
 def _exec_edit_phase(text: str, rules: CodexPhaseConfig):
     """
     Return the edit a shell command makes to a file, when it names one.
@@ -1211,12 +1236,20 @@ def collect_phase_evidence(
                             # without a patch tool leaves behind, and only as a
                             # weak signal with a reason of its own.
                             exec_edit = _exec_edit_phase(item.text, rules)
-                            if exec_edit is None:
+                            if exec_edit is not None:
+                                mode, reason = exec_edit[0], exec_edit[1]
+                                strength = STRENGTH_WEAK
+                                kind = EVIDENCE_PATCH
+                                edited_paths = exec_edit[3]
+                            elif _verification_command(item.text, rules):
+                                # A mode-less command: it verifies the work
+                                # for the miner, and names no phase, so the
+                                # routing count of the dominant work skips it.
+                                mode, reason = "", REASON_VERIFICATION
+                                strength = STRENGTH_WEAK
+                                kind = EVIDENCE_COMMAND
+                            else:
                                 continue
-                            mode, reason = exec_edit[0], exec_edit[1]
-                            strength = STRENGTH_WEAK
-                            kind = EVIDENCE_PATCH
-                            edited_paths = exec_edit[3]
                     else:
                         mode, reason, strength = signal
                         kind = EVIDENCE_COMMAND
@@ -1356,6 +1389,12 @@ def detect_phase_evidence(
         )
         if not evidence:
             return None
+    # A verification command carries an empty mode on purpose: it is evidence
+    # for the knowledge miner, and no evidence of the work for the router.
+    # Counting it would let a green build stand in for the work it checked.
+    evidence = tuple(item for item in evidence if item.mode)
+    if not evidence:
+        return None
     strong = [item for item in evidence if item.strength == STRENGTH_STRONG]
     pool = strong or evidence
     return _dominant_recent(pool, max(1, rules.evidence_window))

@@ -828,6 +828,7 @@ def test_the_activity_description_keeps_the_newest_distinct_actions(rules):
                 "sed -i s/a/b/ f.py",
                 "pytest -q",
                 "make build",
+                "cargo check",
             )
         )
     )
@@ -835,14 +836,16 @@ def test_the_activity_description_keeps_the_newest_distinct_actions(rules):
     lines = description.splitlines()
     # The shipped activity_description_limit is six distinct actions: the
     # budget is spent on the newest six, the oldest distinct action is the
-    # first to be dropped, and a repeat that fits in the window keeps its count.
+    # first to be dropped, and a repeat that fits in the window keeps its
+    # count.  A verification command keeps its own clause — it is an action
+    # the agent took, even though it names no phase.
     assert lines == [
         "listed files x2",
         "ran git log",
         "ran git diff",
         "ran sed -i",
         "ran pytest",
-        "ran make",
+        "ran verification command x2",
     ]
 
 
@@ -892,3 +895,47 @@ def test_an_unrelated_here_document_stays_not_a_patch(rules):
         output("Process exited with code 0\nOutput:\n*** Begin Patch"),
     )
     assert collect_phase_evidence(activity, rules) == ()
+
+
+# ------------------------------------------------------- verification -----
+
+def test_a_verification_command_is_evidence_with_no_phase(rules):
+    """A green build verifies for the miner and names no phase for routing.
+
+    The command evidence carries an empty mode on purpose: it is what the
+    knowledge miner reads as "the fix was verified", and the router skips it
+    when it counts the dominant work, so a ``cargo check`` after ``git log``
+    is still a review of history.
+    """
+    from llm_router_plugins.utils.routing.agentic_routing.codex.phase import (
+        REASON_VERIFICATION,
+    )
+
+    activity = (
+        command("cargo check -p web", call_id="c1"),
+        output("Process exited with code 0\nOutput:", call_id="c1"),
+    )
+    evidence = collect_phase_evidence(activity, rules)
+    assert len(evidence) == 1
+    item = evidence[0]
+    assert item.kind == "command"
+    assert item.mode == ""
+    assert item.reason == REASON_VERIFICATION
+    assert item.succeeded is True
+    # And the router still answers no phase for it.
+    assert detect_phase(activity, rules) is None
+
+
+def test_a_verification_command_does_not_steal_the_phase(rules):
+    """A verify run among phase-named commands changes nothing about the mode."""
+    activity = (
+        command("git log --oneline", call_id="c1"),
+        command("git diff", call_id="c2"),
+        command("cargo build --release", call_id="c3"),
+        output("Process exited with code 0\nOutput:", call_id="c3"),
+    )
+    # Without the build, the turn is a review of history.
+    bare = activity[:2]
+    assert detect_phase(bare, rules) == "git_review"
+    # The build verifies, and the turn is still a review of history.
+    assert detect_phase(activity, rules) == "git_review"

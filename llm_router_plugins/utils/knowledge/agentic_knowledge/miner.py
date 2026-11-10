@@ -56,6 +56,8 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     KIND_PLAYBOOK,
     KIND_RECIPE,
     KIND_SESSION_ARCHIVE,
+    KIND_TASK_SOLUTION,
+    KIND_TOOL_RECIPE,
     build_document_text,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.signature import (
@@ -206,6 +208,8 @@ class EpisodeMiner:
         archive_max_chunk_chars: int = 2000,
         archive_ttl_seconds: int = 1209600,
         test_mode: str = "test",
+        task_solutions_enabled: bool = False,
+        tool_recipes_enabled: bool = False,
     ) -> None:
         """Bind the budgets the miner writes into its documents."""
         self._max_patch_chars = max_patch_chars
@@ -213,6 +217,8 @@ class EpisodeMiner:
         self._archive_max_chunk_chars = archive_max_chunk_chars
         self._archive_ttl_seconds = archive_ttl_seconds
         self._test_mode = test_mode
+        self._task_solutions_enabled = task_solutions_enabled
+        self._tool_recipes_enabled = tool_recipes_enabled
 
     def mine(self, turn: AgentTurn) -> MiningResult:
         """
@@ -236,6 +242,14 @@ class EpisodeMiner:
         procedures, covered_by_recipe = self._procedures(
             turn, _verified_patches(failures)
         )
+        extra_events: List[KnowledgeEvent] = []
+        if self._task_solutions_enabled or getattr(turn, "task_complete", False):
+            task_sol = self._task_solution(turn, failures, procedures)
+            if task_sol is not None:
+                extra_events.append(task_sol)
+        if self._tool_recipes_enabled or getattr(turn, "mine_tool_recipes", False):
+            extra_events.extend(self._tool_recipes(turn))
+
         events = [
             event
             for event in (
@@ -246,6 +260,7 @@ class EpisodeMiner:
                     for attempt in item.failed_attempts
                 ),
                 *(self._playbook(turn, window) for window in procedures),
+                *extra_events,
             )
             if event is not None
         ]
@@ -377,7 +392,7 @@ class EpisodeMiner:
                     continue
                 latest.patches.append(evidence)
                 latest.patch_positions.append(position)
-            elif self._is_green_test(evidence):
+            elif self._is_green_test(evidence, turn):
                 latest.resolved_by = evidence
                 latest.resolved_at = position
                 latest.green_command = _command_line(
@@ -422,7 +437,7 @@ class EpisodeMiner:
                 current.patches.append(evidence)
                 current.items.append(evidence)
                 continue
-            if self._is_green_test(evidence):
+            if self._is_green_test(evidence, turn):
                 recorded = {
                     item.call_id or item.event_id or "" for item in current.patches
                 }
@@ -487,6 +502,7 @@ class EpisodeMiner:
             )
             if part
         )
+        vtype = _detect_verification_type(command)
         return self._event(
             turn,
             KIND_PLAYBOOK,
@@ -501,6 +517,7 @@ class EpisodeMiner:
                 if any(patch.strength == STRENGTH_WEAK for patch in patches)
                 else None
             ),
+            verification_type=vtype,
         )
 
     @staticmethod
@@ -524,13 +541,37 @@ class EpisodeMiner:
         """Every test failure of this turn, including repeats."""
         return [item for item in turn.evidence if item.kind == EVIDENCE_TEST_FAILURE]
 
-    def _is_green_test(self, evidence: PhaseEvidence) -> bool:
-        """Whether one evidence item is a test command that passed."""
-        return bool(
-            evidence.kind == EVIDENCE_COMMAND
-            and evidence.succeeded is True
-            and (not evidence.mode or evidence.mode == self._test_mode)
+    def _is_successful_verification(
+        self, evidence: PhaseEvidence, turn: Optional[AgentTurn] = None
+    ) -> bool:
+        """
+        Whether one evidence item is a verification that passed.
+
+        A green run of the formal test command verifies; a green build, lint
+        or type check verifies too, and says so by name.  A mode-less command
+        — the shape the collector gives a verification executable — verifies
+        only when its own command line is one: an empty mode means the command
+        was recognized as a tool, not that it proved anything.
+        """
+        if evidence.kind != EVIDENCE_COMMAND or evidence.succeeded is not True:
+            return False
+        if evidence.mode == self._test_mode:
+            return True
+        if turn is None:
+            return False
+        cmd = _command_line(_call_arguments(turn).get(evidence.call_id) or "")
+        return _detect_verification_type(cmd) in (
+            "unit_test",
+            "compiler",
+            "linter",
+            "custom_script",
         )
+
+    def _is_green_test(
+        self, evidence: PhaseEvidence, turn: Optional[AgentTurn] = None
+    ) -> bool:
+        """Whether one evidence item is a test command or verification that passed."""
+        return self._is_successful_verification(evidence, turn)
 
     def _loop(self, turn: AgentTurn, failures: List[_Failure]) -> MiningResult:
         """
@@ -596,6 +637,7 @@ class EpisodeMiner:
             )
             if part is not None
         )
+        vtype = _detect_verification_type(command)
         return self._event(
             turn,
             KIND_RECIPE,
@@ -605,6 +647,7 @@ class EpisodeMiner:
             test_command=command,
             paths=_merge_paths(turn.touched_paths, failure.signature.paths),
             phase=_episode_phase(turn, failure),
+            verification_type=vtype,
         )
 
     # ------------------------------------------------------------- deadend --
@@ -719,6 +762,9 @@ class EpisodeMiner:
         paths: Tuple[str, ...] = (),
         phase: str = "",
         edited_by: Optional[str] = None,
+        verification_type: str = "",
+        task_summary: str = "",
+        modified_modules: Tuple[str, ...] = (),
     ) -> KnowledgeEvent:
         """Assemble one publishable event out of the parts."""
         digest = fingerprint(*parts)
@@ -734,6 +780,9 @@ class EpisodeMiner:
             mode=turn.mode,
             test_command=test_command,
             phase=phase,
+            verification_type=verification_type,
+            task_summary=task_summary,
+            modified_modules=modified_modules,
         )
         metadata: Dict[str, Any] = {
             "paths": list(paths),
@@ -743,6 +792,12 @@ class EpisodeMiner:
         }
         if phase:
             metadata["phase"] = phase
+        if verification_type:
+            metadata["verification_type"] = verification_type
+        if task_summary:
+            metadata["task_summary"] = task_summary
+        if modified_modules:
+            metadata["modified_modules"] = list(modified_modules)
         # A document built on a weak edit names its source, so a reader — or a
         # policy — can weigh it, or drop it, in one filter: the paths it
         # carries came off a shell command, not off a patch envelope.
@@ -765,6 +820,102 @@ class EpisodeMiner:
             text=text,
             metadata=metadata,
         )
+
+    # -------------------------------------------------------- task solution --
+    def _task_solution(
+        self,
+        turn: AgentTurn,
+        failures: List[_Failure],
+        procedures: List[_Procedure],
+    ) -> Optional[KnowledgeEvent]:
+        """Build the document of an end-to-end task completion."""
+        task_summary = (
+            (turn.latest_user_text or "").strip().splitlines()[0][:200]
+            if turn.latest_user_text
+            else ""
+        )
+        if not task_summary:
+            return None
+        if any(not f.verified() for f in failures):
+            return None
+        patches = [e for e in turn.evidence if e.kind == EVIDENCE_PATCH]
+        if not patches:
+            return None
+        patch_text = self._patch_text(turn, patches)
+        if not patch_text.strip():
+            return None
+        paths = turn.touched_paths or _patched_paths(patch_text)
+        if not paths:
+            return None
+        cmds = [
+            _command_line(arg) for arg in _call_arguments(turn).values() if arg
+        ]
+        body = "\n".join(
+            part
+            for part in (
+                f"Task: {task_summary}",
+                f"Modified modules: {', '.join(paths)}",
+                f"Key commands: {', '.join(cmds[:3]) or 'none'}",
+                "",
+                "Solution diff:",
+                patch_text,
+            )
+            if part
+        )
+        first_patch = patches[0]
+        ident = first_patch.call_id or first_patch.event_id or ""
+        parts = ("task_solution", turn.scope, ident, task_summary[:60])
+        return self._event(
+            turn,
+            KIND_TASK_SOLUTION,
+            body,
+            signature=None,
+            parts=parts,
+            paths=paths,
+            phase=turn.mode,
+            task_summary=task_summary,
+            modified_modules=paths,
+        )
+
+    # --------------------------------------------------------- tool recipes --
+    def _tool_recipes(self, turn: AgentTurn) -> List[KnowledgeEvent]:
+        """Build documents for successful non-trivial tool commands."""
+        events: List[KnowledgeEvent] = []
+        commands = _call_arguments(turn)
+        seen_cmds = set()
+        for evidence in turn.evidence:
+            if evidence.kind != EVIDENCE_COMMAND or evidence.succeeded is not True:
+                continue
+            cmd = _command_line(commands.get(evidence.call_id) or "")
+            if not cmd or cmd in seen_cmds:
+                continue
+            if not _is_nontrivial_tool_command(cmd):
+                continue
+            seen_cmds.add(cmd)
+            paths = turn.touched_paths
+            body = "\n".join(
+                part
+                for part in (
+                    f"Tool command: {cmd}",
+                    f"Context files: {', '.join(paths) or 'workspace'}",
+                    f"Phase: {evidence.mode or turn.mode}",
+                )
+                if part
+            )
+            parts = ("tool_recipe", turn.scope, cmd[:80])
+            events.append(
+                self._event(
+                    turn,
+                    KIND_TOOL_RECIPE,
+                    body,
+                    signature=None,
+                    parts=parts,
+                    test_command=cmd,
+                    paths=paths,
+                    phase=evidence.mode or turn.mode,
+                )
+            )
+        return events
 
     def _patch_text(self, turn: AgentTurn, patches: Sequence[PhaseEvidence]) -> str:
         """Quote the patches of an episode, capped.
@@ -1041,3 +1192,117 @@ def _today() -> datetime.date:
 def _now() -> float:
     """Return the current second, isolated for the tests."""
     return datetime.datetime.now(tz=datetime.timezone.utc).timestamp()
+
+
+def _detect_verification_type(command: str) -> str:
+    """Detect a unit test, compiler, linter, or script verification command.
+
+    A command that is none of them answers ``""`` rather than a plausible
+    default: the caller decides whether a green run verified a fix, and an
+    unknown command classed as a test would credit every successful ``ls``
+    with the meaning of a verification.
+    """
+    cmd = (command or "").strip().lower()
+    if not cmd:
+        return ""
+    # Unit tests
+    if any(
+        k in cmd
+        for k in (
+            "pytest",
+            "unittest",
+            "jest",
+            "mocha",
+            "go test",
+            "cargo test",
+            "vitest",
+            "npm test",
+            "pytest-3",
+            "nosetests",
+        )
+    ):
+        return "unit_test"
+    # Compilers / build tools
+    if any(
+        k in cmd
+        for k in (
+            "tsc",
+            "gcc",
+            "g++",
+            "clang",
+            "go build",
+            "cargo build",
+            "cargo check",
+            "javac",
+            "mvn compile",
+            "make",
+        )
+    ):
+        return "compiler"
+    # Linters / type checkers
+    if any(
+        k in cmd
+        for k in (
+            "mypy",
+            "pyright",
+            "eslint",
+            "ruff",
+            "flake8",
+            "pylint",
+            "black --check",
+            "prettier --check",
+        )
+    ):
+        return "linter"
+    # Custom scripts / shell commands
+    if any(
+        cmd.startswith(k)
+        for k in ("python", "python3", "node", "bash", "sh", "curl", "./")
+    ):
+        return "custom_script"
+    return ""
+
+
+def _is_nontrivial_tool_command(cmd: str) -> bool:
+    """Check for a build/test/tool command with arguments or a real CLI.
+
+    A bare ``ls`` proves nothing; ``pytest -q tests/test_x.py`` does.
+    """
+    c = cmd.strip()
+    first = c.split()[0].lower() if c.split() else ""
+    if first in (
+        "ls",
+        "pwd",
+        "cd",
+        "echo",
+        "cat",
+        "mkdir",
+        "rm",
+        "cp",
+        "mv",
+        "sleep",
+        "clear",
+    ):
+        return False
+    if any(
+        k in c.lower()
+        for k in (
+            "docker",
+            "pytest",
+            "npm",
+            "yarn",
+            "pnpm",
+            "cargo",
+            "go",
+            "make",
+            "tox",
+            "ruff",
+            "mypy",
+            "mvn",
+            "gradle",
+        )
+    ):
+        return len(c.split()) > 1
+    if "-" in c and len(c.split()) > 1:
+        return True
+    return False

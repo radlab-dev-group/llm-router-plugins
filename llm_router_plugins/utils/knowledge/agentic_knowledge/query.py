@@ -21,6 +21,7 @@ and never carries the failure signature.
 """
 
 from dataclasses import dataclass
+import re
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
@@ -180,16 +181,59 @@ class QueryBuilder:
                     # its failure; everything else keeps the mode-shaped query.
                     query=self.docs_query_for(turn) if documented else query,
                     categories=tuple(dict.fromkeys(categories)),
-                    max_results=max(1, limits.get(name, 3)),
+                    max_results=max(15, limits.get(name, 3)),
                     thread_id=turn.thread_id if archived else "",
                     # An archived window is already narrowed to one thread, and
                     # the engine cannot intersect two metadata filters.
                     phases=() if archived else tuple(restricted or ()),
                     modes=() if archived else tuple(restricted_modes or ()),
                     doc_types=() if archived else tuple(restricted_types or ()),
+                    keywords=self.keywords_for(turn),
+                    relative_path_contains=(
+                        self.path_scope_for(turn)
+                        if not archived and not documented
+                        else ""
+                    ),
                 )
             )
         return tuple(requests)
+
+    def keywords_for(self, turn: AgentTurn) -> Tuple[str, ...]:
+        """Extract lexical/BM25 keywords: exception types, symbols, paths."""
+        failure = self.signature or _failure_signature(turn)
+        cmd = self.test_command or _test_command(turn)
+        return tuple(
+            _extract_keywords(
+                failure, cmd, turn.touched_paths, turn.latest_user_text
+            )
+        )
+
+    def path_scope_for(self, turn: AgentTurn) -> str:
+        """Find common directory prefix of touched paths, or empty string.
+
+        The deepest directory every touched path shares is the narrowest
+        scope that still holds all of them: paths in one package scope the
+        search to that package, and paths scattered over the repository
+        scope it to nothing — a search with no hits widens back to the
+        whole repository in the reader.
+        """
+        if not turn.touched_paths:
+            return ""
+        paths = [p for p in turn.touched_paths if p and "/" in p]
+        if not paths:
+            return ""
+        common = paths[0].rsplit("/", 1)[0].split("/")
+        for path in paths[1:]:
+            directories = path.rsplit("/", 1)[0].split("/")
+            depth = 0
+            while (
+                depth < len(common)
+                and depth < len(directories)
+                and common[depth] == directories[depth]
+            ):
+                depth += 1
+            common = common[:depth]
+        return "/".join(common)
 
     def docs_query_for(self, turn: AgentTurn) -> str:
         """
@@ -380,3 +424,72 @@ def _first_line(raw: str) -> str:
                     return value.strip().splitlines()[0][:160]
         return ""
     return text.splitlines()[0][:160]
+
+
+_STOPWORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "is",
+        "was",
+        "are",
+        "were",
+        "be",
+        "been",
+        "that",
+        "this",
+        "it",
+        "not",
+        "by",
+        "as",
+        "from",
+        "failed",
+        "error",
+        "exception",
+        "assert",
+        "test",
+        "tests",
+    }
+)
+
+
+def _extract_keywords(
+    failure: str,
+    cmd: str,
+    paths: Sequence[str],
+    text: Optional[str] = None,
+) -> List[str]:
+    """Extract distinct lexical tokens for the sparse BM25 branch."""
+    tokens: List[str] = []
+    # 1. Exception class names (e.g. ConnectionTimeoutError, TypeError)
+    for exc in re.findall(
+        r"\b[A-Z][a-zA-Z0-9]*(?:Error|Exception|Timeout|Failure|Warning)\b",
+        failure or "",
+    ):
+        if exc not in tokens:
+            tokens.append(exc)
+    # 2. File stems
+    for path in paths[:8]:
+        name = str(path).rsplit("/", 1)[-1]
+        stem = name.split(".", 1)[0] if "." in name else name
+        if stem and stem.lower() not in _STOPWORDS and stem not in tokens:
+            tokens.append(stem)
+    # 3. Key identifiers in failure and command
+    combined = f"{failure or ''} {cmd or ''}"
+    for token in re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]{2,}\b", combined):
+        lower = token.lower()
+        if lower not in _STOPWORDS and token not in tokens and not token.isdigit():
+            tokens.append(token)
+        if len(tokens) >= 15:
+            break
+    return tokens

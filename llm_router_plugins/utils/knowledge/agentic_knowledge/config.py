@@ -26,7 +26,7 @@ JSON structure::
       "collection_layout": "single",
       "scope": {"strategy": "repo_basename", "overrides": {}, "default": ""},
       "read": {"enabled": true, "timeout_seconds": 1.5, "min_similarity": 0.35,
-               "hybrid_search": true, "rerank_results": false,
+               "hybrid_search": true, "rerank_results": true,
                "cache_ttl_seconds": 3600, "max_lookups_per_generation": 20},
       "modes": {
         "debug": {"max_chars": 6000, "escalation_model_name": "…", "sources": [
@@ -40,7 +40,7 @@ JSON structure::
                 "archive": {"enabled": true, "max_chunk_chars": 2000,
                             "ttl_seconds": 1209600}},
       "escalation": {"enabled": false, "loop_threshold": 3,
-                     "strong_recipe_score": 0.75},
+                     "strong_recipe_score": 0.6},
       "docs": {"enabled": true, "auto_index": true,
                "patterns": ["*.md"], "excluded_dirs": ["node_modules"],
                "max_files": 200, "max_file_bytes": 200000,
@@ -104,6 +104,7 @@ DEFAULT_DOC_EXCLUDED_DIRS: Tuple[str, ...] = (
     ".env",
     ".idea",
     ".vscode",
+    ".plans",
     "node_modules",
     "bower_components",
     "venv",
@@ -253,10 +254,13 @@ _DEFAULT_MIN_SIMILARITY = 0.35
 
 #: Both legs of the engine fused by Reciprocal Rank Fusion is what its
 #: collections are built for, so it is the default.  The cross-encoder reranker
-#: is not: it is a second model call over every retrieved chunk, and an engine
-#: without a reranker bound to the collection answers nothing with one on.
+#: is on as well: it is a second model call over every retrieved chunk, paid
+#: once per search, and it is what keeps a code-shaped query from surfacing
+#: everything that merely rhymes with the stack trace.  An operator whose
+#: engine has no reranker bound to the collection switches it back off in the
+#: policy or with ``LLM_ROUTER_KNOWLEDGE_AGENTIC_RERANK_RESULTS=false``.
 _DEFAULT_HYBRID_SEARCH = True
-_DEFAULT_RERANK_RESULTS = False
+_DEFAULT_RERANK_RESULTS = True
 _DEFAULT_CACHE_TTL_SECONDS = 3600
 _DEFAULT_MAX_LOOKUPS = 20
 _DEFAULT_MAX_CHARS = 6000
@@ -266,7 +270,11 @@ _DEFAULT_MAX_PATCH_CHARS = 4_000
 _DEFAULT_ARCHIVE_CHUNK_CHARS = 2_000
 _DEFAULT_ARCHIVE_TTL_SECONDS = 1_209_600
 _DEFAULT_LOOP_THRESHOLD = 3
-_DEFAULT_STRONG_RECIPE_SCORE = 0.75
+#: A number on the scale the default read produces: with the reranker leg on,
+#: relevant hits sit near 0.5-0.75, so the threshold lives inside that band —
+#: below it, and :meth:`AgenticKnowledgeConfig._warn_scale_mismatch` would
+#: say the shipped defaults disagree with themselves.
+_DEFAULT_STRONG_RECIPE_SCORE = 0.6
 _DEFAULT_RETENTION_INTERVAL_SECONDS = 21_600
 _DEFAULT_MAX_PENDING = 1_000
 _DEFAULT_WORKER_BATCH = 32
@@ -509,6 +517,14 @@ class AgenticKnowledgeConfig:
     max_stream_len: int = _DEFAULT_MAX_STREAM_LEN
     dedup_ttl_seconds: int = _DEFAULT_DEDUP_TTL_SECONDS
     max_patch_chars: int = _DEFAULT_MAX_PATCH_CHARS
+    #: Whether the end of a successfully verified episode is mined as a
+    #: ``task_solution`` document: the end-to-end sequence of files, commands
+    #: and diff behind the change, not only the one failure that got fixed.
+    task_solutions_enabled: bool = False
+    #: Whether successful non-trivial tool commands are mined as
+    #: ``tool_recipe`` documents, so the next agent asks the repository how
+    #: its own commands are spelled.
+    tool_recipes_enabled: bool = False
 
     archive_enabled: bool = True
     archive_max_chunk_chars: int = _DEFAULT_ARCHIVE_CHUNK_CHARS
@@ -698,6 +714,14 @@ class AgenticKnowledgeConfig:
                 write.get("max_patch_chars", _DEFAULT_MAX_PATCH_CHARS),
                 "write.max_patch_chars",
             ),
+            task_solutions_enabled=_boolean(
+                write.get("task_solutions_enabled", False),
+                "write.task_solutions_enabled",
+            ),
+            tool_recipes_enabled=_boolean(
+                write.get("tool_recipes_enabled", False),
+                "write.tool_recipes_enabled",
+            ),
             archive_enabled=_boolean(
                 archive.get("enabled", True), "archive.enabled"
             ),
@@ -796,6 +820,8 @@ class AgenticKnowledgeConfig:
             ("WRITE_ENABLED", "write_enabled", _boolean),
             ("ESCALATION_ENABLED", "escalation_enabled", _boolean),
             ("ARCHIVE_ENABLED", "archive_enabled", _boolean),
+            ("TASK_SOLUTIONS_ENABLED", "task_solutions_enabled", _boolean),
+            ("TOOL_RECIPES_ENABLED", "tool_recipes_enabled", _boolean),
             # The engine's own character set: an env prefix is reduced to a
             # collection-name fragment, not merely checked for emptiness, or
             # a hyphen from the environment would reach a creation the engine

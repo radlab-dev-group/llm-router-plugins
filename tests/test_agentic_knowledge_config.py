@@ -37,7 +37,9 @@ def test_bundled_policy_serves_every_mode_and_one_for_the_unknown():
         "review",
         "*",
     }
-    assert config.escalation_enabled is False
+    # The loop-breaker ships on: repeating a failure with no known fix is
+    # the one thing an agent's model choice should react to.
+    assert config.escalation_enabled is True
 
 
 def test_the_read_budget_holds_the_collections_a_mode_asks():
@@ -487,11 +489,17 @@ def test_phases_must_be_a_list_of_names():
         )
 
 
-def test_the_retrieval_legs_are_hybrid_without_a_reranker():
-    """The engine fuses both legs; the cross-encoder costs a model call."""
+def test_the_retrieval_legs_are_hybrid_and_reranked():
+    """The engine fuses both legs and re-scores them with the cross-encoder.
+
+    The reranker is a model call paid once per search, and it is what keeps
+    a code-shaped query from surfacing everything that merely rhymes with
+    the stack trace; an engine without one switches it back off in the
+    policy.
+    """
     config = AgenticKnowledgeConfig.from_file()
     assert config.hybrid_search is True
-    assert config.rerank_results is False
+    assert config.rerank_results is True
 
 
 def test_both_retrieval_legs_are_written_in_the_bundled_policy():
@@ -505,7 +513,7 @@ def test_both_retrieval_legs_are_written_in_the_bundled_policy():
     )
     read = json.loads(path.read_text(encoding="utf-8"))["read"]
     assert read["hybrid_search"] is True
-    assert read["rerank_results"] is False
+    assert read["rerank_results"] is True
 
 
 @pytest.mark.parametrize(
@@ -713,7 +721,7 @@ def test_a_reranker_scale_threshold_warns_at_start(caplog):
     import logging
 
     with caplog.at_level(logging.WARNING, logger="agentic_knowledge"):
-        knowledge_config(rerank_results=True)
+        knowledge_config(rerank_results=True, strong_recipe_score=0.95)
     assert any(
         "strong_recipe_score" in r.message for r in caplog.records
     ), caplog.text
@@ -727,3 +735,31 @@ def test_the_hybrid_scale_threshold_does_not_warn_for_a_reachable_band(caplog):
     assert not any(
         "strong_recipe_score" in r.message for r in caplog.records
     ), caplog.text
+
+
+def test_mining_of_new_knowledge_kinds_is_a_write_switch():
+    """task_solution and tool_recipe are opt-in on the write path."""
+    config = AgenticKnowledgeConfig.from_json(
+        '{"write": {"task_solutions_enabled": true, "tool_recipes_enabled": true}}'
+    )
+    assert config.task_solutions_enabled is True
+    assert config.tool_recipes_enabled is True
+    # Off by default, so a policy that does not name them mines neither.
+    default = AgenticKnowledgeConfig.from_json("{}")
+    assert default.task_solutions_enabled is False
+    assert default.tool_recipes_enabled is False
+
+
+def test_mining_switches_are_overridable_from_the_environment(monkeypatch):
+    monkeypatch.setenv(
+        f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}TASK_SOLUTIONS_ENABLED", "false"
+    )
+    monkeypatch.setenv(
+        f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}TOOL_RECIPES_ENABLED", "true"
+    )
+    config = AgenticKnowledgeConfig.from_json(
+        '{"write": {"task_solutions_enabled": true, "tool_recipes_enabled": true}}'
+    )
+    config.override_from_env()
+    assert config.task_solutions_enabled is False
+    assert config.tool_recipes_enabled is True

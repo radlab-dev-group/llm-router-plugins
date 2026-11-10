@@ -1013,3 +1013,160 @@ def test_one_failing_search_does_not_drop_the_others():
     knowledge = out["routing"]["knowledge"]
     # the mined sources answered even though the archive request raised
     assert knowledge["injected"] >= 1
+
+
+# ----------------------------------------------------------- feedback loop --
+
+def _recipe_turn(turn_id, failures=1):
+    """One request of a session; the cache key is the turn id itself."""
+    return main_payload(
+        failures=failures,
+        turn_id=turn_id,
+        root_turn_id=f"gen-{turn_id}",
+        source="phase",
+    )
+
+
+def test_an_injected_recipe_is_remembered_and_scored_on_the_next_turn():
+    """The loop the plan closed: show a fix, learn whether it held.
+
+    A request that was shown a recipe carries the document ids into the
+    generation cache; the next request of the session either mined a fix
+    (the guidance held — an upvote) or repeated the very same failure
+    (it did not — a downvote), and the verdict feeds the weight of what the
+    next assembly ranks.
+    """
+    config = knowledge_config()
+    cache = InMemoryContextCache()
+    store = FakeStore(hits=(store_hit("recipe", score=0.9),))
+    plugin = make_plugin(config, store=store, cache=cache)
+
+    plugin.apply(_recipe_turn("turn-1"))
+    entry = cache.get("webapp", "turn-1")
+    assert entry is not None
+    # The document the block was built from is remembered for scoring.
+    assert entry.injected_doc_ids
+    assert "recipe" in entry.injected_doc_ids[0]
+
+    # The same failure comes back: the injected knowledge did not hold.
+    plugin.apply(_recipe_turn("turn-2"))
+    stats = plugin._feedback_tracker.get_feedback(entry.injected_doc_ids[0])
+    assert stats["downvotes"] >= 1
+    assert stats["upvotes"] == 0
+
+
+def test_a_fix_mined_on_the_next_turn_is_credited():
+    """A green re-run mines a recipe; the previous injection is credited."""
+    config = knowledge_config()
+    cache = InMemoryContextCache()
+    store = FakeStore(hits=(store_hit("recipe", score=0.9),))
+    plugin = make_plugin(config, store=store, cache=cache)
+
+    plugin.apply(_recipe_turn("turn-1"))
+    entry = cache.get("webapp", "turn-1")
+    # The next turn of the same session fixes the failure: the miner sees
+    # a failure and its green fix, and credits what was injected.
+    plugin.apply(recipe_payload(turn_id="turn-2", root_turn_id="gen-2"))
+    stats = plugin._feedback_tracker.get_feedback(entry.injected_doc_ids[0])
+    assert stats["upvotes"] >= 1
+    assert stats["downvotes"] == 0
+
+
+def test_the_pending_injection_is_settled_within_one_turn():
+    """One turn is the whole window of attribution; nothing waits forever."""
+    config = knowledge_config()
+    store = FakeStore(hits=(store_hit("recipe", score=0.9),))
+    plugin = make_plugin(config, store=store)
+
+    plugin.apply(_recipe_turn("turn-1"))
+    doc = plugin._pending_feedback["sess-1"][0][0]
+    assert plugin._pending_feedback
+    # Turn two settles the verdict: the loop repeated, so the doc is blamed.
+    plugin.apply(_recipe_turn("turn-2"))
+    assert plugin._feedback_tracker.get_feedback(doc)["downvotes"] == 1
+    # Turn three re-injects the recipe; the loop still repeats, so the doc
+    # is blamed again — a continuing loop keeps sinking a debunked recipe.
+    plugin.apply(_recipe_turn("turn-3"))
+    assert plugin._pending_feedback["sess-1"][0][0] == doc
+    assert plugin._feedback_tracker.get_feedback(doc)["downvotes"] == 2
+
+
+def test_nothing_injected_scores_nothing():
+    """An empty block neither remembers nor scores a document."""
+    config = knowledge_config()
+    store = FakeStore(hits=())
+    plugin = make_plugin(config, store=store)
+    plugin.apply(_recipe_turn("turn-1"))
+    assert plugin._pending_feedback == {}
+    plugin.apply(_recipe_turn("turn-2"))
+    assert plugin._pending_feedback == {}
+    assert plugin._feedback_tracker.all_feedback() == {}
+
+
+# ------------------------------------------------------- tiered scoping ----
+
+class _ScopedStore:
+    """A store that only answers a search unscoped.
+
+    The narrow question (the directory of the touched files) comes back
+    empty; the widened question (the whole repository) holds the answer.
+    """
+
+    def __init__(self, hits=()):
+        self.hits = tuple(hits)
+        self.requests = []
+
+    def search(self, request, deadline=None):
+        self.requests.append(request)
+        if getattr(request, "relative_path_contains", ""):
+            return SearchResult(STATUS_OK, hits=())
+        return SearchResult(STATUS_OK, hits=self.hits)
+
+
+def test_an_empty_path_scoped_search_is_widened_to_the_repository():
+    """The narrow first look is free of false negatives, at one retry.
+
+    A mode that scopes its mined-knowledge search to the directory of the
+    touched files pays one unscoped retry when that scope comes back empty,
+    so a fix that lives two directories away is not lost to the scope.
+    """
+    config = knowledge_config()
+    store = _ScopedStore(hits=(store_hit("recipe", score=0.9),))
+    plugin = make_plugin(config, store=store)
+    # A failing turn that has already touched two files in one directory:
+    # that directory is the scope the mined-knowledge search is asked with.
+    from agentic_knowledge_support import _patch, base_items, _command
+
+    payload = codex_payload(
+        base_items()
+        + [
+            _command("c1", "e1"),
+            {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "id": "o1",
+                "output": (
+                    "Process exited with code 1\nOutput:\n"
+                    "FAILED tests/test_a.py::test_x"
+                ),
+            },
+            _patch("p1", "pe", paths=("src/auth/login.py", "src/auth/session.py")),
+        ],
+        mode="debug",
+        turn_id="turn-1",
+        root_turn_id="gen-1",
+    )
+    out = plugin.apply(payload)
+    scoped = [
+        r
+        for r in store.requests
+        if getattr(r, "relative_path_contains", "")
+    ]
+    unscoped = [
+        r for r in store.requests if not getattr(r, "relative_path_contains", "")
+    ]
+    # A scope was asked, it answered nothing, and the retry went out.
+    assert scoped, "expected a path-scoped search to be issued"
+    assert unscoped, "expected the unscoped retry to be issued"
+    # The retry is what found the answer.
+    assert out["routing"]["knowledge"]["injected"] >= 1
