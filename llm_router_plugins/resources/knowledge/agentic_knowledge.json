@@ -14,7 +14,7 @@
     "timeout_seconds": 3.0,
     "min_similarity": 0.35,
     "hybrid_search": true,
-    "rerank_results": false,
+    "rerank_results": true,
     "cache_ttl_seconds": 3600,
     "max_lookups_per_generation": 20
   },
@@ -85,6 +85,11 @@
             "guide",
             "contributing"
           ]
+        },
+        {
+          "category": "tool_recipe",
+          "weight": 0.6,
+          "max_items": 2
         }
       ],
       "escalation_model_name": "qwen/Qwen3.8-27B"
@@ -121,12 +126,27 @@
             "guide",
             "contributing"
           ]
+        },
+        {
+          "category": "task_solution",
+          "weight": 0.8,
+          "max_items": 2
+        },
+        {
+          "category": "tool_recipe",
+          "weight": 0.6,
+          "max_items": 2
         }
       ]
     },
     "plan": {
       "max_chars": 4000,
       "sources": [
+        {
+          "category": "task_solution",
+          "weight": 1.0,
+          "max_items": 2
+        },
         {
           "category": "playbook",
           "weight": 0.8,
@@ -264,12 +284,14 @@
       "enabled": true,
       "max_chunk_chars": 2000,
       "ttl_seconds": 1209600
-    }
+    },
+    "task_solutions_enabled": true,
+    "tool_recipes_enabled": true
   },
   "escalation": {
-    "enabled": false,
+    "enabled": true,
     "loop_threshold": 3,
-    "strong_recipe_score": 0.75
+    "strong_recipe_score": 0.6
   },
   "docs": {
     "enabled": true,
@@ -299,7 +321,8 @@
       "htmlcov",
       "site",
       ".idea",
-      ".vscode"
+      ".vscode",
+      ".plans"
     ],
     "max_files": 200,
     "max_file_bytes": 200000,

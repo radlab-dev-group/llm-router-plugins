@@ -86,7 +86,7 @@ SCALE_RRF = "rrf"
 #: :math:`[0, 1]` by the sigmoid when it is normalized.
 SCALE_RERANKER = "reranker"
 
-_MAX_HIT_CHARS = 1200
+_MAX_HIT_CHARS = 4000
 
 #: The engine's code for "collection not found or access denied"
 #: (``sse_api/engine/core/errors.py``, ``COLLECTION_ACCESS_DENIED``).  The
@@ -135,11 +135,13 @@ class SearchRequest:
     collection: str
     query: str
     categories: Tuple[str, ...] = ()
-    max_results: int = 6
+    max_results: int = 15
     thread_id: str = ""
     phases: Tuple[str, ...] = ()
     modes: Tuple[str, ...] = ()
     doc_types: Tuple[str, ...] = ()
+    keywords: Tuple[str, ...] = ()
+    relative_path_contains: str = ""
 
 
 @dataclass(frozen=True)
@@ -552,6 +554,10 @@ def _options(
     }
     if request.categories:
         options["categories"] = list(request.categories)
+    if getattr(request, "keywords", None):
+        options["keywords"] = list(request.keywords)
+    if getattr(request, "relative_path_contains", ""):
+        options["relative_path_contains"] = request.relative_path_contains
     # Exactly one metadata filter, whatever it filters on: the engine unions
     # several ``metadata_filters`` with each other even here
     # (``semantic.py`` calls ``__filter_documents_based_on_metadata`` with

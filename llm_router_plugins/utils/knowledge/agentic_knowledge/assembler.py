@@ -40,11 +40,14 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     KIND_PLAYBOOK,
     KIND_RECIPE,
     KIND_SESSION_ARCHIVE,
+    KIND_TASK_SOLUTION,
+    KIND_TOOL_RECIPE,
     DocumentMeta,
     parse_document_name,
     parse_document_text,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+    SCALE_RERANKER,
     SCALE_RRF,
     SearchResult,
     StoreHit,
@@ -83,7 +86,7 @@ DOC_STEM_BONUS = 0.12
 _MAX_DOC_BONUS = 0.24
 
 #: Most characters of a chunk quoted into the block.
-_QUOTE_CHARS = 420
+_QUOTE_CHARS = 1800
 
 #: Fewest characters of a recipe worth quoting when a block is squeezed; below
 #: this the entry is dropped rather than rendered as a truncated fragment.
@@ -97,9 +100,11 @@ _INTRO = (
 
 _SECTIONS: Tuple[Tuple[str, str], ...] = (
     (KIND_RECIPE, "## Verified fixes in this repo"),
+    (KIND_TASK_SOLUTION, "## Verified task solutions in this repo"),
     (KIND_PLAYBOOK, "## Verified procedures in this repo"),
+    (KIND_TOOL_RECIPE, "## Recommended tool commands in this repo"),
     (KIND_DEADEND, "## Known dead ends (do not repeat)"),
-    (KIND_SESSION_ARCHIVE, "## Exact context from before compaction"),
+    (KIND_SESSION_ARCHIVE, "## Previous Conversation Milestones"),
     (KIND_DOC, "## Conventions"),
 )
 
@@ -273,6 +278,7 @@ class ContextAssembler:
     signature_hash: str = ""
     touched_paths: Tuple[str, ...] = ()
     local_deadends: Tuple[str, ...] = ()
+    feedback: Optional[Dict[str, Dict[str, int]]] = None
 
     def assemble(
         self,
@@ -432,8 +438,18 @@ class ContextAssembler:
         # them; similarity scales already live there.
         if scale == SCALE_RRF and rank_ceiling > 0.0:
             base = min(1.0, base / rank_ceiling)
+        elif scale == SCALE_RERANKER:
+            normalized = hit.score_normalized
+            if normalized is not None and 0.0 <= float(normalized) <= 1.0:
+                base = float(normalized)
+            else:
+                try:
+                    base = 1.0 / (1.0 + math.exp(-float(base)))
+                except OverflowError:
+                    base = 0.0 if base < 0 else 1.0
         weight = weights.get(kind, min(weights.values()) if weights else 1.0)
-        vote = base * weight + self._bonus(meta, kind)
+        feedback_mult = self._feedback_multiplier(hit.document_name)
+        vote = (base * weight + self._bonus(meta, kind)) * feedback_mult
         return _Candidate(
             hit=KnowledgeHit(
                 category=kind,
@@ -557,6 +573,53 @@ class ContextAssembler:
             chosen = _force_one_recipe(candidates, max_chars - spent, opened)
         return chosen
 
+    def _feedback_multiplier(self, document_name: str) -> float:
+        """Weight multiplier based on recorded reinforcement feedback."""
+        if not self.feedback or not document_name:
+            return 1.0
+        stats = self.feedback.get(document_name)
+        if not stats:
+            return 1.0
+        up = stats.get("upvotes", 0)
+        down = stats.get("downvotes", 0)
+        score = (up + 2) / (up + down + 2)
+        return round(0.3 + 1.2 * score, 4)
+
+    def _anti_patterns_block(self, chosen: Sequence[_Candidate]) -> str:
+        """Render pre-emptive anti-pattern warning for dead ends on touched files."""
+        if not self.touched_paths:
+            return ""
+        touched = {p.rsplit("/", 1)[-1] for p in self.touched_paths if p}
+        matched = []
+        for cand in chosen:
+            if cand.hit.category == KIND_DEADEND:
+                paths = cand.hit.paths or ()
+                if any(
+                    p in self.touched_paths or p.rsplit("/", 1)[-1] in touched
+                    for p in paths
+                ):
+                    matched.append(cand)
+        if not matched and not self.local_deadends:
+            return ""
+        lines = [
+            "<anti_patterns_warning>",
+            "CRITICAL: Previous attempts in touched files failed:",
+        ]
+        for cand in matched[:3]:
+            path_str = (
+                f"In `{', '.join(cand.hit.paths[:2])}`: " if cand.hit.paths else ""
+            )
+            text = cand.hit.text
+            summary = text.splitlines()[0] if text else "Attempted fix failed"
+            if len(summary) > 160:
+                summary = summary[:160] + "…"
+            lines.append(f"- {path_str}{summary}")
+        for deadend in self.local_deadends[:2]:
+            lines.append(f"- This turn already tried: {deadend}")
+        lines.append("DO NOT repeat these approaches.")
+        lines.append("</anti_patterns_warning>")
+        return "\n".join(lines)
+
     # -------------------------------------------------------------- render --
     def _render(
         self,
@@ -579,6 +642,9 @@ class ContextAssembler:
                 _extra_line(line) for line in extra_lines
             )
         parts = [BLOCK_OPEN, _INTRO]
+        anti_patterns = self._anti_patterns_block(chosen)
+        if anti_patterns:
+            parts.append(anti_patterns)
         if doc_context:
             parts.extend((DOC_CONTEXT_TITLE, doc_context))
         for index, (_, title) in enumerate(_SECTIONS):
@@ -588,6 +654,72 @@ class ContextAssembler:
             parts.extend((title, *entries))
         parts.append(BLOCK_CLOSE)
         return "\n".join(parts)
+
+
+def _format_entry_content(text: str, category: str) -> str:
+    """Format recipe, playbook, deadend, or doc content with clean markdown."""
+    clean_text = (text or "").strip()
+    if not clean_text:
+        return ""
+    if category in (KIND_RECIPE, KIND_PLAYBOOK, KIND_DEADEND, KIND_TASK_SOLUTION):
+        for marker in (
+            "Diff that made it pass:",
+            "Steps that worked:",
+            "Solution diff:",
+            "Change that did not fix it:",
+        ):
+            if marker in clean_text:
+                parts = clean_text.split(marker, 1)
+                prefix = parts[0].strip()
+                code_part = parts[1].strip()
+                if code_part and "```" not in code_part:
+                    code_part = f"```diff\n{code_part}\n```"
+                return f"{prefix}\n{marker}\n{code_part}".strip()
+    return clean_text
+
+
+def _format_archive_milestones(text: str) -> str:
+    """Extract decisions, environment context, and milestones from an archive."""
+    lines = (text or "").splitlines()
+    milestones = []
+    env_blocks = []
+    in_env = False
+    for line in lines:
+        stripped = line.strip()
+        if "environment" in stripped.lower() or "context" in stripped.lower():
+            in_env = True
+        if in_env:
+            env_blocks.append(stripped)
+            if len(env_blocks) > 5:
+                in_env = False
+        markers = ("milestone", "decision", "goal", "plan:", "summary:")
+        if any(marker in stripped.lower() for marker in markers):
+            milestones.append(stripped)
+    if milestones or env_blocks:
+        parts = []
+        if env_blocks:
+            parts.append("Environment Context: " + " ".join(env_blocks[:4]))
+        if milestones:
+            listed = "\n".join(f"- {m}" for m in milestones[:5])
+            parts.append(f"Key Milestones:\n{listed}")
+        return "\n".join(parts)
+    return text
+
+
+def _truncate_with_code_blocks(text: str, limit: int) -> str:
+    """Truncate text to limit, preserving markdown code block syntax integrity."""
+    if len(text) <= limit:
+        return text
+    truncated = text[:limit].rstrip() + "…"
+    fences = [m.start() for m in re.finditer(r"```", truncated)]
+    if len(fences) % 2 != 0:
+        close_fence = "\n```"
+        if len(truncated) + len(close_fence) <= limit:
+            truncated += close_fence
+        else:
+            avail = max(0, limit - len(close_fence) - 1)
+            truncated = text[:avail].rstrip() + "…" + close_fence
+    return truncated
 
 
 def _entry(
@@ -622,16 +754,18 @@ def _entry(
         if hit.paths:
             citation.append(", ".join(hit.paths[:4]))
     head = f"- [{' · '.join(part for part in citation if part)}] "
-    text = hit.text.replace("\n", " ").strip()
+    text = _format_entry_content(hit.text, hit.category)
+    if hit.category == KIND_SESSION_ARCHIVE:
+        text = _format_archive_milestones(text)
     if len(text) > _QUOTE_CHARS:
-        text = text[:_QUOTE_CHARS].rstrip() + "…"
+        text = _truncate_with_code_blocks(text, _QUOTE_CHARS)
     pointer = _documentation_pointer(hit, doc_files)
     ceiling = candidate.render_limit if limit is None else limit
     if 0 < ceiling < len(head) + len(text) + len(pointer):
         room = ceiling - len(head) - len(pointer) - 1
         if room < _MIN_QUOTE_CHARS:
             return ""
-        text = text[:room].rstrip() + "…"
+        text = _truncate_with_code_blocks(text, room)
     return head + text + pointer
 
 
@@ -904,9 +1038,14 @@ def _deduplicated(lines: Iterable[str]) -> Tuple[str, ...]:
 
 
 def _clean(body: str) -> str:
-    """Strip the noise a quoted chunk does not need."""
-    text = re.sub(r"\s+", " ", (body or "").strip())
-    return text
+    """Clean the noise of a quoted chunk while preserving line and code structure."""
+    if not body:
+        return ""
+    text = body.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.rstrip() for line in text.split("\n")]
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def _timestamp(date: Optional[datetime.date]) -> Optional[float]:

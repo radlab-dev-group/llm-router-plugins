@@ -475,3 +475,90 @@ def test_the_documentation_request_carries_no_thread_or_phase():
     assert request.thread_id == ""
     assert request.phases == ()
     assert request.modes == ()
+
+
+def test_keywords_extract_the_exception_and_the_file_stem():
+    base = builder()
+    turn = turn_for(mode="debug", failures=2)
+    b = QueryBuilder(
+        collection_namer=base.collection_namer,
+        min_similarity=base.min_similarity,
+        signature="ConnectionTimeoutError: pool exhausted at src/db/pool.py:42",
+        test_command="pytest tests/test_db.py",
+    )
+    keywords = b.keywords_for(turn)
+    assert "ConnectionTimeoutError" in keywords
+    assert "test_db" in keywords
+    # Generic words that carry no identity stay out of the BM25 leg.
+    assert "error" not in keywords
+    assert "the" not in keywords
+
+
+def test_keywords_are_bounded_for_the_engine():
+    base = builder()
+    turn = turn_for(mode="debug", failures=2)
+    b = QueryBuilder(
+        collection_namer=base.collection_namer,
+        min_similarity=base.min_similarity,
+        signature=" ".join(f"Symbol{index}Value" for index in range(60)),
+    )
+    assert len(b.keywords_for(turn)) <= 15
+
+
+def test_path_scope_is_the_common_directory_of_the_touched_paths():
+    base = builder()
+    turn = turn_for(mode="implement")
+    turn = CodexAgentAdapter().parse(
+        codex_payload(
+            [
+                {
+                    "type": "function_call",
+                    "name": "apply_patch",
+                    "call_id": "p1",
+                    "id": "pe",
+                    "arguments": (
+                        '{"patch": "*** Begin Patch\n*** Update File: '
+                        'src/auth/login.py\n*** End Patch"}'
+                    ),
+                },
+                {
+                    "type": "function_call",
+                    "name": "apply_patch",
+                    "call_id": "p2",
+                    "id": "pf",
+                    "arguments": (
+                        '{"patch": "*** Begin Patch\n*** Update File: '
+                        'src/auth/session.py\n*** End Patch"}'
+                    ),
+                },
+            ]
+        )
+    )
+    assert base.path_scope_for(turn) == "src/auth"
+    # A single file scopes to its own directory; a path with no directory
+    # scopes to nothing.
+    solo = CodexAgentAdapter().parse(
+        codex_payload(
+            [
+                {
+                    "type": "function_call",
+                    "name": "apply_patch",
+                    "call_id": "p3",
+                    "id": "pg",
+                    "arguments": (
+                        '{"patch": "*** Begin Patch\n*** Update File: src/a.py'
+                        '\n*** End Patch"}'
+                    ),
+                }
+            ]
+        )
+    )
+    assert base.path_scope_for(solo) == "src"
+    bare = CodexAgentAdapter().parse(codex_payload(base_items_for_bare()))
+    assert base.path_scope_for(bare) == ""
+
+
+def base_items_for_bare():
+    from agentic_knowledge_support import base_items
+
+    return base_items()
