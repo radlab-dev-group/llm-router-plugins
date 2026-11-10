@@ -23,6 +23,22 @@ release tagged as `v<version>`.
 | 0.0.2 | **Added:** PII masking plugin, dynamic pseudonym generation with de-anonymization in `FastMasker`, LangChain RAG plugin with CLI, `SojkaGuardPlugin`, lint/format/type/security configuration. **Changed:** `mask()` returns `(masked_text, mappings)`; `numpy` loaded only when LangChain RAG is enabled. |
 | 0.0.1 | **Added:** `fast_masker` plugin (IP, KRS, JWT, NRB, NIP, URL, SSN and other rules), packaging (`setup.py`) with the initial `.version`, License section in the README. |
 
+## Unreleased
+
+### Added
+- **`agentic_knowledge` now verifies fixes beyond the formal test command.** A green run of a compiler, linter, type checker or a shell verification script closes an episode the way a green test does, and the recipe records how it was verified (`verification_type`: `unit_test`, `compiler`, `linter`, `custom_script`). The routing phase layer reports such a run as mode-less `command` evidence, so it verifies for the knowledge miner without ever naming a phase for the router.
+- **Two new mined knowledge kinds.** `task_solution` — the end-to-end sequence of files, commands and diff behind a successfully verified task — and `tool_recipe` — a successful, non-trivial tool command worth remembering (e.g. `cargo build --release`). Both are opt-in on the write path (`write.task_solutions_enabled`, `write.tool_recipes_enabled`, overridable from the environment) and are read back in the modes that can use them: `plan` reads `task_solution` first, `implement` and `test` read `tool_recipe`.
+- **A reinforcement loop over injected knowledge.** The documents a request was shown are remembered per session; the next turn of the session either mined a fix (the guidance held — an upvote) or repeated the very same failure (it did not — a downvote). The verdict feeds the ranking weight of what the next assembly serves, so a debunked recipe sinks and a proven one rises. Votes persist in Redis next to the rest of the plugin state and fail open to memory.
+- **The cross-encoder reranker is on by default** for the knowledge read, and the escalation threshold ships on the scale the reranker produces (`strong_recipe_score` `0.6`). An engine without a bound reranker switches it back off in the policy.
+- **Adaptive model escalation is on by default** in the shipped policy, so a loop with no known fix is the one thing a model switch reacts to.
+- **Tiered path scoping.** A mined-knowledge search scoped to the directory of the touched files pays one unscoped retry when the narrow scope comes back empty, so a fix two directories away is not lost to the scope.
+
+### Changed
+- **Injected knowledge keeps its code readable.** The 420-character, newline-flattened quote is gone: an entry keeps its diff as a fenced ```diff block (same for `task_solution` and `playbook`), the quote ceiling rises to 1800 characters, and truncation never leaves an open code fence.
+- **The session archive reads as a timeline.** Pre-compaction fragments are presented as `Previous Conversation Milestones` — the environment context and the key decisions — instead of raw retrieved chunks.
+- **Dead ends on touched files become a pre-emptive warning.** Before the agent repeats a known mistake, the block carries an `<anti_patterns_warning>` naming the approach that failed and the file it failed in.
+- **`.plans` is excluded from the documentation scan**, so an operator's planning notes are not indexed as the repository's conventions.
+
 ## [0.1.9] - 2026-11-10
 
 ### Fixed 
