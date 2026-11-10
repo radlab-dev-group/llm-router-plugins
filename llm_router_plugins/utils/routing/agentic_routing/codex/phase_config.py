@@ -12,6 +12,7 @@ OPTIONAL_FIELDS = frozenset(
         "neutral_filters",
         "announcement_followup_max_chars",
         "neutral_executables",
+        "verify_executables",
         "implement_write_patterns",
         "activity_description_limit",
         "evidence_window",
@@ -57,6 +58,11 @@ class CodexPhaseConfig:
     neutral_filters: Tuple[Pattern[str], ...] = ()
     announcement_followup_max_chars: int = 0
     neutral_executables: Tuple[Pattern[str], ...] = ()
+    #: Executables a green run of them verifies work without naming a phase:
+    #: compilers, linters, type checkers, verification scripts.  They become
+    #: command evidence with an empty mode, so they count for the knowledge
+    #: miner's verification rule and for no routing decision.
+    verify_executables: Tuple[Pattern[str], ...] = ()
     implement_write_patterns: Tuple[Pattern[str], ...] = ()
     activity_description_limit: int = 6
     evidence_window: int = 1
@@ -225,6 +231,12 @@ class CodexPhaseConfig:
                 pattern(value, "neutral_executables")
                 for value in strings(
                     data.get("neutral_executables", []), "neutral_executables"
+                )
+            ),
+            verify_executables=tuple(
+                pattern(value, "verify_executables")
+                for value in strings(
+                    data.get("verify_executables", []), "verify_executables"
                 )
             ),
             implement_write_patterns=tuple(

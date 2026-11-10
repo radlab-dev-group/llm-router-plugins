@@ -52,6 +52,12 @@ KIND_DEADEND = "deadend"
 #: preceded it; the record of the steps that are known to work here.
 KIND_PLAYBOOK = "playbook"
 
+#: A task-level solution: end-to-end task completion with diff and modified modules.
+KIND_TASK_SOLUTION = "task_solution"
+
+#: A verified non-trivial tool or workflow command that succeeded.
+KIND_TOOL_RECIPE = "tool_recipe"
+
 #: A fragment of a conversation window archived around compaction.
 KIND_SESSION_ARCHIVE = "session_archive"
 
@@ -63,6 +69,8 @@ KNOWLEDGE_KINDS: Tuple[str, ...] = (
     KIND_RECIPE,
     KIND_DEADEND,
     KIND_PLAYBOOK,
+    KIND_TASK_SOLUTION,
+    KIND_TOOL_RECIPE,
     KIND_SESSION_ARCHIVE,
 )
 
@@ -72,7 +80,13 @@ DOCUMENT_KINDS: Tuple[str, ...] = KNOWLEDGE_KINDS + (KIND_DOC,)
 #: Kinds the miner produces out of an episode — an archive is written on a
 #: compaction, not out of work, and documentation is scanned, not mined.  A
 #: scope with none of these has nothing for a mined-knowledge search to find.
-MINED_KINDS: Tuple[str, ...] = (KIND_RECIPE, KIND_PLAYBOOK, KIND_DEADEND)
+MINED_KINDS: Tuple[str, ...] = (
+    KIND_RECIPE,
+    KIND_PLAYBOOK,
+    KIND_DEADEND,
+    KIND_TASK_SOLUTION,
+    KIND_TOOL_RECIPE,
+)
 
 #: Tag of the header line embedded in the indexed text.
 HEADER_TAG = "agentic-kb"
@@ -163,6 +177,9 @@ class DocumentMeta:
     phase: str = ""
     doc_type: str = ""
     heading: str = ""
+    verification_type: str = ""
+    task_summary: str = ""
+    modified_modules: Tuple[str, ...] = ()
 
 
 def _attribute(key: str, value: str) -> str:
@@ -190,6 +207,9 @@ def build_document_text(
     source: str = "",
     doc_type: str = "",
     heading: str = "",
+    verification_type: str = "",
+    task_summary: str = "",
+    modified_modules: Sequence[str] = (),
 ) -> str:
     """
     Return the text to index: one header line followed by *body*.
@@ -267,6 +287,12 @@ def build_document_text(
         fields.append(_attribute("test_command", test_command))
     if attempts:
         fields.append(_attribute("attempts", str(attempts)))
+    if verification_type:
+        fields.append(_attribute("ver_type", verification_type))
+    if task_summary:
+        fields.append(_attribute("task_summary", task_summary))
+    if modified_modules:
+        fields.append(_attribute("modified_modules", ",".join(modified_modules)))
     header = f"<{HEADER_TAG} {' '.join(fields)}/>"
     return f"{header}\n{(body or '').strip()}\n"
 
@@ -343,9 +369,17 @@ def _meta_arguments(fields: dict) -> dict:
         ("source", "src"),
         ("doc_type", "doc_type"),
         ("heading", "heading"),
+        ("verification_type", "ver_type"),
+        ("task_summary", "task_summary"),
     ):
         if fields.get(source):
             arguments[target] = fields[source]
+    if fields.get("verification_type"):
+        arguments["verification_type"] = fields["verification_type"]
+    if fields.get("modified_modules"):
+        arguments["modified_modules"] = tuple(
+            mod for mod in fields["modified_modules"].split(",") if mod
+        )
     if fields.get("paths"):
         arguments["paths"] = tuple(
             path for path in fields["paths"].split(",") if path

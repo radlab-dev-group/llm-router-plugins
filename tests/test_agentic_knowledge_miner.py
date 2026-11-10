@@ -41,9 +41,15 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     KIND_PLAYBOOK,
     KIND_RECIPE,
     KIND_SESSION_ARCHIVE,
+    KIND_TASK_SOLUTION,
+    KIND_TOOL_RECIPE,
     parse_document_text,
 )
-from llm_router_plugins.utils.knowledge.agentic_knowledge.miner import EpisodeMiner
+from llm_router_plugins.utils.knowledge.agentic_knowledge.miner import (
+    EpisodeMiner,
+    _detect_verification_type,
+    _is_nontrivial_tool_command,
+)
 
 
 def mine(payload):
@@ -577,3 +583,179 @@ def test_an_envelope_still_writes_a_recipe_alongside():
     result = mine(codex_payload(recipe_items()))
     assert [event.kind for event in result.events] == [KIND_RECIPE]
     assert "edited_by" not in result.events[0].metadata
+
+
+# ------------------------------------------------------------ verification --
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("pytest tests/test_a.py", "unit_test"),
+        ("npx jest --ci", "unit_test"),
+        ("go test ./pkg/...", "unit_test"),
+        ("tsc --noEmit", "compiler"),
+        ("cargo check", "compiler"),
+        ("gcc -o out main.c", "compiler"),
+        ("ruff check src", "linter"),
+        ("mypy .", "linter"),
+        ("eslint --fix src", "linter"),
+        ("python verify.py", "custom_script"),
+        ("bash ./deploy.sh", "custom_script"),
+        ("curl -sf http://localhost:8000/health", "custom_script"),
+        ("./scripts/verify.sh", "custom_script"),
+    ],
+)
+def test_verification_type_is_recognised(command, expected):
+    assert _detect_verification_type(command) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["", "   ", "ls -la", "cd src", "echo done", "cat src/a.py"],
+)
+def test_a_command_that_is_no_verification_is_unrecognised(command):
+    """An unknown command is not a test wearing another name."""
+    assert _detect_verification_type(command) == ""
+
+
+def test_a_successful_verification_counts_beyond_the_test_mode():
+    """A green compiler, linter or test run verifies; an unknown command does not.
+
+    The old rule credited only a green run of the formal test command, so a fix
+    proven by ``tsc`` or ``ruff`` was lost.  A green run of any recognised
+    verification closes the episode; a green run of an unrecognised command —
+    the same ``command`` evidence shape, an empty mode and all — still does not.
+    """
+    from dataclasses import replace
+
+    from llm_router_plugins.utils.routing.agentic_routing.codex.phase import (
+        EVIDENCE_COMMAND,
+        EVIDENCE_PATCH,
+        PhaseEvidence,
+    )
+
+    miner = EpisodeMiner()
+    # The turn supplies the command lines the verifier reads back by call id.
+    turn = CodexAgentAdapter().parse(
+        codex_payload(
+            base_items()
+            + [
+                _command("build", "eb", "tsc --noEmit"),
+                _command("check", "ec", "ruff check src"),
+                _command("list", "el", "ls -la"),
+            ]
+        )
+    )
+
+    def green(call_id: str) -> PhaseEvidence:
+        return PhaseEvidence(
+            mode="",
+            kind=EVIDENCE_COMMAND,
+            reason="verification command",
+            call_id=call_id,
+            completed=True,
+            succeeded=True,
+        )
+
+    assert miner._is_successful_verification(green("build"), turn) is True
+    assert miner._is_successful_verification(green("check"), turn) is True
+    # A green run of a command that is no verification does not close anything.
+    assert miner._is_successful_verification(green("list"), turn) is False
+    # The formal test mode verifies whatever its command line says.
+    test_green = PhaseEvidence(
+        mode="test",
+        kind=EVIDENCE_COMMAND,
+        reason="pytest",
+        call_id="build",
+        completed=True,
+        succeeded=True,
+    )
+    assert miner._is_successful_verification(test_green, turn) is True
+    # Not succeeded, or not a command at all, is never a verification.
+    assert miner._is_successful_verification(
+        replace(test_green, succeeded=False), turn
+    ) is False
+    assert miner._is_successful_verification(
+        replace(test_green, kind=EVIDENCE_PATCH), turn
+    ) is False
+
+
+# ------------------------------------------------- new knowledge kinds ------
+
+def test_task_solution_is_mined_when_enabled_and_the_task_verified():
+    """An enabled miner keeps the whole task, not only the one fix."""
+    miner = EpisodeMiner(task_solutions_enabled=True)
+    result = miner.mine(CodexAgentAdapter().parse(codex_payload(recipe_items())))
+    kinds = [event.kind for event in result.events]
+    assert KIND_RECIPE in kinds
+    task = next(
+        event for event in result.events if event.kind == KIND_TASK_SOLUTION
+    )
+    meta, body = parse_document_text(task.text)
+    assert meta.kind == KIND_TASK_SOLUTION
+    assert "Solution diff:" in body
+    assert meta.modified_modules == ("src/export.py",)
+
+
+def test_task_solution_is_off_by_default_and_needs_a_verified_task():
+    """The extra document is opt-in, and an unverified task stays unproven."""
+    result = EpisodeMiner().mine(
+        CodexAgentAdapter().parse(codex_payload(recipe_items()))
+    )
+    assert all(event.kind != KIND_TASK_SOLUTION for event in result.events)
+
+    miner = EpisodeMiner(task_solutions_enabled=True)
+    # A dead end: the failure never went green, so there is no solution yet.
+    result = miner.mine(CodexAgentAdapter().parse(codex_payload(deadend_items())))
+    assert all(event.kind != KIND_TASK_SOLUTION for event in result.events)
+
+
+def _tool_recipe_commands(events):
+    import re
+
+    commands = set()
+    for event in events:
+        match = re.search(r"Tool command: (.+)", event.text)
+        if match:
+            commands.add(match.group(1).strip())
+    return commands
+
+
+def test_tool_recipe_is_mined_for_nontrivial_commands_when_enabled():
+    miner = EpisodeMiner(tool_recipes_enabled=True)
+    items = base_items() + [
+        _command("c1", "e1", "cargo build --release"),
+        _command_output("c1", "o1", "Compiling", code=0),
+        _command("c2", "e2", "pytest"),
+        _command_output("c2", "o2", "1 passed", code=0),
+        _command("c3", "e3", "ls -la"),
+        _command_output("c3", "o3", "total 0", code=0),
+    ]
+    result = miner.mine(CodexAgentAdapter().parse(codex_payload(items)))
+    recipes = [e for e in result.events if e.kind == KIND_TOOL_RECIPE]
+    commands = _tool_recipe_commands(recipes)
+    # A non-trivial verified command is kept.
+    assert "cargo build --release" in commands
+    # A bare test command and a shell listing are not recipes on their own.
+    assert "pytest" not in commands
+    assert "ls -la" not in commands
+
+
+def test_tool_recipes_are_off_by_default():
+    miner = EpisodeMiner()
+    items = base_items() + [
+        _command("c1", "e1", "cargo build --release"),
+        _command_output("c1", "o1", "Compiling", code=0),
+    ]
+    result = miner.mine(CodexAgentAdapter().parse(codex_payload(items)))
+    assert all(event.kind != KIND_TOOL_RECIPE for event in result.events)
+
+
+def test_nontrivial_tool_command_recognition():
+    assert _is_nontrivial_tool_command("docker compose run --rm web pytest")
+    assert _is_nontrivial_tool_command("cargo build --release")
+    assert _is_nontrivial_tool_command("pytest -m 'not integration'")
+    # Plain shell noise is not a tool recipe.
+    assert not _is_nontrivial_tool_command("ls -la")
+    assert not _is_nontrivial_tool_command("echo hi")
+    assert not _is_nontrivial_tool_command("sleep 5")
