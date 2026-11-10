@@ -80,8 +80,6 @@ __all__ = ["EpisodeMiner", "MiningResult"]
 #: Test command of a recipe has to have settled successfully.
 _RECIPE_MIN_PATCHES = 1
 
-_WINDOW_CHUNK_RE = re.compile(r"\n(?=\[[a-z_]+\]\n)")
-
 #: How pytest is launched as a module: the ``-m`` of an invocation does
 #: not narrow anything, and must not be read as the ``-m`` that selects markers.
 _MODULE_LAUNCHER_RE = re.compile(
@@ -194,7 +192,7 @@ class EpisodeMiner:
     archive_enabled : bool
         Whether compaction windows are archived at all.
     archive_max_chunk_chars : int
-        Ceiling of one archived fragment.
+        Legacy parameter retained for compatibility; windows are now indexed whole.
     archive_ttl_seconds : int
         Retention of the archive, recorded for the worker.
     test_mode : str
@@ -665,53 +663,48 @@ class EpisodeMiner:
 
     # ------------------------------------------------------------ archive ---
     def _archive(self, turn: AgentTurn) -> Tuple[KnowledgeEvent, ...]:
-        """Split a compaction window into searchable fragments."""
+        """Archive a compaction window as a full document for indexing."""
         if not self._archive_enabled or not turn.window_text.strip():
             return ()
-        chunks = _split_window(turn.window_text, self._archive_max_chunk_chars)
-        events = []
-        for position, (role, text) in enumerate(chunks):
-            metadata = {
-                "thread_id": turn.thread_id,
-                "window_id": turn.window_id,
-                "position": position,
-                "fragment_kind": role,
-                "phase": turn.mode,
-                "ttl_seconds": self._archive_ttl_seconds,
-            }
-            body = build_document_text(
-                KIND_SESSION_ARCHIVE,
-                text,
-                date=_today(),
-                thread_id=turn.thread_id,
-                window_id=turn.window_id,
-                position=position,
+        text = turn.window_text.strip()
+        metadata = {
+            "thread_id": turn.thread_id,
+            "window_id": turn.window_id,
+            "position": 0,
+            "phase": turn.mode,
+            "ttl_seconds": self._archive_ttl_seconds,
+        }
+        body = build_document_text(
+            KIND_SESSION_ARCHIVE,
+            text,
+            date=_today(),
+            thread_id=turn.thread_id,
+            window_id=turn.window_id,
+            position=0,
+            agent=turn.agent,
+            mode=turn.mode,
+            phase=turn.mode,
+        )
+        return (
+            KnowledgeEvent(
+                kind=KIND_SESSION_ARCHIVE,
+                fingerprint=fingerprint(
+                    "session_archive",
+                    turn.thread_id,
+                    turn.window_id,
+                    text[:200],
+                ),
+                scope=turn.scope,
                 agent=turn.agent,
                 mode=turn.mode,
-                phase=turn.mode,
-            )
-            events.append(
-                KnowledgeEvent(
-                    kind=KIND_SESSION_ARCHIVE,
-                    fingerprint=fingerprint(
-                        "session_archive",
-                        turn.thread_id,
-                        turn.window_id,
-                        str(position),
-                        text[:200],
-                    ),
-                    scope=turn.scope,
-                    agent=turn.agent,
-                    mode=turn.mode,
-                    model=turn.model,
-                    thread_id=turn.thread_id,
-                    generation=turn.cache_generation,
-                    created_at=_now(),
-                    text=body,
-                    metadata=metadata,
-                )
-            )
-        return tuple(events)
+                model=turn.model,
+                thread_id=turn.thread_id,
+                generation=turn.cache_generation,
+                created_at=_now(),
+                text=body,
+                metadata=metadata,
+            ),
+        )
 
     # ------------------------------------------------------------- helpers --
     def _event(
@@ -1038,34 +1031,6 @@ def _merge_paths(
             continue
         merged.append(path)
     return tuple(merged[:limit])
-
-
-def _split_window(text: str, max_chars: int) -> Tuple[Tuple[str, str], ...]:
-    """Cut a serialized window into fragments along message boundaries."""
-    blocks = [block for block in _WINDOW_CHUNK_RE.split(text) if block.strip()]
-    fragments: List[Tuple[str, str]] = []
-    for block in blocks:
-        role = _role_of(block)
-        for piece in _fit(block, max_chars):
-            fragments.append((role, piece))
-    return tuple(fragments)
-
-
-def _role_of(block: str) -> str:
-    """Read the ``[role]`` tag a serialized window block opens with."""
-    first = block.strip().splitlines()[0] if block.strip() else ""
-    match = re.match(r"^\[([a-z_]+)\]$", first.strip())
-    return match.group(1) if match else "message"
-
-
-def _fit(block: str, max_chars: int) -> List[str]:
-    """Split a block that is still longer than the chunk budget."""
-    if max_chars <= 0 or len(block) <= max_chars:
-        return [block.strip()]
-    return [
-        block[start : start + max_chars].strip()
-        for start in range(0, len(block), max_chars)
-    ]
 
 
 def _today() -> datetime.date:

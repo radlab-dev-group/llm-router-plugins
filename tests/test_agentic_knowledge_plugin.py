@@ -478,13 +478,17 @@ def test_compaction_is_written_and_never_read():
     )
 
 
-def test_compaction_archives_are_chunked_by_position():
+def test_compaction_archives_the_full_window():
     config = knowledge_config()
     publisher = FakePublisher()
     plugin = make_plugin(config, publisher=publisher)
     plugin.apply(compaction_payload())
-    positions = sorted(event.metadata["position"] for event in publisher.published)
-    assert positions == list(range(len(positions)))
+    assert len(publisher.published) == 1
+    event = publisher.published[0]
+    assert event.kind == "session_archive"
+    assert event.metadata["position"] == 0
+    assert "fix the failing export test" in event.text
+    assert "I refactored export.py and ran the tests." in event.text
 
 
 # ------------------------------------------------------------ escalation --

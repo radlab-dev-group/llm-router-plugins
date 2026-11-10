@@ -206,14 +206,16 @@ def test_repeated_history_yields_a_stable_fingerprint():
     ]
 
 
-def test_compaction_archives_the_window_in_chunks():
+def test_compaction_archives_the_full_window():
     result = mine(compaction_payload())
-    assert result.events
-    assert all(event.kind == KIND_SESSION_ARCHIVE for event in result.events)
-    positions = sorted(event.metadata["position"] for event in result.events)
-    assert positions == list(range(len(positions)))
-    # Every fragment names the thread so the archive can be filtered.
-    assert all(event.metadata["thread_id"] == "thread-1" for event in result.events)
+    assert len(result.events) == 1
+    event = result.events[0]
+    assert event.kind == KIND_SESSION_ARCHIVE
+    assert event.metadata["position"] == 0
+    assert event.metadata["thread_id"] == "thread-1"
+    # The full conversation window is kept whole, not chunked into fragments.
+    assert "fix the failing export test" in event.text
+    assert "I refactored export.py and ran the tests." in event.text
 
 
 def test_archive_can_be_disabled():
