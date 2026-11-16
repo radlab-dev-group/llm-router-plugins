@@ -25,6 +25,22 @@ release tagged as `v<version>`.
 
 ## [Unreleased]
 
+### Added
+- **`agentic_knowledge` measures itself, and says so on one line.** `KnowledgeMetrics` counts every read-path
+  request onto a per-scope, per-day Redis hash and derives the rates the knowledge layer is judged by:
+  `adoption_rate` (of the turns shown knowledge, how many went on to mine a verified fix),
+  `knowledge_help_rate` (the same verdict per document), `failure_turn_share` and `loop_turn_share` (meeting a
+  failure at all, and meeting it often enough to be stuck — the layer's own threshold decides which is which),
+  and `escalation_rate`. Written once per request after the payload is final, in one pipelined `HINCRBY`,
+  fire-and-forget: a Redis that cannot be written costs a metric and never a request. Without Redis the
+  counters still count, in process only. The new `llm-router-agentic-kb-stats` command reads them back as a
+  table or as JSON, for one repository or several, over a window of days; a rate with no measurement behind
+  it is `null`, never `0.0`, so a quiet day cannot be read as a bad one.
+- **The counterfactual replay scores retrieval, not just recall.** Each reading variant's report gains
+  `precision_at_3` and `mrr` against the document that eventually closed the failure, ranked where the search
+  returned it and at a document's first appearance. These are measured offline because a live request has no
+  ground truth — only the replay knows which document the agent went on to need.
+
 ### Changed
 - **`agentic_knowledge` reads the escalation threshold on the scale the recipe was scored on.**
   `escalation.strong_recipe_scores` states a bound per retrieval scale (`cosine`, `rrf`,

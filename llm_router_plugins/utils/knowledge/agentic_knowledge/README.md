@@ -565,6 +565,38 @@ flaky test looks exactly like a loop. The "already tried" list comes from the cu
 }
 ```
 
+### Scoreboard and KPIs
+
+The annotation describes one request. `KnowledgeMetrics` counts the same facts per repository and per day, on one
+Redis hash (`{key_prefix}:kpi:{scope}:{YYYYMMDD}`), so a period of history is a handful of reads rather than a log
+scrape. It is written once per request, after the payload is final, in a single pipelined `HINCRBY`, and it is
+fire-and-forget: a Redis that cannot be written costs a metric and never a request.
+
+| Counter | Counted when |
+| ------- | ------------ |
+| `turns` | the request reached the read path |
+| `injected_turns` | a non-empty block was injected |
+| `injected_docs` | per document injected |
+| `failure_turns` | the turn met a failure at all |
+| `loops` | the same failure repeated `loop_threshold` times — the layer's own definition of a loop, kept apart from a single stumble |
+| `escalations` | the loop reached a model switch |
+| `green_after_injection` | the turn mined a verified fix after being shown knowledge on the previous request |
+| `feedback_up` / `feedback_down` | the same verdict, per settled injection |
+| `read_failures` | a search came back unreachable |
+
+`derived()` turns those into the rates the layer is read by. Each is `null` when its denominator is zero — a day
+that injected nothing measured nothing, and printing `0.0` would let a quiet day read as a bad one.
+
+- **`adoption_rate`** = `green_after_injection / injected_turns` — of the turns shown knowledge, how many went on to
+  mine a verified fix.
+- **`knowledge_help_rate`** = `feedback_up / (feedback_up + feedback_down)` — the same judgment per document rather
+  than per turn.
+- **`failure_turn_share`**, **`loop_turn_share`** — how often a turn met a failure, and how often it met one enough
+  times to be stuck. The layer's own target is the second; the first is the weather.
+- **`escalation_rate`** = `escalations / turns` — how far the escalation policy actually reaches.
+
+A deployment without Redis still counts, in process only: the numbers describe a run, not a history.
+
 ---
 
 ## Configuration
@@ -790,6 +822,24 @@ An error saying `LLM_ROUTER_KNOWLEDGE_AGENTIC_REDIS_HOST is unset` occurs before
 and `--force` cannot fix it. Export the same `LLM_ROUTER_KNOWLEDGE_AGENTIC_REDIS_HOST` (and port, DB and credentials,
 if applicable) used by the worker in this shell before rerunning. `--config` selects the knowledge policy,
 not Redis connection settings.
+
+### Statistics command
+
+```bash
+llm-router-agentic-kb-stats --scope webapp                       # today, one repository
+llm-router-agentic-kb-stats --scope webapp --days 7              # a week, oldest day first
+llm-router-agentic-kb-stats --path /repo/webapp --json           # scope derived as the proxy derives it
+llm-router-agentic-kb-stats --scope webapp --scope other         # several repositories in one pass
+```
+
+Reads the scoreboard the proxy wrote and prints the counters and the rates
+([Scoreboard and KPIs](#scoreboard-and-kpis)). It reads and nothing else: no search, no writes, no policy change, so
+it can run against the same Redis from a machine that cannot reach the engine.
+
+`--config` selects the knowledge policy — and with it the `key_prefix` the counters live under — so a reader that
+pointed at a different policy would report an empty scoreboard as an unused knowledge base. Like the documentation
+command, it reads its Redis connection from **exported environment variables**, not from a `.env` in the scanned
+directory; with no Redis configured it refuses rather than printing zeros.
 
 ---
 
