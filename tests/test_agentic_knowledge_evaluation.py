@@ -217,3 +217,67 @@ def _session_order(report):
         if detail["session"] not in order:
             order.append(detail["session"])
     return order
+
+
+# ------------------------------------------------- ranking: precision and MRR
+
+
+def test_the_document_needed_at_the_top_scores_full_marks():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.evaluation import (
+        _ranking_quality,
+    )
+
+    assert _ranking_quality("t2", ["t2", "t1", "t3", "t9"]) == (1, 1.0)
+
+
+def test_the_third_place_is_still_inside_the_three_a_deployment_reads():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.evaluation import (
+        _ranking_quality,
+    )
+
+    in_three, reciprocal = _ranking_quality("t2", ["a", "b", "t2", "c"])
+    assert in_three == 1
+    assert round(reciprocal, 4) == 0.3333
+
+
+def test_fourth_is_outside_top_three_but_still_counted_in_mrr():
+    # Precision@3 is a ceiling, MRR is not: a fix at rank 4 was still found,
+    # and dropping it from both would make a search that misses by one look as
+    # good as one that never found it.
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.evaluation import (
+        _ranking_quality,
+    )
+
+    in_three, reciprocal = _ranking_quality("t2", ["a", "b", "c", "t2"])
+    assert in_three == 0
+    assert reciprocal == 0.25
+
+
+def test_a_fix_that_was_never_retrieved_scores_on_neither():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.evaluation import (
+        _ranking_quality,
+    )
+
+    assert _ranking_quality("missing", ["a", "b"]) == (0, 0.0)
+
+
+def test_a_document_retrieved_twice_is_ranked_at_its_first_appearance():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.evaluation import (
+        _ranking_quality,
+    )
+
+    in_three, reciprocal = _ranking_quality("t2", ["x", "t2", "y", "t2"])
+    assert in_three == 1
+    assert reciprocal == 0.5
+
+
+def test_the_report_carries_the_ranking_metrics_for_the_reading_variants():
+    report = report_with()
+    for variant in (VARIANT_READ, VARIANT_ESCALATE):
+        block = report["variants"][variant]
+        assert "precision_at_3" in block
+        assert "mrr" in block
+        # the shipped set is small and unambiguous: every applicable turn found
+        # its document, and found it first
+        assert block["precision_at_3"] == block["recipe_hit_rate"]
+        assert block["mrr"] >= block["precision_at_3"]

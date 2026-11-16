@@ -313,6 +313,13 @@ class ReplayEngine:
         saved_by = raw.get("saved_by")
         applicable = bool(saved_by)
         hit = bool(saved_by) and str(saved_by) in retrieved
+        # The rank is taken in the order the search returned the documents,
+        # which is the question the metric asks ("did retrieval surface it"),
+        # and on a document's first appearance, because a document retrieved
+        # twice was still found once.
+        in_top_3, reciprocal_rank = (
+            _ranking_quality(str(saved_by), retrieved) if applicable else (0, 0.0)
+        )
         for name in (VARIANT_READ, VARIANT_ESCALATE):
             tally = variants[name]
             tally.turns += 1
@@ -322,6 +329,8 @@ class ReplayEngine:
                 tally.turns_with_doc_context += 1
             if applicable:
                 tally.applicable += 1
+                tally.relevant_at_3 += in_top_3
+                tally.reciprocal_rank_sum += reciprocal_rank
                 if hit:
                     tally.hits += 1
                     tally.turns_saved += 1
@@ -366,6 +375,12 @@ class _VariantTally:
     #: injection are reported apart.
     retrieved_chars: int = 0
     turns_with_doc_context: int = 0
+    #: Ranking against the document that eventually closed the failure: the
+    #: plan's Precision@3 and MRR.  They are measured here rather than in
+    #: production because a live request has no ground truth — only the replay
+    #: knows which document the agent went on to need.
+    relevant_at_3: int = 0
+    reciprocal_rank_sum: float = 0.0
 
     def report(self) -> Dict[str, Any]:
         """The variant's metrics, rounded for a stable report."""
@@ -383,6 +398,12 @@ class _VariantTally:
             "injected_chars_per_turn": _ratio(self.injected_chars, self.turns),
             "retrieved_chars_per_turn": _ratio(self.retrieved_chars, self.turns),
             "turns_with_doc_context": self.turns_with_doc_context,
+            # Of the turns that had a document to find, how often the search
+            # put it in the first three, and how near the top it sat on
+            # average.  Both are over the applicable turns, so a turn with no
+            # fix to find dilutes neither.
+            "precision_at_3": _ratio(self.relevant_at_3, self.applicable),
+            "mrr": _ratio(self.reciprocal_rank_sum, self.applicable),
         }
 
 
@@ -631,7 +652,35 @@ def _overlap(query: frozenset, document: frozenset) -> float:
     return len(query & document) / float(len(query))
 
 
-def _ratio(numerator: int, denominator: int) -> float:
+def _rank_of(needle: str, retrieved: Sequence[str]) -> int:
+    """
+    The 1-based position of *needle* in *retrieved*, ``0`` when absent.
+
+    Duplicates collapse onto their first appearance: a document the search
+    returned twice was found at its earliest position, and counting the later
+    one would punish a retrieval for a redundancy that helped it.
+    """
+    for position, name in enumerate(retrieved, start=1):
+        if str(name) == needle:
+            return position
+    return 0
+
+
+def _ranking_quality(needle: str, retrieved: Sequence[str]) -> Tuple[int, float]:
+    """
+    ``(in_top_3, reciprocal_rank)`` of the document the turn needed.
+
+    Split out of the tally because this is the whole of the two metrics'
+    arithmetic, and it is the part worth pinning without depending on which
+    order a fake search happens to return its hits in.
+    """
+    rank = _rank_of(needle, retrieved)
+    if not rank:
+        return 0, 0.0
+    return (1 if rank <= 3 else 0), 1.0 / rank
+
+
+def _ratio(numerator: float, denominator: float) -> float:
     """A rounded ratio, ``0.0`` for an empty denominator."""
     if not denominator:
         return 0.0
