@@ -23,6 +23,21 @@ release tagged as `v<version>`.
 | 0.0.2 | **Added:** PII masking plugin, dynamic pseudonym generation with de-anonymization in `FastMasker`, LangChain RAG plugin with CLI, `SojkaGuardPlugin`, lint/format/type/security configuration. **Changed:** `mask()` returns `(masked_text, mappings)`; `numpy` loaded only when LangChain RAG is enabled. |
 | 0.0.1 | **Added:** `fast_masker` plugin (IP, KRS, JWT, NRB, NIP, URL, SSN and other rules), packaging (`setup.py`) with the initial `.version`, License section in the README. |
 
+## [Unreleased]
+
+### Changed
+- **`agentic_knowledge` reads the escalation threshold on the scale the recipe was scored on.**
+  `escalation.strong_recipe_scores` states a bound per retrieval scale (`cosine`, `rrf`,
+  `reranker`, or `""` for a hit whose scale the engine did not state); `escalation.strong_recipe_score`
+  stays as the fallback for a scale the table leaves unnamed, so a deployment that set only the float
+  keeps exactly the behaviour it set. A row may be `null` — "decide by identity, not by score" — which
+  is what the shipped policy now says for `reranker`, replacing the special case that was hard-coded
+  there: a squashed cross-encoder logit is not a relevance, and one number read on three scales was
+  three silent rules. `EscalationPolicy.strong_recipe_reason` asks
+  `AgenticKnowledgeConfig.threshold_for_scale(hit.score_scale)` per hit, and the start-up check names
+  the label a bound came from instead of assuming one scale for the whole deployment.
+  Overridable as JSON with `LLM_ROUTER_KNOWLEDGE_AGENTIC_STRONG_RECIPE_SCORES`.
+
 ## [0.1.9] - 2026-11-10
 
 ### Added

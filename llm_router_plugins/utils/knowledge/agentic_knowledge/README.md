@@ -506,15 +506,18 @@ not push a mode past its escalation threshold.
 
 Retrieval relevance (`best_recipe_score`) is **not** recipe reliability. To earn a trial, a recipe must actually
 be injected, match the current `signature_hash`, and declare a nonempty `test_command` — identity and
-verification, not similarity. On top of that, its score must meet `strong_recipe_score` (default `0.75`),
-except on the one scale where that number cannot be compared: with `read.rerank_results` on, a hit's score is a
-squashed cross-encoder logit, and the same `0.75` means something else there — measured against the reference
+verification, not similarity. On top of that, its score must meet the threshold **of the scale it was scored
+on**: `escalation.threshold_for_scale(scale)` reads `strong_recipe_scores[scale]` and falls back to
+`strong_recipe_score` for a scale the table does not name. A hit's scale is the engine's own
+`results.score_scale` — `reranker`, `rrf`, `cosine`, or `""` when the engine did not state one — so one number
+is never read on three meanings again. A row may be `null`, meaning "decide by identity, not by score", which
+is what the shipped policy does for `reranker`: with `read.rerank_results` on, a hit's score is a squashed
+cross-encoder logit and a cosine-tuned threshold cannot be compared with it — measured against the reference
 engine, a recipe carrying the very signature asked about scored `0.731` with the reranker on and `1.0` with it
-off. On that scale the identity and the verification command decide, the decision names it
-(`strong_recipe_identity`), and the config warns at start that the threshold is set for a scale the read no
-longer produces. A hit whose scale the engine did not state keeps the threshold. This is a minimum
-verification-provenance check, not a count of independent confirmations; legacy documents lacking these fields
-remain readable but cannot hold back escalation.
+off. Where identity decides, the decision names it (`strong_recipe_identity`). A bound the band in play cannot
+express warns at start, naming the label it came from. This is a minimum verification-provenance check, not a
+count of independent confirmations; legacy documents lacking these fields remain readable but cannot hold back
+escalation.
 
 The generation cache records the failure count at the first qualifying injection, even before the loop threshold.
 After the threshold is reached, a higher count means `recipe_did_not_resolve_loop` and permits escalation regardless
@@ -593,7 +596,8 @@ per repository, naming both numbers.
              "max_patch_chars": 4000,
              "archive": {"enabled": true, "max_chunk_chars": 2000,
                           "ttl_seconds": 1209600}},
-  "escalation": {"enabled": false, "loop_threshold": 3, "strong_recipe_score": 0.75},
+  "escalation": {"enabled": false, "loop_threshold": 3, "strong_recipe_score": 0.6,
+                  "strong_recipe_scores": {"reranker": null}},
   "docs": {"enabled": true, "auto_index": true,
             "patterns": ["*.md", "*.markdown", "*.mdx"],
             "excluded_dirs": ["node_modules", "dist", "build", "vendor"],
@@ -609,10 +613,11 @@ The retrieval legs of one search are `read.hybrid_search` and `read.rerank_resul
 switched by `…_HYBRID_SEARCH` and `…_RERANK_RESULTS`.  They also decide the scale every score comes
 back on — the engine's `results.score_scale`: a squashed cross-encoder logit with the reranker on,
 a Reciprocal Rank Fusion rank in a plain hybrid search, and a cosine similarity when the legs are
-off — so `escalation.strong_recipe_score` is a threshold on that scale: a reranker logit under
-`rerank_results: true`, a cosine similarity with the legs off, and — in the default hybrid
-search — a fused rank the assembler remaps onto `0…1` **within the result set that produced
-it**, the set's best hit being `1.0`.  The weight and the signature/path bonuses are then added
+off — so a threshold is a threshold *on one of those scales*, which is what
+`escalation.strong_recipe_scores` states per scale (`strong_recipe_score` remains the fallback for
+a scale the table leaves unnamed): a reranker logit under `rerank_results: true`, a cosine
+similarity with the legs off, and — in the default hybrid search — a fused rank the assembler
+remaps onto `0…1` **within the result set that produced it**, the set's best hit being `1.0`.  The weight and the signature/path bonuses are then added
 on that same scale, which is what keeps a bonus a *shift* and not an order of magnitude over the
 retrieval.  `min_similarity` stays where the engine applies it, on the vector leg before the
 fusing; the assembler does not re-apply it to the score it sees.  A threshold the scale cannot
@@ -704,7 +709,8 @@ All use the prefix `LLM_ROUTER_KNOWLEDGE_AGENTIC_`. Booleans accept `1/0`, `true
 | `…_DOCS_CONTEXT_MAX_CHARS`             | `700`            | ceiling of the map injected into a request                 |
 | `…_DOCS_CONTEXT_TTL_SECONDS`           | `86400`          | how long a scope's map survives without a refresh          |
 | `…_LOOP_THRESHOLD`                    | `3`              | repetitions of one signature that make a loop            |
-| `…_STRONG_RECIPE_SCORE`               | `0.75`           | a recipe this good keeps the routed model                |
+| `…_STRONG_RECIPE_SCORE`               | `0.6`            | a recipe this good keeps the routed model                |
+| `…_STRONG_RECIPE_SCORES`              | `{"reranker": null}` | per-scale bound; `null` ⇒ decide by identity, JSON over the shipped table |
 | `…_REDIS_HOST`                        | **empty**        | **empty ⇒ no writes, no cache**                          |
 | `…_REDIS_PORT` / `…_REDIS_DB` / `…_REDIS_PROTOCOL` | `6379` / `0` / `3` | Redis connection                           |
 | `…_REDIS_USERNAME` / `…_REDIS_PASSWORD`  | empty         | optional ACL / AUTH                                      |
