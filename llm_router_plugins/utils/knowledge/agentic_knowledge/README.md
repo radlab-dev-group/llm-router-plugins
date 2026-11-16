@@ -506,15 +506,18 @@ not push a mode past its escalation threshold.
 
 Retrieval relevance (`best_recipe_score`) is **not** recipe reliability. To earn a trial, a recipe must actually
 be injected, match the current `signature_hash`, and declare a nonempty `test_command` — identity and
-verification, not similarity. On top of that, its score must meet `strong_recipe_score` (default `0.75`),
-except on the one scale where that number cannot be compared: with `read.rerank_results` on, a hit's score is a
-squashed cross-encoder logit, and the same `0.75` means something else there — measured against the reference
+verification, not similarity. On top of that, its score must meet the threshold **of the scale it was scored
+on**: `escalation.threshold_for_scale(scale)` reads `strong_recipe_scores[scale]` and falls back to
+`strong_recipe_score` for a scale the table does not name. A hit's scale is the engine's own
+`results.score_scale` — `reranker`, `rrf`, `cosine`, or `""` when the engine did not state one — so one number
+is never read on three meanings again. A row may be `null`, meaning "decide by identity, not by score", which
+is what the shipped policy does for `reranker`: with `read.rerank_results` on, a hit's score is a squashed
+cross-encoder logit and a cosine-tuned threshold cannot be compared with it — measured against the reference
 engine, a recipe carrying the very signature asked about scored `0.731` with the reranker on and `1.0` with it
-off. On that scale the identity and the verification command decide, the decision names it
-(`strong_recipe_identity`), and the config warns at start that the threshold is set for a scale the read no
-longer produces. A hit whose scale the engine did not state keeps the threshold. This is a minimum
-verification-provenance check, not a count of independent confirmations; legacy documents lacking these fields
-remain readable but cannot hold back escalation.
+off. Where identity decides, the decision names it (`strong_recipe_identity`). A bound the band in play cannot
+express warns at start, naming the label it came from. This is a minimum verification-provenance check, not a
+count of independent confirmations; legacy documents lacking these fields remain readable but cannot hold back
+escalation.
 
 The generation cache records the failure count at the first qualifying injection, even before the loop threshold.
 After the threshold is reached, a higher count means `recipe_did_not_resolve_loop` and permits escalation regardless
@@ -562,6 +565,38 @@ flaky test looks exactly like a loop. The "already tried" list comes from the cu
 }
 ```
 
+### Scoreboard and KPIs
+
+The annotation describes one request. `KnowledgeMetrics` counts the same facts per repository and per day, on one
+Redis hash (`{key_prefix}:kpi:{scope}:{YYYYMMDD}`), so a period of history is a handful of reads rather than a log
+scrape. It is written once per request, after the payload is final, in a single pipelined `HINCRBY`, and it is
+fire-and-forget: a Redis that cannot be written costs a metric and never a request.
+
+| Counter | Counted when |
+| ------- | ------------ |
+| `turns` | the request reached the read path |
+| `injected_turns` | a non-empty block was injected |
+| `injected_docs` | per document injected |
+| `failure_turns` | the turn met a failure at all |
+| `loops` | the same failure repeated `loop_threshold` times — the layer's own definition of a loop, kept apart from a single stumble |
+| `escalations` | the loop reached a model switch |
+| `green_after_injection` | the turn mined a verified fix after being shown knowledge on the previous request |
+| `feedback_up` / `feedback_down` | the same verdict, per settled injection |
+| `read_failures` | a search came back unreachable |
+
+`derived()` turns those into the rates the layer is read by. Each is `null` when its denominator is zero — a day
+that injected nothing measured nothing, and printing `0.0` would let a quiet day read as a bad one.
+
+- **`adoption_rate`** = `green_after_injection / injected_turns` — of the turns shown knowledge, how many went on to
+  mine a verified fix.
+- **`knowledge_help_rate`** = `feedback_up / (feedback_up + feedback_down)` — the same judgment per document rather
+  than per turn.
+- **`failure_turn_share`**, **`loop_turn_share`** — how often a turn met a failure, and how often it met one enough
+  times to be stuck. The layer's own target is the second; the first is the weather.
+- **`escalation_rate`** = `escalations / turns` — how far the escalation policy actually reaches.
+
+A deployment without Redis still counts, in process only: the numbers describe a run, not a history.
+
 ---
 
 ## Configuration
@@ -593,7 +628,8 @@ per repository, naming both numbers.
              "max_patch_chars": 4000,
              "archive": {"enabled": true, "max_chunk_chars": 2000,
                           "ttl_seconds": 1209600}},
-  "escalation": {"enabled": false, "loop_threshold": 3, "strong_recipe_score": 0.75},
+  "escalation": {"enabled": false, "loop_threshold": 3, "strong_recipe_score": 0.6,
+                  "strong_recipe_scores": {"reranker": null}},
   "docs": {"enabled": true, "auto_index": true,
             "patterns": ["*.md", "*.markdown", "*.mdx"],
             "excluded_dirs": ["node_modules", "dist", "build", "vendor"],
@@ -609,10 +645,11 @@ The retrieval legs of one search are `read.hybrid_search` and `read.rerank_resul
 switched by `…_HYBRID_SEARCH` and `…_RERANK_RESULTS`.  They also decide the scale every score comes
 back on — the engine's `results.score_scale`: a squashed cross-encoder logit with the reranker on,
 a Reciprocal Rank Fusion rank in a plain hybrid search, and a cosine similarity when the legs are
-off — so `escalation.strong_recipe_score` is a threshold on that scale: a reranker logit under
-`rerank_results: true`, a cosine similarity with the legs off, and — in the default hybrid
-search — a fused rank the assembler remaps onto `0…1` **within the result set that produced
-it**, the set's best hit being `1.0`.  The weight and the signature/path bonuses are then added
+off — so a threshold is a threshold *on one of those scales*, which is what
+`escalation.strong_recipe_scores` states per scale (`strong_recipe_score` remains the fallback for
+a scale the table leaves unnamed): a reranker logit under `rerank_results: true`, a cosine
+similarity with the legs off, and — in the default hybrid search — a fused rank the assembler
+remaps onto `0…1` **within the result set that produced it**, the set's best hit being `1.0`.  The weight and the signature/path bonuses are then added
 on that same scale, which is what keeps a bonus a *shift* and not an order of magnitude over the
 retrieval.  `min_similarity` stays where the engine applies it, on the vector leg before the
 fusing; the assembler does not re-apply it to the score it sees.  A threshold the scale cannot
@@ -704,7 +741,8 @@ All use the prefix `LLM_ROUTER_KNOWLEDGE_AGENTIC_`. Booleans accept `1/0`, `true
 | `…_DOCS_CONTEXT_MAX_CHARS`             | `700`            | ceiling of the map injected into a request                 |
 | `…_DOCS_CONTEXT_TTL_SECONDS`           | `86400`          | how long a scope's map survives without a refresh          |
 | `…_LOOP_THRESHOLD`                    | `3`              | repetitions of one signature that make a loop            |
-| `…_STRONG_RECIPE_SCORE`               | `0.75`           | a recipe this good keeps the routed model                |
+| `…_STRONG_RECIPE_SCORE`               | `0.6`            | a recipe this good keeps the routed model                |
+| `…_STRONG_RECIPE_SCORES`              | `{"reranker": null}` | per-scale bound; `null` ⇒ decide by identity, JSON over the shipped table |
 | `…_REDIS_HOST`                        | **empty**        | **empty ⇒ no writes, no cache**                          |
 | `…_REDIS_PORT` / `…_REDIS_DB` / `…_REDIS_PROTOCOL` | `6379` / `0` / `3` | Redis connection                           |
 | `…_REDIS_USERNAME` / `…_REDIS_PASSWORD`  | empty         | optional ACL / AUTH                                      |
@@ -784,6 +822,24 @@ An error saying `LLM_ROUTER_KNOWLEDGE_AGENTIC_REDIS_HOST is unset` occurs before
 and `--force` cannot fix it. Export the same `LLM_ROUTER_KNOWLEDGE_AGENTIC_REDIS_HOST` (and port, DB and credentials,
 if applicable) used by the worker in this shell before rerunning. `--config` selects the knowledge policy,
 not Redis connection settings.
+
+### Statistics command
+
+```bash
+llm-router-agentic-kb-stats --scope webapp                       # today, one repository
+llm-router-agentic-kb-stats --scope webapp --days 7              # a week, oldest day first
+llm-router-agentic-kb-stats --path /repo/webapp --json           # scope derived as the proxy derives it
+llm-router-agentic-kb-stats --scope webapp --scope other         # several repositories in one pass
+```
+
+Reads the scoreboard the proxy wrote and prints the counters and the rates
+([Scoreboard and KPIs](#scoreboard-and-kpis)). It reads and nothing else: no search, no writes, no policy change, so
+it can run against the same Redis from a machine that cannot reach the engine.
+
+`--config` selects the knowledge policy — and with it the `key_prefix` the counters live under — so a reader that
+pointed at a different policy would report an empty scoreboard as an unused knowledge base. Like the documentation
+command, it reads its Redis connection from **exported environment variables**, not from a `.env` in the scanned
+directory; with no Redis configured it refuses rather than printing zeros.
 
 ---
 

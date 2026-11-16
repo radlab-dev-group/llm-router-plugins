@@ -41,6 +41,9 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.assembler import (
     ContextAssembler,
     KnowledgeContext,
 )
+from llm_router_plugins.utils.knowledge.agentic_knowledge.metrics import (
+    KnowledgeMetrics,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
     CachedContext,
     FeedbackTracker,
@@ -148,6 +151,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         cache: Optional[GenerationContextCache] = None,
         publisher: Optional[KnowledgeEventPublisher] = None,
         adapters: Optional[Tuple[AgentAdapter, ...]] = None,
+        metrics: Optional[KnowledgeMetrics] = None,
     ) -> None:
         """Resolve the policy and wire the collaborators; open no connection."""
         super().__init__(logger=logger)
@@ -162,6 +166,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._limiter: Optional[LookupLimiter] = None
         self._docs: Optional[DocsIndexer] = None
         self._feedback_tracker: Optional[FeedbackTracker] = None
+        self._metrics: Optional[KnowledgeMetrics] = metrics
         #: Per session: the knowledge documents injected on the previous
         #: request, and the failure signature the request was stuck on.
         self._pending_feedback: "OrderedDict[str, Tuple[Tuple[str, ...], str]]" = (
@@ -233,6 +238,16 @@ class AgenticKnowledgePlugin(PluginInterface):
             config=config, publisher=self._publisher, logger=self._logger
         )
         self._feedback_tracker = FeedbackTracker(key_prefix=config.key_prefix)
+        if self._metrics is None:
+            # Built on the same connection the cache and the publisher use, so
+            # a deployment without Redis still counts in-process: the numbers
+            # describe a run rather than a history, which is what a deployment
+            # without a place to keep history can honestly report.
+            self._metrics = KnowledgeMetrics(
+                connection=config.redis if config.redis.configured else None,
+                key_prefix=config.key_prefix,
+                logger=self._logger,
+            )
         if self._logger is not None:
             # One line per process, at a level an operator actually reads.  The
             # layer fails open everywhere, so without it a plugin that loaded
@@ -443,10 +458,49 @@ class AgenticKnowledgePlugin(PluginInterface):
                 recipe_trials.setdefault(mining.signature_hash, mining.loop_count)
             self._remember_context(turn, context, target, recipe_trials, config)
         self._remember_injected(turn, context, mining)
+        self._record_metrics(turn, context, decision)
         self._annotate(
             payload, adapter, turn, context, decision, publish, docs, mining
         )
         return payload
+
+    def _record_metrics(
+        self,
+        turn: AgentTurn,
+        context: KnowledgeContext,
+        decision: EscalationDecision,
+    ) -> None:
+        """
+        Count this request on its repository's scoreboard.
+
+        One call per request that reached the read, so the denominators of the
+        rates a deployment reads are requests rather than searches: the
+        question an operator asks is "of the turns we showed knowledge to, how
+        many got fixed", and a turn is the unit that question counts.
+
+        It runs after the payload is already final — a counter is not allowed
+        to be a reason a request is late or fails, so a recorder that raises is
+        swallowed here as well as inside the recorder itself.
+        """
+        if self._metrics is None or not turn.scope:
+            return
+        # A loop is what the layer itself calls one: the same failure repeated
+        # as many times as the threshold says.  Counting every turn that met a
+        # failure as a loop would report a single stumble as the thing the
+        # layer exists to end, so the two are counted apart.
+        loop_threshold = getattr(self._config, "loop_threshold", 1)
+        try:
+            self._metrics.record(
+                turn.scope,
+                turns=1,
+                injected_turns=1 if context.hits else 0,
+                injected_docs=len(context.hits),
+                failure_turns=1 if decision.loop_count > 0 else 0,
+                loops=1 if decision.loop_count >= loop_threshold else 0,
+                escalations=1 if decision.action == ACTION_ESCALATE else 0,
+            )
+        except Exception:  # a scoreboard is never a reason to fail a request
+            pass
 
     def _assemble(
         self,
@@ -510,6 +564,20 @@ class AgenticKnowledgePlugin(PluginInterface):
         )
         for result, _ in results:
             statuses.add(result.status)
+        if self._metrics is not None and turn.scope:
+            # The failures are counted here rather than where they are logged,
+            # because a search that returned nothing and a search that could
+            # not be reached are the same empty answer to the assembler and
+            # very different facts to an operator reading the scoreboard: this
+            # is the one place both are in hand, statuses and all.
+            unavailable = sum(
+                1 for result, _ in results if result.status == STATUS_UNAVAILABLE
+            )
+            if unavailable:
+                try:
+                    self._metrics.record(turn.scope, read_failures=unavailable)
+                except Exception:  # a scoreboard is never a reason to fail a read
+                    pass
         if skipped:
             # The reads the operator will otherwise conclude never happened.
             # Both numbers go in the line because the usual cause is not a
@@ -713,6 +781,20 @@ class AgenticKnowledgePlugin(PluginInterface):
             return
         for doc_name in doc_names:
             tracker.record_feedback(doc_name, success=resolved)
+        if self._metrics is not None and turn.scope:
+            # The turn's own verdict on what it was shown last request, counted
+            # once for the request rather than once per document: adoption is a
+            # property of a turn, the per-document tally the tracker keeps is a
+            # property of a document, and the two answer different questions.
+            try:
+                counts = {
+                    "feedback_up": 1 if resolved else 0,
+                    "feedback_down": 0 if resolved else 1,
+                    "green_after_injection": 1 if resolved else 0,
+                }
+                self._metrics.record(turn.scope, **counts)
+            except Exception:
+                pass
 
     def _remember_injected(
         self, turn: AgentTurn, context: KnowledgeContext, mining: Any

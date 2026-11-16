@@ -29,7 +29,6 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
     ModePolicy,
 )
-from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import SCALE_RERANKER
 
 __all__ = [
     "EscalationDecision",
@@ -240,23 +239,23 @@ class EscalationPolicy:
 
         Whether being *retrieved* is enough is a question about the scale the
         retrieval scored on, and the engine names that scale on every hit.
-        ``strong_recipe_score`` is a relevance threshold, and it means
-        something on a cosine similarity (an absolute relevance) and on a
-        fused rank the assembler has already remapped onto ``0…1`` (how near
-        the top of its set a recipe sits).  It means nothing on a cross-encoder
-        logit squashed onto ``[0, 1]``: measured against a real engine, a
-        recipe carrying the very signature that was asked about scored 0.731
-        with the reranker on and 1.0 with it off, so a threshold set for one
-        scale silently never fires on the other — the loop is then reported as
-        having no known fix while the block injected in front of the model
-        holds exactly that fix.  On such a scale identity and verification
-        decide, and the reason names which of the two routes was taken so
-        that the annotation shows it.  A hit whose scale the engine did not
-        state keeps the threshold, the conservative reading.
+        A relevance threshold means something on a cosine similarity (an
+        absolute relevance) and on a fused rank the assembler has already
+        remapped onto ``0…1`` (how near the top of its set a recipe sits).  It
+        means nothing on a cross-encoder logit squashed onto ``[0, 1]``:
+        measured against a real engine, a recipe carrying the very signature
+        that was asked about scored 0.731 with the reranker on and 1.0 with it
+        off, so a threshold set for one scale silently never fires on the
+        other — the loop is then reported as having no known fix while the
+        block injected in front of the model holds exactly that fix.
+        :meth:`AgenticKnowledgeConfig.threshold_for_scale` is where that is
+        settled: it returns a bound for the scales that can hold one and
+        ``None`` for the ones that cannot, and on ``None`` identity and
+        verification decide.  The reason names which of the two routes was
+        taken, so the annotation shows it.
         """
         if context.empty or not signature_hash:
             return ""
-        threshold = self._config.strong_recipe_score
         for hit in context.hits:
             if (hit.category or "") != "recipe":
                 continue
@@ -266,7 +265,8 @@ class EscalationPolicy:
                 continue
             if not math.isfinite(hit.score):
                 continue
-            if hit.score_scale == SCALE_RERANKER:
+            threshold = self._config.threshold_for_scale(hit.score_scale)
+            if threshold is None:
                 return REASON_STRONG_RECIPE_IDENTITY
             if hit.score >= threshold:
                 return REASON_STRONG_RECIPE

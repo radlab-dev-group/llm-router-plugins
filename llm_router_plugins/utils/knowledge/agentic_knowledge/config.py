@@ -40,7 +40,8 @@ JSON structure::
                 "archive": {"enabled": true, "max_chunk_chars": 2000,
                             "ttl_seconds": 1209600}},
       "escalation": {"enabled": false, "loop_threshold": 3,
-                     "strong_recipe_score": 0.6},
+                     "strong_recipe_score": 0.6,
+                     "strong_recipe_scores": {"reranker": null}},
       "docs": {"enabled": true, "auto_index": true,
                "patterns": ["*.md"], "excluded_dirs": ["node_modules"],
                "max_files": 200, "max_file_bytes": 200000,
@@ -60,6 +61,9 @@ from typing import Any, Callable, ClassVar, Dict, Mapping, Optional, Tuple
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import (
     SCOPE_STRATEGIES,
+)
+from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+    SCALE_RERANKER,
 )
 from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
     RedisConnectionSettings,
@@ -275,6 +279,26 @@ _DEFAULT_LOOP_THRESHOLD = 3
 #: below it, and :meth:`AgenticKnowledgeConfig._warn_scale_mismatch` would
 #: say the shipped defaults disagree with themselves.
 _DEFAULT_STRONG_RECIPE_SCORE = 0.6
+#: The same threshold stated per retrieval scale, so that one number is never
+#: read on three different meanings.  A key is a scale the engine names on a
+#: hit — ``cosine``, ``rrf``, ``reranker`` — or ``""`` for a hit whose scale
+#: the engine did not state; a value is a threshold in ``(0, 1]``, or ``None``
+#: for "decide by identity, not by score".  A scale the table does not name
+#: falls back to :attr:`strong_recipe_score`, which is why the shipped table
+#: names only the one scale that cannot hold a threshold at all: an operator
+#: who set only the float keeps exactly the behaviour they set, and adding a
+#: row is how a scale is tuned apart from the rest.
+_DEFAULT_STRONG_RECIPE_SCORES: Dict[str, Optional[float]] = {
+    "reranker": None,
+}
+#: Top of the band a *relevant* reranked recipe is ever seen in, measured
+#: against a real engine.  A bound above it is not a strict threshold, it is
+#: one the engine's own answers do not reach.
+_RERANKER_RELEVANT_CEILING = 0.75
+#: Above this a fused rank stops being a bound a search can express: the
+#: fusion rescales each set onto ``[0, 1]``, so the recipe would have to be
+#: the set's best hit with almost nothing separating it from the rest.
+_FUSED_REACHABLE_CEILING = 0.9
 _DEFAULT_RETENTION_INTERVAL_SECONDS = 21_600
 _DEFAULT_MAX_PENDING = 1_000
 _DEFAULT_WORKER_BATCH = 32
@@ -556,6 +580,12 @@ class AgenticKnowledgeConfig:
     escalation_enabled: bool = False
     loop_threshold: int = _DEFAULT_LOOP_THRESHOLD
     strong_recipe_score: float = _DEFAULT_STRONG_RECIPE_SCORE
+    #: Per-scale reading of :attr:`strong_recipe_score`; see
+    #: :data:`_DEFAULT_STRONG_RECIPE_SCORES`.  The float remains the fallback
+    #: for a scale the table does not name.
+    strong_recipe_scores: Dict[str, Optional[float]] = field(
+        default_factory=lambda: dict(_DEFAULT_STRONG_RECIPE_SCORES)
+    )
 
     claude_code_mode_map: Dict[str, str] = field(default_factory=dict)
     modes: Dict[str, ModePolicy] = field(default_factory=dict)
@@ -788,6 +818,10 @@ class AgenticKnowledgeConfig:
                 escalation.get("strong_recipe_score", _DEFAULT_STRONG_RECIPE_SCORE),
                 "escalation.strong_recipe_score",
             ),
+            strong_recipe_scores=_score_map(
+                escalation.get("strong_recipe_scores"),
+                "escalation.strong_recipe_scores",
+            ),
             claude_code_mode_map=_mode_map(claude.get("mode_map", {})),
             modes=_modes(data.get("modes", {})),
         )
@@ -890,6 +924,14 @@ class AgenticKnowledgeConfig:
             if raw is None:
                 continue
             setattr(self, target, cast(raw, f"{prefix}{name}"))
+        raw_scores = _env_override(prefix, "STRONG_RECIPE_SCORES")
+        if raw_scores is not None:
+            # The label names the variable, as every other cast here does: an
+            # operator reading the error has to know which line to fix.
+            label = f"{prefix}STRONG_RECIPE_SCORES"
+            self.strong_recipe_scores = _score_map(
+                _parse_json_map(raw_scores, label), label
+            )
 
         # A request path may not wait forever, whatever the operator set, and
         # the two numbers mean different things: the budget is what a request
@@ -970,6 +1012,7 @@ class AgenticKnowledgeConfig:
         )
         if not 0.0 < self.strong_recipe_score <= 1.0:
             raise ValueError("strong_recipe_score must be in (0, 1]")
+        self._validate_score_map()
         self._warn_scale_mismatch()
         if self.docs_max_file_bytes < 1024:
             raise ValueError("docs.max_file_bytes must be at least 1024 bytes")
@@ -1065,62 +1108,119 @@ class AgenticKnowledgeConfig:
                     "several filters instead of intersecting them"
                 )
 
+    def threshold_for_scale(self, scale: str) -> Optional[float]:
+        """
+        Return the threshold that applies to a hit scored on *scale*.
+
+        ``None`` means the scale cannot hold a threshold and the caller
+        decides by identity.  A scale the table does not name falls back to
+        the single :attr:`strong_recipe_score`, so a deployment that only ever
+        set the float keeps exactly the behaviour it had.
+        """
+        if scale in self.strong_recipe_scores:
+            return self.strong_recipe_scores[scale]
+        return self.strong_recipe_score
+
+    def _validate_score_map(self) -> None:
+        """
+        Check the per-scale table is a scale the engine can name and a bound
+        the scale can express.
+
+        An unknown scale is a typo rather than an override, and it would sit
+        unused forever; a bound outside ``(0, 1]`` would either never fire or
+        always fire, which is the silent failure this table exists to prevent.
+        """
+        known = ("cosine", "rrf", "reranker", "")
+        for scale, value in self.strong_recipe_scores.items():
+            if scale not in known:
+                raise ValueError(
+                    "escalation.strong_recipe_scores has unknown scale "
+                    f"{scale!r}; expected one of {known}"
+                )
+            if value is not None and not 0.0 < float(value) <= 1.0:
+                raise ValueError(
+                    f"escalation.strong_recipe_scores[{scale!r}] must be in "
+                    f"(0, 1] or null, got {value!r}"
+                )
+
     def _warn_scale_mismatch(self) -> None:
         """
-        Warn once when a threshold is set for a scale it cannot be met on.
+        Warn when a threshold is set for a scale it cannot be met on.
 
-        ``strong_recipe_score`` is compared against a recipe's normalized
-        retrieval score, and the scale that score lives on depends on which
-        retrieval leg the read runs with.  In the default deployment it is a
-        fused rank rescaled onto ``[0, 1]`` only *within* the result set that
-        produced it; with the reranker leg it is a cross-encoder logit the
-        engine squashed onto ``[0, 1]`` — a different number under the same
-        name, and one a threshold tuned for the other scale does not apply
-        to.  A mismatch that prints a warning at start is one an operator can
-        fix; a silent one is one nobody ever finds.
+        A recipe's score is compared against a threshold, and what that number
+        means depends on which retrieval leg the read runs with: a cosine
+        similarity is an absolute relevance, a fused rank is rescaled onto
+        ``[0, 1]`` only *within* the set that produced it, and a cross-encoder
+        logit squashed onto ``[0, 1]`` is neither — measured against a real
+        engine, a recipe carrying the very signature it was asked about scored
+        0.731 with the reranker on and 1.0 with it off.
+        :meth:`threshold_for_scale` settles which bound each scale is measured
+        against, so the case left worth a log line is the one the table cannot
+        fix by itself: a bound the band in play cannot express.  A mismatch
+        that prints at start is one an operator can fix; a silent one is one
+        nobody ever finds.
         """
         import logging
 
         logger = logging.getLogger("agentic_knowledge")
-        if self.rerank_results:
-            # A squashed cross-encoder logit tops out at 1.0 in principle,
-            # but the band its relevant documents actually sit in is lower:
-            # measured against a real engine, a recipe carrying the very
-            # signature it was asked about scored 0.731 with the reranker on
-            # and 1.0 with it off.  A threshold at or above that band is
-            # therefore not a high bar, it is a bar the engine's own answers
-            # rarely clear, and the identity of a matching recipe — not its
-            # score — is what decides it.
-            if self.strong_recipe_score >= 0.75:
-                logger.warning(
-                    "escalation.strong_recipe_score=%s is set for a scale "
-                    "the read no longer runs on: rerank_results is on, so a "
-                    "recipe's score is a squashed cross-encoder logit whose "
-                    "relevant band the reference engine puts near 0.5–0.75, "
-                    "and the threshold is applied to that number.  Lower "
-                    "the threshold to the reranker's band or turn the "
-                    "reranker off; a recipe that matches the failure's own "
-                    "signature still counts, and the decision names it "
-                    "(reason strong_recipe_identity).",
-                    self.strong_recipe_score,
-                )
-            return
-        # The fused rank of a hybrid search rescales the set's best hit to
-        # 1.0, so any threshold in (0, 1] is reachable in principle.  What
-        # is not reachable is a threshold the *engine* cannot express before
-        # the rescale — but that is a property of the engine, not of this
-        # policy, and the one number an operator can be told is the one
-        # they set: warn when the default scale is in play and the
-        # threshold sits in a band a two-leg fusion rarely reaches.
-        if self.strong_recipe_score > 0.9:
-            logger.warning(
-                "escalation.strong_recipe_score=%s is only reachable when "
-                "the engine reranks; a hybrid search rescales each result "
-                "set onto [0, 1], so a recipe must be the set's best hit "
-                "with very little between it and the rest.  If the "
-                "escalation rule never fires, that is why.",
-                self.strong_recipe_score,
+        # The scale a hit of this deployment carries, and the band its
+        # relevant recipes are ever seen in.
+        reranked = self.rerank_results
+        ceiling = (
+            _RERANKER_RELEVANT_CEILING if reranked else _FUSED_REACHABLE_CEILING
+        )
+        primary = (
+            SCALE_RERANKER
+            if reranked
+            else ("rrf" if self.hybrid_search else "cosine")
+        )
+        # Only the bounds this deployment actually consults: a row that says
+        # "identity decides" compares nothing, and the float is consulted only
+        # where the table has no row of its own.
+        consulted: Dict[str, float] = {}
+        row = self.threshold_for_scale(primary)
+        if row is not None:
+            consulted[f"escalation.strong_recipe_scores[{primary!r}]"] = row
+        # The float is consulted by every scale the table leaves unnamed, and
+        # a hit whose scale the engine did not state is one of them.
+        if "" not in self.strong_recipe_scores:
+            consulted.setdefault(
+                "escalation.strong_recipe_score", self.strong_recipe_score
             )
+        # A threshold already named, so two labels naming one number say it once.
+        reported = []
+        for label, threshold in consulted.items():
+            if threshold in reported:
+                # Two labels naming one number: say it once, under the label
+                # of the scale the read runs on.
+                continue
+            reported.append(threshold)
+            if reranked:
+                if threshold >= ceiling:
+                    logger.warning(
+                        "%s=%s sits above the band a reranked recipe is ever "
+                        "seen in: the reference engine puts a matching recipe "
+                        "near 0.5-%s, so the escalation rule would report "
+                        "loops as having no known fix while the injected "
+                        "block holds exactly that fix.  Lower the bound, or "
+                        "set escalation.strong_recipe_scores['reranker'] to "
+                        "null and let a recipe's own signature decide "
+                        "(reason strong_recipe_identity).",
+                        label,
+                        threshold,
+                        ceiling,
+                    )
+            elif threshold > ceiling:
+                logger.warning(
+                    "%s=%s is only reachable when the engine reranks; a %s "
+                    "search rescales each result set onto [0, 1], so a recipe "
+                    "must be the set's best hit with very little between it "
+                    "and the rest.  If the escalation rule never fires, that "
+                    "is why.",
+                    label,
+                    threshold,
+                    "hybrid" if self.hybrid_search else "vector-only",
+                )
 
     # ------------------------------------------------------------ readiness -
     @property
@@ -1418,6 +1518,36 @@ def _mode_map(raw: Any) -> Dict[str, str]:
     if not isinstance(raw, Mapping):
         raise ValueError("claude_code.mode_map must be an object")
     return {str(key): str(value) for key, value in raw.items() if str(value).strip()}
+
+
+def _score_map(value: Any, label: str) -> Dict[str, Optional[float]]:
+    """
+    Read the per-scale threshold table, merged over the shipped defaults.
+
+    A partial table overrides only the rows it names: an operator moving a
+    deployment onto the reranker states ``{"reranker": null}`` and inherits a
+    sane bound for the scales they did not think about.
+    """
+    if value is None:
+        return dict(_DEFAULT_STRONG_RECIPE_SCORES)
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a JSON object, got {value!r}")
+    merged = dict(_DEFAULT_STRONG_RECIPE_SCORES)
+    for scale, raw in value.items():
+        key = str(scale)
+        merged[key] = None if raw is None else _fraction(raw, f"{label}[{key}]")
+    return merged
+
+
+def _parse_json_map(raw: str, label: str) -> Dict[str, Any]:
+    """Read a JSON object out of an environment variable."""
+    try:
+        decoded = json.loads(raw)
+    except ValueError:
+        raise ValueError(f"{label} must be a JSON object, got {raw!r}")
+    if not isinstance(decoded, dict):
+        raise ValueError(f"{label} must be a JSON object, got {raw!r}")
+    return decoded
 
 
 def _env_override(prefix: str, name: str) -> Optional[str]:

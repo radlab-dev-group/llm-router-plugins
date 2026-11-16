@@ -258,3 +258,91 @@ def test_a_reranker_recipe_without_verification_does_not_keep():
         turn(), knowledge, policy_for(config, "debug"), 3, "h"
     )
     assert decision.action == ACTION_ESCALATE
+
+
+# -------------------------------------------per-scale reading of the bound--
+
+
+def scored(score, scale, **overrides):
+    """One verified recipe, scored on a named retrieval scale."""
+    hit = KnowledgeHit(
+        category="recipe",
+        document_name="recipe:1:2",
+        text="x",
+        score=score,
+        weight=1.0,
+        signature_hash="h",
+        test_command="pytest tests/test_a.py",
+        score_scale=scale,
+    )
+    if overrides:
+        hit = replace(hit, **overrides)
+    return KnowledgeContext(
+        hits=(hit,),
+        rendered="x",
+        chars=1,
+        best_recipe_score=score,
+        status="ok",
+    )
+
+
+def decide_scored(config, knowledge, loop=3, signature="h"):
+    return EscalationPolicy(config).decide(
+        turn(), knowledge, policy_for(config, "debug"), loop, signature
+    )
+
+
+def test_a_recipe_is_judged_on_the_scale_it_was_scored_on():
+    # The float alone would keep this model at 0.5; the cosine row is stricter,
+    # and the hit carries the cosine scale, so the row decides.
+    config = knowledge_config(
+        escalation_enabled=True,
+        strong_recipe_score=0.5,
+        strong_recipe_scores={"cosine": 0.95},
+    )
+    decision = decide_scored(config, scored(0.8, "cosine"))
+    assert decision.action == ACTION_ESCALATE
+
+
+def test_a_scale_with_its_own_lower_bound_keeps_the_model():
+    # A deployment that trusts its fused rank can lower that one row without
+    # touching the threshold every other scale is read against.
+    config = knowledge_config(
+        escalation_enabled=True,
+        strong_recipe_score=0.9,
+        strong_recipe_scores={"rrf": 0.6},
+    )
+    decision = decide_scored(config, scored(0.7, "rrf"))
+    assert decision.action == ACTION_KEEP
+    assert decision.reason == "strong_recipe"
+
+
+def test_a_scale_handed_to_identity_decides_without_a_score():
+    config = knowledge_config(
+        escalation_enabled=True,
+        strong_recipe_score=0.9,
+        strong_recipe_scores={"cosine": None},
+    )
+    knowledge = scored(0.05, "cosine")
+    decision = decide_scored(config, knowledge)
+    assert decision.action == ACTION_KEEP
+    assert decision.reason == "strong_recipe_identity"
+    assert EscalationPolicy(config).has_strong_recipe(knowledge, "h")
+
+
+def test_identity_still_requires_the_failure_s_own_signature():
+    config = knowledge_config(
+        escalation_enabled=True, strong_recipe_scores={"cosine": None}
+    )
+    knowledge = scored(0.99, "cosine", signature_hash="other")
+    assert decide_scored(config, knowledge).action == ACTION_ESCALATE
+
+
+def test_an_unnamed_scale_falls_back_to_the_single_threshold():
+    config = knowledge_config(
+        escalation_enabled=True,
+        strong_recipe_score=0.7,
+        strong_recipe_scores={"cosine": 0.95},
+    )
+    # score_scale "" is not in the table: 0.75 clears the float, not the row.
+    assert decide_scored(config, scored(0.75, "")).action == ACTION_KEEP

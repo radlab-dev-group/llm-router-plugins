@@ -1017,6 +1017,7 @@ def test_one_failing_search_does_not_drop_the_others():
 
 # ----------------------------------------------------------- feedback loop --
 
+
 def _recipe_turn(turn_id, failures=1):
     """One request of a session; the cache key is the turn id itself."""
     return main_payload(
@@ -1105,6 +1106,7 @@ def test_nothing_injected_scores_nothing():
 
 # ------------------------------------------------------- tiered scoping ----
 
+
 class _ScopedStore:
     """A store that only answers a search unscoped.
 
@@ -1157,11 +1159,7 @@ def test_an_empty_path_scoped_search_is_widened_to_the_repository():
         root_turn_id="gen-1",
     )
     out = plugin.apply(payload)
-    scoped = [
-        r
-        for r in store.requests
-        if getattr(r, "relative_path_contains", "")
-    ]
+    scoped = [r for r in store.requests if getattr(r, "relative_path_contains", "")]
     unscoped = [
         r for r in store.requests if not getattr(r, "relative_path_contains", "")
     ]
@@ -1169,4 +1167,133 @@ def test_an_empty_path_scoped_search_is_widened_to_the_repository():
     assert scoped, "expected a path-scoped search to be issued"
     assert unscoped, "expected the unscoped retry to be issued"
     # The retry is what found the answer.
+    assert out["routing"]["knowledge"]["injected"] >= 1
+
+
+# ---------------------------------------------------------------- scoreboard -
+
+
+class RecordingMetrics:
+    """A scoreboard that remembers what a request asked it to count."""
+
+    def __init__(self):
+        self.calls = []
+
+    def record(self, scope, **counts):
+        self.calls.append((scope, counts))
+
+    def total(self, field):
+        return sum(counts.get(field, 0) for _, counts in self.calls)
+
+
+class ExplodingMetrics:
+    """A scoreboard that cannot be written, as a live Redis sometimes is."""
+
+    def __init__(self):
+        self.raises = 0
+
+    def record(self, scope, **counts):
+        self.raises += 1
+        raise RuntimeError("redis is down")
+
+
+def metrics_plugin(config, store=None, metrics=None):
+    return AgenticKnowledgePlugin(
+        config=config,
+        store=store or FakeStore(),
+        cache=InMemoryContextCache(),
+        publisher=FakePublisher(),
+        metrics=metrics or RecordingMetrics(),
+    )
+
+
+def test_a_request_counts_on_its_repository_scoreboard():
+    config = knowledge_config()
+    metrics = RecordingMetrics()
+    store = FakeStore(hits=(store_hit("recipe", text="a verified fix"),))
+    plugin = metrics_plugin(config, store=store, metrics=metrics)
+    out = plugin.apply(main_payload(mode="implement"))
+    scope = out["routing"]["knowledge"]["scope"]
+    assert (scope, {"turns": 1}) in [
+        (call_scope, {"turns": counts["turns"]})
+        for call_scope, counts in metrics.calls
+    ]
+    assert metrics.total("turns") == 1
+    assert metrics.total("injected_turns") == 1
+    assert metrics.total("injected_docs") == 1
+    # one failure is a stumble, not the loop the layer exists to end
+    assert metrics.total("failure_turns") == 1
+    assert metrics.total("loops") == 0
+
+
+def test_a_repeated_failure_counts_as_a_loop_not_just_a_failure():
+    config = knowledge_config()
+    metrics = RecordingMetrics()
+    plugin = metrics_plugin(config, store=FakeStore(), metrics=metrics)
+    plugin.apply(main_payload(mode="debug", failures=config.loop_threshold))
+    assert metrics.total("failure_turns") == 1
+    assert metrics.total("loops") == 1
+
+
+def test_a_turn_with_nothing_injected_counts_the_turn_not_an_injection():
+    config = knowledge_config()
+    metrics = RecordingMetrics()
+    plugin = metrics_plugin(config, store=FakeStore(), metrics=metrics)
+    plugin.apply(main_payload(mode="implement"))
+    assert metrics.total("turns") == 1
+    assert metrics.total("injected_turns") == 0
+    assert metrics.total("injected_docs") == 0
+
+
+def test_a_loop_and_its_escalation_are_counted():
+    config = knowledge_config(escalation_enabled=True)
+    metrics = RecordingMetrics()
+    plugin = metrics_plugin(config, store=FakeStore(), metrics=metrics)
+    plugin.apply(main_payload(mode="debug", failures=3))
+    assert metrics.total("loops") == 1
+    assert metrics.total("escalations") == 1
+
+
+def test_a_loop_kept_by_a_recipe_counts_the_loop_but_not_an_escalation():
+    config = knowledge_config(escalation_enabled=True)
+    metrics = RecordingMetrics()
+    store = FakeStore(hits=(matching_recipe(),))
+    plugin = metrics_plugin(config, store=store, metrics=metrics)
+    out = plugin.apply(main_payload(mode="debug", failures=3))
+    assert out["routing"]["knowledge"]["escalation"]["action"] == "keep"
+    assert metrics.total("loops") == 1
+    assert metrics.total("escalations") == 0
+
+
+def test_a_search_that_could_not_be_reached_is_counted():
+    config = knowledge_config()
+    metrics = RecordingMetrics()
+    store = FakeStore(status=STATUS_UNAVAILABLE)
+    plugin = metrics_plugin(config, store=store, metrics=metrics)
+    plugin.apply(main_payload(mode="implement"))
+    assert metrics.total("read_failures") >= 1
+
+
+def test_the_turns_verdict_on_the_previous_injection_is_counted():
+    config = knowledge_config()
+    metrics = RecordingMetrics()
+    store = FakeStore(hits=(store_hit("recipe", text="a verified fix"),))
+    plugin = metrics_plugin(config, store=store, metrics=metrics)
+    # First request injects; the second, in the same session, mines the fix the
+    # injected recipe pointed at, which settles the first as a help.
+    plugin.apply(main_payload(mode="debug"))
+    plugin.apply(recipe_payload(mode="debug"))
+    assert metrics.total("green_after_injection") == 1
+    assert metrics.total("feedback_up") == 1
+    assert metrics.total("feedback_down") == 0
+
+
+def test_a_scoreboard_that_cannot_be_written_costs_a_metric_not_a_request():
+    config = knowledge_config()
+    metrics = ExplodingMetrics()
+    store = FakeStore(hits=(store_hit("recipe", text="a verified fix"),))
+    plugin = metrics_plugin(config, store=store, metrics=metrics)
+    out = plugin.apply(main_payload(mode="implement"))
+    assert metrics.raises > 0
+    # the request still got its knowledge and its annotation
     assert out["routing"]["knowledge"]["injected"] >= 1
