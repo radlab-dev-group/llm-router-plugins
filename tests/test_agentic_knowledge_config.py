@@ -763,3 +763,100 @@ def test_mining_switches_are_overridable_from_the_environment(monkeypatch):
     config.override_from_env()
     assert config.task_solutions_enabled is False
     assert config.tool_recipes_enabled is True
+
+
+# ------------------------------------------------per-scale escalation bounds-
+
+
+def test_the_threshold_is_stated_per_retrieval_scale():
+    # One number read on three scales is three different rules; the table lets
+    # an operator name a bound per scale instead.
+    config = AgenticKnowledgeConfig.from_json(
+        '{"escalation": {"strong_recipe_score": 0.4, "strong_recipe_scores": '
+        '{"cosine": 0.8, "rrf": 0.9, "reranker": null}}}'
+    )
+    assert config.threshold_for_scale("cosine") == 0.8
+    assert config.threshold_for_scale("rrf") == 0.9
+    assert config.threshold_for_scale("reranker") is None
+    # A scale the table does not name keeps the single threshold.
+    assert config.threshold_for_scale("") == 0.4
+
+
+def test_a_partial_table_overrides_only_the_rows_it_names():
+    config = AgenticKnowledgeConfig.from_json(
+        '{"escalation": {"strong_recipe_scores": {"rrf": 0.95}}}'
+    )
+    assert config.threshold_for_scale("rrf") == 0.95
+    # The shipped row survives: the reranker scale is still decided by identity.
+    assert config.threshold_for_scale("reranker") is None
+    assert config.threshold_for_scale("cosine") == config.strong_recipe_score
+
+
+def test_the_shipped_policy_hands_the_reranker_scale_to_identity():
+    config = AgenticKnowledgeConfig.from_file()
+    assert config.threshold_for_scale("reranker") is None
+    assert config.threshold_for_scale("rrf") == config.strong_recipe_score
+    assert config.threshold_for_scale("cosine") == config.strong_recipe_score
+
+
+def test_an_unknown_scale_is_a_typo_not_an_override():
+    with pytest.raises(ValueError, match="unknown scale"):
+        AgenticKnowledgeConfig.from_json(
+            '{"escalation": {"strong_recipe_scores": {"bm25": 0.5}}}'
+        )
+
+
+@pytest.mark.parametrize("bound", [0, 1.5, -0.1])
+def test_a_bound_the_scale_cannot_express_is_rejected(bound):
+    with pytest.raises(ValueError):
+        AgenticKnowledgeConfig.from_json(
+            f'{{"escalation": {{"strong_recipe_scores": {{"cosine": {bound}}}}}}}'
+        )
+
+
+def test_the_table_arrives_from_the_environment(monkeypatch):
+    monkeypatch.setenv(
+        f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}STRONG_RECIPE_SCORES",
+        '{"cosine": 0.9}',
+    )
+    config = AgenticKnowledgeConfig.from_file()
+    config.override_from_env()
+    assert config.threshold_for_scale("cosine") == 0.9
+    # Merged over the shipped table, not replacing it.
+    assert config.threshold_for_scale("reranker") is None
+
+
+def test_a_malformed_env_table_names_the_variable(monkeypatch):
+    monkeypatch.setenv(
+        f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}STRONG_RECIPE_SCORES", "cosine=0.9"
+    )
+    config = AgenticKnowledgeConfig.from_file()
+    with pytest.raises(ValueError, match="STRONG_RECIPE_SCORES"):
+        config.override_from_env()
+
+
+def test_the_reranker_default_does_not_warn_at_start(caplog):
+    # The shipped table answers the mismatch by construction: the reranker
+    # scale decides by identity, so there is nothing left to warn about.
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="agentic_knowledge"):
+        knowledge_config(rerank_results=True)
+    assert not any(
+        "strong_recipe_score" in r.message for r in caplog.records
+    ), caplog.text
+
+
+def test_a_reranker_row_above_the_relevant_band_warns_at_start(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="agentic_knowledge"):
+        knowledge_config(
+            rerank_results=True,
+            strong_recipe_scores={"reranker": 0.95, "": 0.9},
+        )
+    warnings = [
+        r.message for r in caplog.records if "strong_recipe_score" in r.message
+    ]
+    assert warnings, caplog.text
+    assert "reranker" in warnings[0]

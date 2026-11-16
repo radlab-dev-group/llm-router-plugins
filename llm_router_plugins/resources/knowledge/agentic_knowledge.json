@@ -291,7 +291,10 @@
   "escalation": {
     "enabled": true,
     "loop_threshold": 3,
-    "strong_recipe_score": 0.6
+    "strong_recipe_score": 0.6,
+    "strong_recipe_scores": {
+      "reranker": null
+    }
   },
   "docs": {
     "enabled": true,
