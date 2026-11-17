@@ -283,11 +283,19 @@ class FakeStore:
         self.status = status
         self.requests = []
         self.deadlines = []
+        self.quality_pushes = []
+        self.push_ok = True
 
     def search(self, request, *, deadline=None):
         self.requests.append(request)
         self.deadlines.append(deadline)
         return SearchResult(self.status, hits=self.hits)
+
+    def push_quality(self, collection, document_name, upvotes, downvotes):
+        self.quality_pushes.append(
+            (collection, document_name, upvotes, downvotes)
+        )
+        return self.push_ok
 
 
 def store_hit(category="recipe", name=None, text="a verified fix", score=0.9):

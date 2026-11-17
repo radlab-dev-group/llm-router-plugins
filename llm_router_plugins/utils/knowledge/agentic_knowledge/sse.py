@@ -141,6 +141,10 @@ class SearchRequest:
     modes: Tuple[str, ...] = ()
     doc_types: Tuple[str, ...] = ()
     keywords: Tuple[str, ...] = ()
+    #: How the engine combines the keywords on its full-text leg: ``and``
+    #: keeps every keyword, ``any`` one of them; ``""`` leaves the choice to
+    #: the engine, which is ``and``.
+    keywords_match: str = ""
     relative_path_contains: str = ""
 
 
@@ -390,6 +394,65 @@ class KnowledgeStore:
             score_scale=scale,
         )
 
+    def push_quality(
+        self,
+        collection: str,
+        document_name: str,
+        upvotes: int,
+        downvotes: int,
+    ) -> bool:
+        """
+        Push one document's quality verdict to the engine's metadata.
+
+        The engine's counters are monotonic and its endpoint takes absolute
+        totals, so a caller sends what it has counted and never re-sends the
+        same verdict twice: an upvote recorded in this process is the one the
+        engine will hold, and a second process's recount of the same turn is
+        not a second opinion, it is a duplicate the engine cannot tell from a
+        real one.  The document is named the way the engine knows it — the
+        name a search reports, suffix and all — because the endpoint resolves
+        against its own listing.
+
+        Parameters
+        ----------
+        collection : str
+            The document's collection.
+        document_name : str
+            The engine-level name of the document.
+        upvotes : int
+            The total of recorded successes; never a delta.
+        downvotes : int
+            The total of recorded failures; never a delta.
+
+        Returns
+        -------
+        bool
+            Whether the engine accepted the totals.  A failure is a status,
+            not an exception: the request path must not die on the way to
+            answering an agent because the scoreboard could not be updated.
+        """
+        if not self.available or not collection or not document_name:
+            return False
+        try:
+            client = self._ensure_client()
+            client.post(
+                "update_knowledge_quality",
+                {
+                    "collection_name": collection,
+                    "document_name": document_name,
+                    "upvotes": int(upvotes),
+                    "downvotes": int(downvotes),
+                },
+            )
+        except Exception as exc:
+            self._note(
+                "knowledge quality push failed for %s: %s",
+                document_name,
+                type(exc).__name__,
+            )
+            return False
+        return True
+
     def close(self) -> None:
         """
         Release the connection, if one was built and knows how.
@@ -556,6 +619,9 @@ def _options(
         options["categories"] = list(request.categories)
     if getattr(request, "keywords", None):
         options["keywords"] = list(request.keywords)
+    keywords_match = str(getattr(request, "keywords_match", "") or "")
+    if keywords_match:
+        options["keywords_match"] = keywords_match
     if getattr(request, "relative_path_contains", ""):
         options["relative_path_contains"] = request.relative_path_contains
     # Exactly one metadata filter, whatever it filters on: the engine unions

@@ -24,7 +24,7 @@ import time
 
 from collections import OrderedDict
 from dataclasses import replace
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from llm_router_plugins.plugin_interface import PluginInterface
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
@@ -50,6 +50,9 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
     GenerationContextCache,
     InMemoryContextCache,
     LookupLimiter,
+)
+from llm_router_plugins.utils.knowledge.agentic_knowledge.redisclient import (
+    RedisClientHandle,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
@@ -172,6 +175,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._pending_feedback: "OrderedDict[str, Tuple[Tuple[str, ...], str]]" = (
             OrderedDict()
         )
+        self._feedback_pushed_at = 0.0
         self._budget_warnings: Dict[str, float] = {}
         self._wire(self._config)
 
@@ -237,7 +241,10 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._docs = DocsIndexer(
             config=config, publisher=self._publisher, logger=self._logger
         )
-        self._feedback_tracker = FeedbackTracker(key_prefix=config.key_prefix)
+        self._feedback_tracker = FeedbackTracker(
+            key_prefix=config.key_prefix,
+            handle=RedisClientHandle(config.redis) if config.redis.configured else None,
+        )
         if self._metrics is None:
             # Built on the same connection the cache and the publisher use, so
             # a deployment without Redis still counts in-process: the numbers
@@ -370,6 +377,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         # to avoid (it did not).  Settled before this request assembles, so
         # the verdict already weighs what this request ranks.
         self._settle_feedback(turn, mining)
+        self._flush_feedback(turn)
         if fresh:
             context = KnowledgeContext(
                 hits=cached.context.hits,
@@ -743,6 +751,42 @@ class AgenticKnowledgePlugin(PluginInterface):
             widened[index] = (retry, request.categories)
         return widened
 
+    def _flush_feedback(self, turn: AgentTurn) -> None:
+        """
+        Hand the verdicts this process has settled to the engine.
+
+        The endpoint's counters are monotonic and take absolute totals, so the
+        push sends what the tracker has counted and nothing more, and a name
+        the engine did not accept stays queued for the next attempt.  The push
+        is rate-limited by the policy's interval, and a request whose turn has
+        no scope has no collection to ask for, so it waits for one that does.
+        """
+        tracker = self._feedback_tracker
+        if tracker is None or self._store is None:
+            return
+        names = tracker.touched()
+        if not names:
+            return
+        interval = int(getattr(self._config, "feedback_push_interval_seconds", 0) or 0)
+        now = time.monotonic()
+        if now - self._feedback_pushed_at < interval:
+            return
+        pushed: List[str] = []
+        for name in names:
+            collection = tracker.collection_of(name)
+            if not collection or not turn.scope:
+                continue
+            totals = tracker.get_feedback(name)
+            up = int(totals.get("upvotes", 0))
+            down = int(totals.get("downvotes", 0))
+            if not (up or down):
+                continue
+            if self._store.push_quality(collection, name, up, down):
+                pushed.append(name)
+        if pushed:
+            tracker.pushed(*pushed)
+            self._feedback_pushed_at = now
+
     def _feedback_weights(self) -> Optional[Dict[str, Dict[str, int]]]:
         """Reinforcement recorded so far; a debunked recipe ranks lower."""
         if self._feedback_tracker is None:
@@ -780,7 +824,9 @@ class AgenticKnowledgePlugin(PluginInterface):
         if not doc_names or not (repeated or resolved):
             return
         for doc_name in doc_names:
-            tracker.record_feedback(doc_name, success=resolved)
+            tracker.record_feedback(
+                doc_name, success=resolved, collection=tracker.collection_of(doc_name)
+            )
         if self._metrics is not None and turn.scope:
             # The turn's own verdict on what it was shown last request, counted
             # once for the request rather than once per document: adoption is a
@@ -809,6 +855,17 @@ class AgenticKnowledgePlugin(PluginInterface):
         )
         if not doc_names:
             return
+        tracker = self._feedback_tracker
+        for hit in context.hits:
+            if hit.document_name and hit.category in _SCORED_KINDS:
+                # The collection is the config's answer, not the hit's: a hit
+                # carries no collection because the search that produced it was
+                # built from this same name, so re-deriving it is exact and
+                # costs the assembled block no new field.
+                tracker.remember_collection(
+                    hit.document_name,
+                    self._config.collection(turn.scope, hit.category),
+                )
         self._pending_feedback[turn.session_id] = (doc_names, mining.signature_hash)
         while len(self._pending_feedback) > _FEEDBACK_PENDING_LIMIT:
             self._pending_feedback.popitem(last=False)
