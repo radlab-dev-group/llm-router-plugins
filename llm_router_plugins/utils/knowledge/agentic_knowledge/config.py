@@ -136,6 +136,34 @@ _DEFAULT_STREAM_KEY = "agentic_kb:events"
 _DEFAULT_KEY_PREFIX = "agentic-kb"
 
 
+def _clamp_timeout(value: float, label: str, logger: Any = None) -> float:
+    """
+    Bring one timeout into the band between :data:`_MIN_SSE_TIMEOUT_SECONDS`
+    and :data:`_MAX_SSE_TIMEOUT_SECONDS`.
+
+    A ceiling that bites in silence is indistinguishable from a setting that
+    was never read: an operator who writes 40 and gets 10 debugs a timeout
+    that is not broken.  The clamp stays — a mistyped timeout must not stall
+    a request path — but it says so, naming the setting it clamped and the
+    number it settled on, so the log says the setting was read and what it
+    became.
+    """
+    number = float(value)
+    clamped = min(max(number, _MIN_SSE_TIMEOUT_SECONDS), _MAX_SSE_TIMEOUT_SECONDS)
+    if clamped != number and logger is not None:
+        logger.warning(
+            "%s=%s is outside %s..%s s and was clamped to %s s.  A request waits at "
+            "most its read budget, so raise this only if the engine really answers "
+            "this slowly.",
+            label,
+            number,
+            _MIN_SSE_TIMEOUT_SECONDS,
+            _MAX_SSE_TIMEOUT_SECONDS,
+            clamped,
+        )
+    return clamped
+
+
 def _engine_collection_fragment(value: str, label: str) -> str:
     """
     Reduce *value* to what the engine accepts in a collection name.
@@ -235,8 +263,16 @@ def _collection_layout(value: Any, label: str) -> str:
     return text
 
 
-#: Ceiling of one read call, so a typo cannot stall a request.
-_MAX_SSE_TIMEOUT_SECONDS = 10.0
+#: Floor of a timeout: a call allowed no time at all is a search never made.
+_MIN_SSE_TIMEOUT_SECONDS = 0.1
+#: Ceiling of one read call, so a typo cannot stall a request.  It is a
+#: ceiling on a typo, not a policy: an engine that embeds and reranks on a
+#: cold model answers well past the old 10 s, and a ceiling below what an
+#: operator has to set silently overwrites their setting, which then reads
+#: as "the timeout does not work" instead of as a limit.  What bounds a
+#: request is :attr:`read_timeout_seconds`, the budget; this says how long
+#: one call inside it may take.
+_MAX_SSE_TIMEOUT_SECONDS = 60.0
 #: Ceiling of one call to the engine.  A hybrid search of a real collection
 #: measured a median of 1.7 s (engine and plugin on separate hosts), so a call
 #: allowed 1.5 s loses most of the searches it makes to its own timeout; 2 s is
@@ -1018,11 +1054,11 @@ class AgenticKnowledgeConfig:
         # one number, which made a mode that reads three sources wait three
         # times what the operator wrote — or, at the old 1.5 s default, lose
         # every search to a timeout the engine cannot beat.
-        self.sse_timeout_seconds = min(
-            max(self.sse_timeout_seconds, 0.1), _MAX_SSE_TIMEOUT_SECONDS
+        self.sse_timeout_seconds = _clamp_timeout(
+            self.sse_timeout_seconds, f"{prefix}SSE_API_TIMEOUT", logger
         )
-        self.read_timeout_seconds = min(
-            max(self.read_timeout_seconds, 0.1), _MAX_SSE_TIMEOUT_SECONDS
+        self.read_timeout_seconds = _clamp_timeout(
+            self.read_timeout_seconds, f"{prefix}READ_TIMEOUT_SECONDS", logger
         )
         self.worker = _worker_from_env(self.worker, prefix)
         try:
@@ -1079,11 +1115,14 @@ class AgenticKnowledgeConfig:
         # is why the budget is raised here rather than trusted.  This invariant
         # belongs to the resolved policy, not to the environment path that
         # happens to set the numbers, so it is enforced here.
-        self.sse_timeout_seconds = min(
-            max(self.sse_timeout_seconds, 0.1), _MAX_SSE_TIMEOUT_SECONDS
+        import logging as _logging
+
+        reporter = _logging.getLogger("agentic_knowledge")
+        self.sse_timeout_seconds = _clamp_timeout(
+            self.sse_timeout_seconds, "SSE_API_TIMEOUT", reporter
         )
-        self.read_timeout_seconds = min(
-            max(self.read_timeout_seconds, 0.1), _MAX_SSE_TIMEOUT_SECONDS
+        self.read_timeout_seconds = _clamp_timeout(
+            self.read_timeout_seconds, "READ_TIMEOUT_SECONDS", reporter
         )
         self.read_timeout_seconds = max(
             self.read_timeout_seconds,

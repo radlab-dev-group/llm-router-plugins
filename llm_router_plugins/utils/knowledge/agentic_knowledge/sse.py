@@ -43,6 +43,7 @@ this module sends it by default (:meth:`KnowledgeStore.search`).
 
 import inspect
 import logging
+import re
 import threading
 import time
 
@@ -173,6 +174,12 @@ class SearchRequest:
     #: the engine, which is ``and``.
     keywords_match: str = ""
     relative_path_contains: str = ""
+    #: Answer from the engine's full-text leg alone: no embedding of the
+    #: query, no vector store.  The caller has decided the question is
+    #: literal — an exception class, an identifier — and a text index
+    #: answers it better than a cosine.  Wins over the store's
+    #: ``hybrid_search``.
+    lexical_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -306,6 +313,7 @@ class KnowledgeStore:
         min_similarity: float = 0.35,
         hybrid_search: bool = True,
         rerank_results: bool = False,
+        fts_only_min_identifier_share: float = 0.0,
         logger: Optional[logging.Logger] = None,
         client: Any = None,
         username: str = "",
@@ -326,6 +334,9 @@ class KnowledgeStore:
         self._min_similarity = float(min_similarity)
         self._hybrid_search = bool(hybrid_search)
         self._rerank_results = bool(rerank_results)
+        # Above this share of identifier-looking tokens a question is asked of
+        # the text index alone; ``0`` keeps the fast path off.
+        self._fts_only_share = float(fts_only_min_identifier_share)
         self._ignore_language_detect = bool(ignore_language_detect)
         # Whether the client in use accepts the language switch, resolved once
         # and only when it is needed: an older ``sse_lib`` has no such keyword,
@@ -415,6 +426,8 @@ class KnowledgeStore:
                     self._min_similarity,
                     hybrid_search=self._hybrid_search,
                     rerank_results=self._rerank_results,
+                    lexical_only=self._wants_lexical(request.query)
+                    or bool(request.lexical_only),
                 ),
                 **self._language_switch_arguments(client),
             )
@@ -565,6 +578,22 @@ class KnowledgeStore:
                 self._memo.popitem(last=False)
 
     # -------------------------------------------------------------- helpers -
+    def _wants_lexical(self, query: str) -> bool:
+        """
+        Whether *query* is literal enough to ask the text index alone.
+
+        The vector leg costs an embedding and a round trip to the vector store
+        to answer a question whose terms are already exact — an exception
+        class, a module path, an underscored function — and answers it worse:
+        a cosine drifts to whatever the code resembles, while the text index
+        finds the chunk that says the name.  A question that merely mentions
+        one identifier among its prose stays on both legs, and a policy that
+        set the share to ``0`` never leaves them.
+        """
+        if self._fts_only_share <= 0.0:
+            return False
+        return _identifier_share(query) >= self._fts_only_share
+
     def _ensure_client(self) -> Any:
         """Build the engine client on first use."""
         if self._client is not None:
@@ -715,11 +744,171 @@ def _collection_missing(exc: Exception) -> bool:
     return False
 
 
+#: Punctuation a query token may be wrapped in; it is not part of the
+#: identifier, so it is cut off before the token is judged.
+_QUERY_PUNCTUATION = ".,;:()[]{}" + chr(34) + chr(39)
+
+#: A token that looks like code rather than prose: an exception class, a
+#: dotted module path, an ``::``-joined C++ or Rust path, or an underscored
+#: identifier of a reasonable length.
+_IDENTIFIER_TOKEN = re.compile(
+    r"^(?:[A-Z][A-Za-z0-9]*(?:Error|Exception|Timeout|Failure|Warning)"
+    r"|[a-z_][a-z0-9_]*\.[A-Za-z_][A-Za-z0-9_.]*"
+    r"|(?:[A-Za-z_][A-Za-z0-9_]*::)+[A-Za-z_][A-Za-z0-9_]*"
+    r"|[a-z_][a-z0-9_]{4,})$"
+)
+
+#: Words a question is made of; they keep a query semantic even when it
+#: carries one identifier among them.
+_PROSE_WORDS = frozenset(
+    {
+        "why",
+        "what",
+        "when",
+        "where",
+        "how",
+        "which",
+        "who",
+        "whose",
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "do",
+        "does",
+        "did",
+        "it",
+        "its",
+        "this",
+        "that",
+        "these",
+        "those",
+        "not",
+        "no",
+        "yes",
+        "can",
+        "could",
+        "should",
+        "would",
+        "will",
+        "shall",
+        "may",
+        "might",
+        "must",
+        "there",
+        "here",
+        "as",
+        "by",
+        "from",
+        "into",
+        "over",
+        "under",
+        "between",
+        "during",
+        "before",
+        "after",
+        "because",
+        "while",
+        "unless",
+        "if",
+        "then",
+        "else",
+        "than",
+        "so",
+        "such",
+        "only",
+        "just",
+        "very",
+        "too",
+        "also",
+        "again",
+        "further",
+        "once",
+        "own",
+        "same",
+        "some",
+        "any",
+        "each",
+        "all",
+        "both",
+        "few",
+        "more",
+        "most",
+        "other",
+        "several",
+        "run",
+        "running",
+        "ran",
+        "runs",
+        "make",
+        "made",
+        "making",
+        "get",
+        "got",
+        "use",
+        "used",
+        "using",
+        "fix",
+        "fixed",
+        "failing",
+        "broken",
+        "worker",
+        "workers",
+        "startup",
+        "raise",
+        "raised",
+    }
+)
+
+
+def _identifier_share(text: str) -> float:
+    """
+    Share of the tokens of *text* that look like identifiers.
+
+    A query that is mostly code names — an exception class, a module path,
+    an underscored function — is a literal question, and the engine's text
+    index answers a literal question better than its vector leg does.  A
+    sentence that merely *mentions* an identifier is still a sentence: the
+    prose words around it keep the share below the threshold, and the vector
+    leg stays.
+    """
+    tokens = [
+        token.strip(_QUERY_PUNCTUATION)
+        for token in (text or "").split()
+        if token.strip(_QUERY_PUNCTUATION)
+    ]
+    if not tokens:
+        return 0.0
+    identifiers = 0
+    for token in tokens:
+        if token.lower() in _PROSE_WORDS:
+            continue
+        if _IDENTIFIER_TOKEN.match(token):
+            identifiers += 1
+    return identifiers / len(tokens)
+
+
 def _options(
     request: SearchRequest,
     min_similarity: float,
     hybrid_search: bool = True,
     rerank_results: bool = False,
+    lexical_only: bool = False,
 ) -> Any:
     """
     Build the search options of one request, as the engine expects them.
@@ -728,11 +917,12 @@ def _options(
     query never requires the optional dependency to be installed; the client
     accepts either.
 
-    The two retrieval legs are the operator's, not the caller's: they come from
-    the policy, and they decide what the scores mean.  A reranked answer comes
-    back on a squashed cross-encoder logit, an unreranked hybrid one on a
-    Reciprocal Rank Fusion rank, and a plain vector one on cosine similarity —
-    see :attr:`SearchResult.score_scale`.
+    The two retrieval legs are the operator's, not the caller's: they come
+    from the policy, and they decide what the scores mean.  A reranked answer
+    comes back on a squashed cross-encoder logit, an unreranked hybrid one on
+    a Reciprocal Rank Fusion rank, a plain vector one on cosine similarity,
+    and a lexical-only one on the full-text rank — see
+    :attr:`SearchResult.score_scale`.
 
     Parameters
     ----------
@@ -755,11 +945,16 @@ def _options(
     Dict[str, Any]
         One accepted ``SearchOptions`` payload.
     """
+    if not lexical_only:
+        lexical_only = bool(getattr(request, "lexical_only", False))
     options: dict = {
         "max_results": int(request.max_results),
-        "hybrid_search": bool(hybrid_search),
+        # The flag wins over the store's own switch: asking for both is
+        # asking to skip the vectors.
+        "hybrid_search": False if lexical_only else bool(hybrid_search),
         "rerank_results": bool(rerank_results),
         "min_similarity": float(min_similarity),
+        "lexical_only": lexical_only,
         # ``use_and_operator`` is what intersects the *filter families* —
         # categories, named documents, templates, the metadata filter,
         # relative_path_contains.  At the engine default of False their

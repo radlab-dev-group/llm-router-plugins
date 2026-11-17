@@ -754,9 +754,7 @@ def test_mining_switches_are_overridable_from_the_environment(monkeypatch):
     monkeypatch.setenv(
         f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}TASK_SOLUTIONS_ENABLED", "false"
     )
-    monkeypatch.setenv(
-        f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}TOOL_RECIPES_ENABLED", "true"
-    )
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}TOOL_RECIPES_ENABLED", "true")
     config = AgenticKnowledgeConfig.from_json(
         '{"write": {"task_solutions_enabled": true, "tool_recipes_enabled": true}}'
     )
@@ -860,3 +858,56 @@ def test_a_reranker_row_above_the_relevant_band_warns_at_start(caplog):
     ]
     assert warnings, caplog.text
     assert "reranker" in warnings[0]
+
+
+def test_a_timeout_the_operator_set_is_kept():
+    """
+    A ceiling that silently overwrites a deliberate setting is a setting that
+    does not work, and an operator debugging it has no way to know otherwise.
+    A real engine that embeds and reranks answers past the old 10 s, so a
+    request that says 40 is a request that waits 40.
+    """
+    config = knowledge_config()
+    config.sse_timeout_seconds = 40.0
+    config.read_timeout_seconds = 45.0
+    config.validate()
+    assert config.sse_timeout_seconds == 40.0
+    assert config.read_timeout_seconds == 45.0
+
+
+def test_a_timeout_past_the_ceiling_is_clamped_and_said(caplog):
+    """The clamp stays — a mistyped timeout must not stall a request — but it does not go quiet."""
+    import logging
+
+    config = knowledge_config()
+    config.sse_timeout_seconds = 5000.0
+    config.read_timeout_seconds = 9000.0
+    with caplog.at_level(logging.WARNING, logger="agentic_knowledge"):
+        config.validate()
+    assert config.sse_timeout_seconds == 60.0
+    # The budget is then raised over one whole call, the invariant
+    # ``validate()`` keeps whatever the two numbers were set to.
+    assert config.read_timeout_seconds > 60.0
+    assert any("clamped" in line for line in caplog.messages)
+
+
+def test_a_timeout_of_zero_is_raised_rather_than_honoured():
+    """A call allowed no time is a search never made; the floor makes it one."""
+    config = knowledge_config()
+    config.sse_timeout_seconds = 0.0
+    config.read_timeout_seconds = 0.0
+    config.validate()
+    assert config.sse_timeout_seconds > 0.0
+    assert config.read_timeout_seconds > config.sse_timeout_seconds
+
+
+def test_the_environment_reads_a_timeout_above_the_old_ceiling(monkeypatch):
+    """
+    The variables the start script sets are the settings, not a suggestion the
+    configuration rounds down: 40 set through the environment arrives as 40.
+    """
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}SSE_API_TIMEOUT", "40")
+    monkeypatch.setenv(f"{AGENTIC_KNOWLEDGE_ENV_PREFIX}READ_TIMEOUT_SECONDS", "50")
+    config = knowledge_config().override_from_env()
+    assert config.sse_timeout_seconds == 40.0
+    assert config.read_timeout_seconds == 50.0

@@ -630,6 +630,16 @@ counters it can see.
 
 ## Configuration
 
+**Sizing the two timeouts.**  `…_SSE_API_TIMEOUT` is what one call to the engine may take;
+`…_READ_TIMEOUT_SECONDS` is what one request may spend on the engine in total, and a search
+starts only while a whole call still fits before that budget ends.  Size the budget as a
+multiple of the call: a mode that reads three collections and is given `20` and `20` asks one
+question and skips two, while `20` and `60` asks all three.  Both are clamped to `0.1…60` s —
+a ceiling meant for a typo, not a policy — and a clamp that bites says so at WARNING with the
+setting it clamped and the number it settled on, because a silent ceiling reads as "the timeout
+setting does not work".
+
+
 Policy is JSON (reviewable, versionable, no secrets); every connection is ENV only. Precedence: **ENV → JSON →
 built-in defaults**. A value present but malformed is an error, except connection settings, where a missing host just
 means the feature is unavailable.  `read.timeout_seconds` is the budget a whole request may spend on the engine, and a
@@ -648,6 +658,7 @@ per repository, naming both numbers.
   "scope": {"strategy": "repo_basename", "overrides": {}, "default": ""},
   "read": {"enabled": true, "timeout_seconds": 1.5, "min_similarity": 0.35,
             "hybrid_search": true, "rerank_results": false,
+            "fts_only_min_identifier_share": 0.5,
             "cache_ttl_seconds": 3600, "max_lookups_per_generation": 20},
   "modes": { "debug": {…}, "test": {…}, "implement": {…},
               "plan": {…}, "git_review": {…}, "review": {…} },
@@ -672,10 +683,16 @@ per repository, naming both numbers.
 ```
 
 The retrieval legs of one search are `read.hybrid_search` and `read.rerank_results`,
-switched by `…_HYBRID_SEARCH` and `…_RERANK_RESULTS`.  They also decide the scale every score comes
-back on — the engine's `results.score_scale`: a squashed cross-encoder logit with the reranker on,
-a Reciprocal Rank Fusion rank in a plain hybrid search, and a cosine similarity when the legs are
-off — so a threshold is a threshold *on one of those scales*, which is what
+switched by `…_HYBRID_SEARCH` and `…_RERANK_RESULTS`.  A third leg is skipped by default: when a
+query's tokens are mostly identifiers — `read.fts_only_min_identifier_share`, the share of
+tokens that look like code (an exception class, a module path, an underscored name; prose
+words never count), default `0.5` — the request is asked of the engine's full-text leg
+alone, with no embedding and no vector store, because an exact term is what a text index is
+for.  Set the share to `0` to keep every search on both legs.  They also decide the scale
+every score comes back on — the engine's `results.score_scale`: a squashed cross-encoder
+logit with the reranker on, a Reciprocal Rank Fusion rank in a plain hybrid search, the
+full-text rank in a lexical-only search, and a cosine similarity when the legs are off — so a
+threshold is a threshold *on one of those scales*, which is what
 `escalation.strong_recipe_scores` states per scale (`strong_recipe_score` remains the fallback for
 a scale the table leaves unnamed): a reranker logit under `rerank_results: true`, a cosine
 similarity with the legs off, and — in the default hybrid search — a fused rank the assembler
@@ -746,9 +763,9 @@ All use the prefix `LLM_ROUTER_KNOWLEDGE_AGENTIC_`. Booleans accept `1/0`, `true
 | `…_SSE_API_PREFIX`                    | **empty**        | empty ⇒ `sse_lib.endpoints.DEFAULT_API_PREFIX` (`api`); set it only when the engine is mounted elsewhere |
 | `…_SSE_API_TOKEN`                     | empty            | SSE token (never logged); when set, it wins over a login |
 | `…_SSE_API_USERNAME` / `…_SSE_API_PASSWORD` | empty      | engine login for an engine that authenticates by login rather than by a token; the client logs in on its first call; neither is ever logged |
-| `…_SSE_API_TIMEOUT`                   | `2.0`            | ceiling of one call to the engine, clamped to `0.1…10` s |
+| `…_SSE_API_TIMEOUT`                   | `2.0`            | ceiling of one call to the engine, clamped to `0.1…60` s (a clamp that bites is logged, never applied in silence) |
 | `…_SSE_VERIFY`                        | `true`           | TLS certificate verification                             |
-| `…_READ_TIMEOUT_SECONDS`              | `4.0`            | read budget: what one request may spend on the engine **in total**; never smaller than `…_SSE_API_TIMEOUT`, so one call always fits |
+| `…_READ_TIMEOUT_SECONDS`              | `4.0`            | read budget: what one request may spend on the engine **in total**, clamped to `0.1…60` s; never smaller than `…_SSE_API_TIMEOUT`, so one call always fits.  A cold engine that embeds and reranks needs both numbers well above the defaults — see below |
 | `…_SSE_IGNORE_LANGUAGE_DETECT`        | `true`           | ask the engine not to guess the language of the query (it would filter the vector leg to it and name the full-text configuration after it) |
 | `…_MIN_SIMILARITY`                    | `0.35`           | floor for a hit                                          |
 | `…_HYBRID_SEARCH`                     | `true`           | fuse the vector leg with the full-text leg               |

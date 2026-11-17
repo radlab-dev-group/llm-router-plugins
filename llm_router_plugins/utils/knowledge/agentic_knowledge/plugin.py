@@ -206,6 +206,7 @@ class AgenticKnowledgePlugin(PluginInterface):
                 min_similarity=config.min_similarity,
                 hybrid_search=config.hybrid_search,
                 rerank_results=config.rerank_results,
+                fts_only_min_identifier_share=config.fts_only_min_identifier_share,
                 ignore_language_detect=config.sse_ignore_language_detect,
                 logger=self._logger,
             )
