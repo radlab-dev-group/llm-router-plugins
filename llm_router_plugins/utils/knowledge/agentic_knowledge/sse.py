@@ -43,13 +43,16 @@ this module sends it by default (:meth:`KnowledgeStore.search`).
 
 import inspect
 import logging
+import threading
 import time
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 __all__ = [
     "KnowledgeStore",
+    "REASON_MEMO",
     "REASON_READ_BUDGET",
     "SCALE_COSINE",
     "SCALE_RRF",
@@ -93,6 +96,21 @@ _MAX_HIT_CHARS = 4000
 #: engine answers with HTTP 200 and this code in the body, so it arrives as an
 #: API error rather than as an empty answer.
 _COLLECTION_MISSING_CODE = "engine_001"
+
+#: How long an identical, already answered question is remembered: long enough
+#: that a generation which asks the same question of the same collection more
+#: than once pays the engine only the first time, short enough that an answer
+#: that goes stale goes stale inside one generation and not across them.
+_MEMO_TTL_SECONDS = 300.0
+
+#: The memo is a per-process LRU; the ceiling is what one generation of
+#: requests can plausibly fill, not what the machine can hold.
+_MEMO_MAX_ENTRIES = 128
+
+#: :attr:`SearchResult.reason` — the answer came from this process's memo of
+#: an identical question, not from the engine.  It is an ``ok`` result; the
+#: reason is how the caller tells a remembered answer from a fresh one.
+REASON_MEMO = "memo"
 
 
 @dataclass(frozen=True)
@@ -310,6 +328,8 @@ class KnowledgeStore:
         self._unavailable_reason = (
             "" if (client is not None or self._host) else ("no host configured")
         )
+        self._memo: "OrderedDict[SearchRequest, SearchResult]" = OrderedDict()
+        self._memo_lock = threading.Lock()
 
     @property
     def available(self) -> bool:
@@ -351,6 +371,20 @@ class KnowledgeStore:
             return SearchResult(STATUS_OK)
         if deadline is not None and deadline - time.monotonic() < self._timeout:
             return SearchResult(STATUS_UNAVAILABLE, reason=REASON_READ_BUDGET)
+        # The question is frozen, and a generation asks the same frozen
+        # question of the same collection more than once: once for the query
+        # and once more when the same wording resurfaces.  The first answer is
+        # good enough for the second within the memo's life, so the second
+        # never reaches the engine at all.
+        now = time.monotonic()
+        memoed = self._memo_get(request, now)
+        if memoed is not None:
+            return SearchResult(
+                memoed.status,
+                hits=memoed.hits,
+                reason=REASON_MEMO,
+                score_scale=memoed.score_scale,
+            )
         try:
             client = self._ensure_client()
         except Exception as exc:
@@ -388,11 +422,17 @@ class KnowledgeStore:
             )
             return SearchResult(STATUS_UNAVAILABLE, reason=type(exc).__name__)
         scale = _score_scale(response)
-        return SearchResult(
+        result = SearchResult(
             STATUS_OK,
             hits=tuple(_hits(request.collection, response, scale)),
             score_scale=scale,
         )
+        # Only a real answer is worth remembering: a failure is a state the
+        # engine may leave before the next identical question, and a missing
+        # collection is the worker's to create, so neither is memoed.
+        if result.status == STATUS_OK and result.reason != "no collection":
+            self._memo_put(request, now, result)
+        return result
 
     def push_quality(
         self,
@@ -472,6 +512,31 @@ class KnowledgeStore:
                 except Exception:  # closing must not raise
                     return
                 return
+
+    def _memo_get(
+        self, request: SearchRequest, now: float
+    ) -> Optional[SearchResult]:
+        """The remembered answer to an identical question, if it is still young."""
+        with self._memo_lock:
+            entry = self._memo.get(request)
+            if entry is None:
+                return None
+            result, stored_at = entry
+            if now - stored_at > _MEMO_TTL_SECONDS:
+                del self._memo[request]
+                return None
+            self._memo.move_to_end(request)
+            return result
+
+    def _memo_put(
+        self, request: SearchRequest, now: float, result: SearchResult
+    ) -> None:
+        """Remember *result* for *request*, evicting the oldest past the ceiling."""
+        with self._memo_lock:
+            self._memo[request] = (result, now)
+            self._memo.move_to_end(request)
+            while len(self._memo) > _MEMO_MAX_ENTRIES:
+                self._memo.popitem(last=False)
 
     # -------------------------------------------------------------- helpers -
     def _ensure_client(self) -> Any:

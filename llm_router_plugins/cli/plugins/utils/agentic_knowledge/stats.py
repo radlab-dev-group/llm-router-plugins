@@ -131,7 +131,7 @@ def _format_rate(value: Optional[float]) -> str:
 def _print_text(rows: List[Dict[str, Any]]) -> None:
     print(
         f"{'scope':<28} {'day':<10} {'turns':>6} {'inj':>5} {'docs':>5} "
-        f"{'loops':>6} {'esc':>4} {'fail':>5}  "
+        f"{'loops':>6} {'esc':>4} {'fail':>5} {'memo':>5}  "
         + "  ".join(
             name.replace("_rate", "").replace("_share", "") for name in _RATE_ORDER
         )
@@ -141,7 +141,8 @@ def _print_text(rows: List[Dict[str, Any]]) -> None:
             f"{str(row.get('scope', ''))[:28]:<28} {row['day']:<10} "
             f"{row['turns']:>6} {row['injected_turns']:>5} "
             f"{row['injected_docs']:>5} {row['loops']:>6} "
-            f"{row['escalations']:>4} {row['read_failures']:>5}  "
+            f"{row['escalations']:>4} {row['read_failures']:>5} "
+            f"{row.get('memo_hits', 0):>5}  "
             + "  ".join(_format_rate(row.get(name)) for name in _RATE_ORDER)
         )
 

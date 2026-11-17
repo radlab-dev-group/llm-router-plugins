@@ -49,6 +49,7 @@ FIELDS = (
     "feedback_up",
     "feedback_down",
     "read_failures",
+    "memo_hits",
 )
 
 
@@ -209,6 +210,7 @@ class KnowledgeMetrics:
             "loops": snap.get("loops", 0),
             "escalations": snap.get("escalations", 0),
             "read_failures": snap.get("read_failures", 0),
+            "memo_hits": snap.get("memo_hits", 0),
             # Of the turns that were shown a block, how many went on to mine a
             # verified fix: the layer's adoption of its own guidance.
             "adoption_rate": ratio(

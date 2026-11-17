@@ -86,6 +86,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.miner import EpisodeMi
 from llm_router_plugins.utils.knowledge.agentic_knowledge.query import QueryBuilder
 from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import ScopeResolver
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+    REASON_MEMO,
     REASON_READ_BUDGET,
     KnowledgeStore,
     STATUS_DISABLED,
@@ -575,6 +576,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         skipped = sum(
             1 for result, _ in results if result.reason == REASON_READ_BUDGET
         )
+        memo_hits = sum(1 for result, _ in results if result.reason == REASON_MEMO)
         for result, _ in results:
             statuses.add(result.status)
         if self._metrics is not None and turn.scope:
@@ -586,9 +588,18 @@ class AgenticKnowledgePlugin(PluginInterface):
             unavailable = sum(
                 1 for result, _ in results if result.status == STATUS_UNAVAILABLE
             )
+            counts = {}
             if unavailable:
+                counts["read_failures"] = unavailable
+            if memo_hits:
+                # The number that says the memo earned its staleness window:
+                # engine calls this process did not make.  It is read against
+                # `searches_per_request`, which counts the question whether or
+                # not the engine was asked it.
+                counts["memo_hits"] = memo_hits
+            if counts:
                 try:
-                    self._metrics.record(turn.scope, read_failures=unavailable)
+                    self._metrics.record(turn.scope, **counts)
                 except Exception:  # a scoreboard is never a reason to fail a read
                     pass
         if skipped:
@@ -621,6 +632,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             doc_context=context.doc_context,
             searches=len(results),
             budget_skipped=skipped,
+            memo_hits=memo_hits,
             cache_miss_reason="cold",
         )
 
@@ -1067,6 +1079,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             "read_budget_skips": int(
                 getattr(context, "budget_skipped", 0) if context else 0
             ),
+            "memo_hits": int(getattr(context, "memo_hits", 0) if context else 0),
             "cache_miss_reason": (
                 context.cache_miss_reason if context is not None else ""
             ),
