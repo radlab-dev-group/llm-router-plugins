@@ -77,6 +77,8 @@ setup(
             "llm_router_plugins.cli.plugins.utils.agentic_knowledge.docs:main",
             "llm-router-agentic-kb-stats="
             "llm_router_plugins.cli.plugins.utils.agentic_knowledge.stats:main",
+            "llm-router-agentic-kb-learner="
+            "llm_router_plugins.cli.plugins.utils.agentic_knowledge.learner:main",
         ],
     },
     classifiers=[
