@@ -28,7 +28,7 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.state import (
     RedisConnectionSettings,
 )
 
-__all__ = ["RedisClientHandle"]
+__all__ = ["RedisClientHandle", "LazyRedisClient"]
 
 
 class RedisClientHandle:
@@ -137,3 +137,33 @@ class RedisClientHandle:
         """Report one failure when a logger was given."""
         if self._logger is not None:
             self._logger.warning(message, *args)
+
+
+class LazyRedisClient:
+    """
+    A handle wearing the face of a client.
+
+    Two disciplines meet here.  :class:`RedisClientHandle` exists so a proxy
+    that preloads and then forks does not hand every worker its parent's
+    connection pool; plenty of this layer's collaborators want instead a
+    duck-typed client with ``hincrby``/``hgetall``/``xadd`` on it.  This is
+    that client: it resolves the handle on every command, so the connection is
+    built by the process that uses it, and an unconfigured deployment reads as
+    ``None`` — which every one of those callers already treats as "keep the
+    state in memory".
+
+    A command that fails is raised, not swallowed: the callers of this object
+    are fail-open by their own rule, and hiding a connection error here would
+    take the decision away from them.
+    """
+
+    def __init__(self, handle: RedisClientHandle) -> None:
+        """Bind the handle; open nothing."""
+        self._handle = handle
+
+    def __getattr__(self, name: str) -> Any:
+        """Resolve the client of this process and hand the call to it."""
+        client = self._handle.get()
+        if client is None:
+            raise ConnectionError("redis is not configured")
+        return getattr(client, name)

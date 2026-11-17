@@ -53,6 +53,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
     LookupLimiter,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.redisclient import (
+    LazyRedisClient,
     RedisClientHandle,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
@@ -135,6 +136,12 @@ class AgenticKnowledgePlugin(PluginInterface):
     adapters : Tuple[AgentAdapter, ...], optional
         Adapters, in resolution order; the configured ones are built when
         omitted.
+    redis_client : Any, optional
+        A Redis client the shared state should use instead of one built from
+        the policy's connection settings; tests pass a fake one.  It goes
+        through the same fork-aware handle the request path uses, so a proxy
+        that preloads and then forks still never hands a worker its parent's
+        connection pool.
 
     Raises
     ------
@@ -157,6 +164,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         publisher: Optional[KnowledgeEventPublisher] = None,
         adapters: Optional[Tuple[AgentAdapter, ...]] = None,
         metrics: Optional[KnowledgeMetrics] = None,
+        redis_client: Any = None,
     ) -> None:
         """Resolve the policy and wire the collaborators; open no connection."""
         super().__init__(logger=logger)
@@ -165,6 +173,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._cache = cache
         self._publisher = publisher
         self._adapters = adapters
+        self._redis_client = redis_client
         self._miner: Optional[EpisodeMiner] = None
         self._query_builder: Optional[QueryBuilder] = None
         self._escalation: Optional[EscalationPolicy] = None
@@ -246,11 +255,20 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._docs = DocsIndexer(
             config=config, publisher=self._publisher, logger=self._logger
         )
+        # One fork-aware holder for every Redis the request path touches: the
+        # votes live there, and a proxy that preloads and then forks must not
+        # hand a worker its parent's sockets.  It is built even when Redis is
+        # not configured, so a deployment without Redis keeps the in-process
+        # state it always had, and one with Redis shares the votes across
+        # workers and across restarts.
+        self._redis = RedisClientHandle(
+            connection=config.redis,
+            client=self._redis_client,
+            logger=self._logger,
+        )
         self._feedback_tracker = FeedbackTracker(
+            client=LazyRedisClient(self._redis),
             key_prefix=config.key_prefix,
-            handle=(
-                RedisClientHandle(config.redis) if config.redis.configured else None
-            ),
         )
         if self._metrics is None:
             # Built on the same connection the cache and the publisher use, so
