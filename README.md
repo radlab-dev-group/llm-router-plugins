@@ -308,6 +308,17 @@ superseded is retired; a scan that ran out of its ceilings publishes no retireme
 `llm-router-agentic-kb-docs` does the same scan on demand (`--dry-run` to see what would be
 published), which is also how a repository whose router runs on another machine gets documentation.
 
+The layer can also **learn from its own traffic** (opt-in, `learning.enabled`,
+`LLM_ROUTER_KNOWLEDGE_AGENTIC_LEARNING_ENABLED`): every injection is logged with
+its features, every verdict is graded per document rather than per block, and a
+document's reputation, a per-scope ranking model and the value of a source's
+budget are estimated from that log — offline, in
+`llm-router-agentic-kb-learner`, never on the request path — and published as a
+versioned snapshot the read path applies as a clamped multiplier. Off by
+default, and the log is written either way, so collecting with learning off is
+the recommended first step. See the [Learning (opt-in)](llm_router_plugins/utils/knowledge/agentic_knowledge/README.md#learning-opt-in)
+section of the layer's README.
+
 The engine may be reached by a pre-issued token or by a username/password login
 (`SSE_API_USERNAME`/`SSE_API_PASSWORD`; the client logs in on its first call).
 

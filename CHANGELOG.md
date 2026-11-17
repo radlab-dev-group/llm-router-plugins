@@ -25,6 +25,40 @@ release tagged as `v<version>`.
 
 ## [Unreleased]
 
+### Added
+- **The knowledge layer can learn from its own traffic (`learning`, opt-in).** The layer has
+  always voted on what it injected — a verified fix credits the block, a returning failure
+  blames it — but every number that turns those votes into a ranking was chosen by hand.  They
+  can be estimated instead, and `learning.py` is the estimation: a document's reputation is a
+  Beta posterior with a half-life and Thompson sampling (so a recipe nobody has needed for two
+  months drifts back to *unknown* instead of staying famous), a per-scope ridge logistic
+  regression over the features a candidate already carries is fitted offline, and a per
+  `(mode, kind)` bandit learns what a character of one source's budget is worth.  Nothing
+  trains on the request path: the proxy reads a reputation from one hash and a versioned
+  snapshot from one key, writes the features it showed to a bounded training stream, and every
+  multiplier is clamped to the `0.3 … 1.5` range the static counter already used.  A fit the
+  holdout cannot separate, or a scope with too few labels, publishes a *neutral* snapshot —
+  which reads as `1.0` and is the layer as it behaves today.  The policy JSON is never
+  overwritten by a model; the model multiplies and the policy clamps.
+  **The verdict is now graded per document** rather than credited to the whole block:
+  `+1.0` names the failure that was fixed, `+0.5` shares a touched file or the command that
+  went green, `0.0` proves nothing about that document and trains nothing, `-1.0` was about the
+  failure that came back, `-0.3` rode along in a block that did not help; a document whose own
+  header names nothing falls back to the block's verdict, marked `coarse` so a fit can tell the
+  two kinds of credit apart.  Off by default (`learning.enabled`,
+  `LLM_ROUTER_KNOWLEDGE_AGENTIC_LEARNING_ENABLED`); **the training log is written either way**,
+  because a label can only be attached to an exposure that was recorded while it happened, and
+  collecting with learning off is the recommended first step.
+  `llm-router-agentic-kb-learner` drains the stream, fits every scope and publishes; the
+  annotation carries `model_id`, `holdout_auc` and `labelled`, so "why was this recipe first"
+  is answered from the response.
+- **The injection votes live in Redis, not in one worker.** `FeedbackTracker` was built without
+  a client, so a verdict counted in one process was invisible to the others and gone on
+  restart — the shared reputation the changelog had promised never existed.  The plugin now
+  wires one fork-aware handle through a lazy client to the tracker, the reputation store, the
+  bandit, the training stream and the model snapshots; with no Redis each keeps the in-process
+  state it had before, and `metrics.feedback.source` says which of the two is answering.
+
 ### Fixed
 - **A timeout the operator set is the timeout the layer uses.** Both `read.sse_timeout_seconds`
   (`…_SSE_API_TIMEOUT`) and `read.timeout_seconds` (`…_READ_TIMEOUT_SECONDS`) were clamped to a

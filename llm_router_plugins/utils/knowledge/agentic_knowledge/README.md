@@ -162,6 +162,7 @@ knowledge to use, and none is mined from it, so it carries no annotation.
 | `escalation.py`    | `EscalationPolicy.decide`                                                    |
 | `sse.py`           | `KnowledgeStore`: thin fail-open façade over `sse_lib`                       |
 | `documents.py`     | document kinds, names, metadata contract                                     |
+| `learning.py`      | the learned path: document reputation, the per-scope ranking model, the source bandit and the training log — stdlib only, nothing trains on the request path |
 | `evaluation.py`    | counterfactual replay over recorded sessions                                 |
 
 ### Scope
@@ -671,6 +672,13 @@ per repository, naming both numbers.
                           "ttl_seconds": 1209600}},
   "escalation": {"enabled": false, "loop_threshold": 3, "strong_recipe_score": 0.6,
                   "strong_recipe_scores": {"reranker": null}},
+  "learning": {"enabled": false, "mult_min": 0.3, "mult_max": 1.5,
+                "prior_alpha": 2.0, "prior_beta": 2.0,
+                "half_life_seconds": 2592000, "min_observations": 3,
+                "l2": 32.0, "weight_clip": 3.0, "newton_steps": 4,
+                "min_samples": 200, "min_holdout_auc": 0.6,
+                "explore_coeff": 0.25, "explore_rate": 0.1,
+                "model_ttl_seconds": 60, "stream_key": "agentic_kb:training"},
   "docs": {"enabled": true, "auto_index": true,
             "patterns": ["*.md", "*.markdown", "*.mdx"],
             "excluded_dirs": ["node_modules", "dist", "build", "vendor"],
@@ -757,6 +765,7 @@ All use the prefix `LLM_ROUTER_KNOWLEDGE_AGENTIC_`. Booleans accept `1/0`, `true
 | `…_WRITE_ENABLED`                     | `true`           | publishing on/off (reads may stay on)                    |
 | `…_ARCHIVE_ENABLED`                   | `true`           | compaction archiving on/off                              |
 | `…_ESCALATION_ENABLED`                | **`false`**      | model escalation on/off                                  |
+| `…_LEARNING_ENABLED`                  | **`false`**      | the learned path on/off: reputation, the fitted model and the source bandit. The training log is written either way — see [Learning (opt-in)](#learning-opt-in) |
 | `…_COLLECTION_PREFIX`                 | `agentic_kb`     | prefix of every SSE collection (letters/digits/`_`/`.` only) |
 | `…_KEY_PREFIX`                        | `agentic-kb`     | Redis key namespace                                      |
 | `…_SSE_API_HOST`                      | **empty**        | **empty ⇒ no reads**                                     |
@@ -890,6 +899,28 @@ pointed at a different policy would report an empty scoreboard as an unused know
 command, it reads its Redis connection from **exported environment variables**, not from a `.env` in the scanned
 directory; with no Redis configured it refuses rather than printing zeros.
 
+### Learner command
+
+```bash
+llm-router-agentic-kb-learner                     # drain the training stream, fit every scope, publish
+llm-router-agentic-kb-learner --report            # the same, plus one JSON result per scope
+llm-router-agentic-kb-learner --scope webapp      # one scope only (warns when the batch held none)
+llm-router-agentic-kb-learner --count 2000        # read more of the stream in one pass
+llm-router-agentic-kb-learner --holdout 0.3 --seed 7   # a wider holdout, a reproducible split
+```
+
+The offline half of [Learning (opt-in)](#learning-opt-in): it reads the training stream, fits
+one ranking model per repository from the labels that stream carries, and publishes a versioned
+snapshot the read path applies.  It writes nothing to the engine and touches no policy: what it
+publishes is a Redis key the proxy reads with one `GET`, and a fit it is not confident about
+publishes a neutral snapshot instead.  A pass reports, per scope, how much it scanned, how many
+labels it had, what the fit separated on the holdout, and whether the snapshot was accepted or
+refused — with the reason, so "the learner did not run" and "the learner declined to publish"
+are two different sentences an operator can tell apart.  It needs Redis and nothing else: no
+engine, no embedder, no reranker, and it can run on a machine that cannot reach either.  It is
+not a daemon: a pass is a pass, which is what makes `cron` the natural supervisor, and a scope
+is only worth refitting when enough labels have changed to move the fit.
+
 ---
 
 ## Adapters
@@ -929,6 +960,10 @@ cannot be seen. Claude Code requests read the shared knowledge base; they do not
 - Paths outside `repo_root` are dropped from metadata; only paths relative to the repository are stored. Absolute paths
   and the declared working directory are never indexed.
 - Annotation and logs carry no document content, no tokens, no hosts, no full session ids.
+- The **training stream** of the learned path carries features and document names only: numbers,
+  booleans, the kind and mode of a candidate, and the `kind:date:hash` name the engine gives a
+  mined document.  No text, no path, no command — a record that carried a path would undo the
+  worker's masking from the other side, and a test pins the absence.
 - Retention deletes only documents of this plugin's own collections, and only of the kind it names.
   `session_archive` ages on `archive.ttl_seconds`
   (default 14 days), which is the shortest-lived and largest-volume kind.
@@ -944,6 +979,128 @@ the ceiling on SSE calls is per worker either way and grows with the number of w
 guarantee. The escalated model carries over to the next request of the generation only inside the worker that decided
 it. There is deliberately no local file fallback, because a fallback that diverges between workers is worse than no
 fallback at all.
+
+## Learning (opt-in)
+
+The layer already measures what happens after an injection — a mined fix, or the same failure coming back — and
+turns that into a vote per document.  The vote works, but everything about it was chosen by hand: the prior of a
+document nobody has judged, the range a verdict may move a vote through, the constants a matching signature or a
+shared file earn, and the weight of a source in a mode.  Those numbers can be *estimated* instead, and the
+`learning` section of the policy does the estimating without ever touching a request.
+
+**Off by default, and "off" is not "empty".**  With `learning.enabled: false` — the shipped default — every
+multiplier is `1.0` and the layer behaves exactly as it did before this section existed.  What is *not* off is the
+training log: every injection is written to the `learning.stream_key` stream with its features, and every settled
+verdict is written with its label, whether or not anything will ever read them.  A model can be fitted in an
+afternoon once the records exist; the records only exist if they were written while the traffic was happening, and
+that is the part that cannot be recovered afterwards.  Collecting with learning off is therefore the recommended
+first step: it costs one bounded stream write per settled turn, changes no ranking, and is the corpus the next
+phase trains on.
+
+### What is learned, and where
+
+Two loops, deliberately of different speed, and **nothing trains on the request path**:
+
+| Level | Question | Model | Where it runs | How it is used |
+|-------|----------|-------|---------------|----------------|
+| document | "does this particular advice work" | a Beta posterior with a half-life, sampled by Thompson's rule | online, in the proxy, as counting | a multiplier in `learning.mult_min … learning.mult_max` — the same range the static counter already used |
+| candidate features | "which features predict that an advice works" | a ridge logistic regression over the features a candidate already carries; Newton with a corpus-scaled ridge, a Laplace spread per weight | offline, in `llm-router-agentic-kb-learner` | a versioned snapshot the proxy reads with one `GET` and a 60 s local cache; the spread is the exploration term |
+| source per mode | "what a character of this source's budget is worth here" | a Beta posterior per `(mode, kind)` with the character cost averaged in | online, as counting | the value-per-character the hand-written `weight` in the policy is a guess at |
+
+The policy's own thresholds — `strong_recipe_score`, `loop_threshold`, the source `weight`s — are **never
+overwritten by a model**.  The model multiplies; the policy clamps.  That is the brake an operator can read in a
+diff, and a snapshot that could not beat the policy publishes a *neutral* one — weights at zero, which reads as
+`1.0` everywhere and behaves exactly like the layer without learning.  A fit the holdout cannot separate better
+than `learning.min_holdout_auc`, or a scope with fewer than `learning.min_samples` labels, publishes that neutral
+snapshot, and the log line says which of the two it was.
+
+### The label is per document, not per block
+
+The static verdict is one bit for the whole block: a turn that mined a fix credits *every* document on screen, and
+a turn that proves nothing credits nothing, so the most common consequence of a bad recipe is **no signal at all**.
+The learner grades each document against the evidence of the turn that judged it:
+
+| label | when | weight |
+|-------|------|--------|
+| `+1.0` confirmed | the document names the very failure that was verified fixed this turn | full |
+| `+0.5` plausible | the turn was resolved and the document shares a touched file or declares the command that just went green | half |
+| `0.0` unattributed | the turn was resolved and this document has nothing in common with it — logged as an exposure, fitted as nothing | none |
+| `-1.0` debunked | the same failure came back and the document was about it | full |
+| `-0.3` rejected | the failure came back and the document is unrelated to it | a third |
+
+`0.0` is not a downvote.  It is "this turn proves nothing about this document", and training it as a failure would
+teach the model that being shown is bad — which is the opposite of what a knowledge base is for.
+
+### The features, and why they are safe
+
+Every feature is a number the assembler already has when it builds a candidate: the normalized score and the scale
+it was normalized on, whether the signature matches, how many touched files the document names, whether its
+verification command is the one now failing, its age, its vote history, its rank in the engine's result set, and its
+share of the mode's character budget.  Nothing here is content — no text, no path, no command, no session id —
+because the record goes to the training stream, and the worker masks the documents it is fitted on precisely so the
+layer never keeps content it cannot re-identify.  A training record that carried a path would undo that masking
+from the other side, so the stream is numbers and names by construction, and a test pins it.
+
+### Redis layout
+
+Next to the rest of the plugin state, under `learning.key_prefix` (the policy's `key_prefix`):
+
+| Key | What |
+|-----|------|
+| `{prefix}:training` (a stream) | the training log: one record per exposure, one per settled verdict, `MAXLEN ~` bounded |
+| `{prefix}:rep:{doc}` | one document's posterior (`a`, `b`, `e`, `t`), TTL of four half-lives |
+| `{prefix}:arms` | the per-`(mode, kind)` source posteriors |
+| `{prefix}:model:{scope}` | one scope's published snapshot: weights, the Laplace diagonal, `model_id`, `trained_at`, `samples`, `holdout_auc` |
+
+A document's state is written on every verdict and read on every ranking; a snapshot is written by the learner and
+read with one `GET` per scope per `model_ttl_seconds`.  A Redis that is not configured keeps all of it in process
+memory — the same degradation the generation cache already accepts — and a Redis that answers with an error is
+caught by every one of these reads, which then serve the in-memory state they kept writing.  The learner itself
+needs Redis: without it there is no stream to drain, and it says so instead of fitting on nothing.
+
+### Switching it on
+
+```bash
+# the whole learned path, from the environment:
+export LLM_ROUTER_KNOWLEDGE_AGENTIC_LEARNING_ENABLED=true
+
+# …or from the policy JSON, where its bounds are:
+#   "learning": {"enabled": true, "min_samples": 200, "min_holdout_auc": 0.6}
+```
+
+Then run the learner next to the indexing worker — a cron every few hours is plenty, because a snapshot is only
+worth re-earning when the labels that changed are many:
+
+```bash
+llm-router-agentic-kb-learner            # one pass: drain the stream, fit every scope, publish
+llm-router-agentic-kb-learner --report   # one JSON line per scope: samples, holdout AUC, accepted|refused
+```
+
+The annotation says which model served a request, with the evidence it was fitted on, so "why was this recipe
+first" is answerable from the response itself:
+
+```jsonc
+"learning": {"enabled": true, "model_id": "webapp:1763347200:1412:0.710",
+              "holdout_auc": 0.71, "labelled": 1412, "range": [0.3, 1.5]}
+```
+
+### When to trust it, and when not to
+
+The honest threshold table, because a model that cannot beat the policy is worse than no model — it still reorders
+the block and still costs the characters it reorders:
+
+| Layer | Minimum data | Below it |
+|-------|--------------|----------|
+| document reputation | ~20–30 labels per scope | the multiplier is `1.0` under `min_observations`; the posterior is wide and the clamp holds it |
+| the per-scope model | ~1 000 labels per scope | a neutral snapshot is published and the layer is the static one |
+| the source bandit | ~100 labels per arm | the arm returns the policy weight, which is what the JSON says |
+
+A scope with a few dozen labels is served mostly by the policy and mostly by the reputation; the model's share
+grows with the evidence, through the Laplace spread, rather than with a switch.  The replay in `evaluation.py` is
+the place to check whether that share is worth its characters before a deployment takes it on: a variant that
+re-ranks with the learned multipliers should beat `read` on `recipe_hit_rate` without raising
+`injected_chars_per_turn`, and the snapshot's `holdout_auc` is the number to look at before a request ever sees
+one.
 
 ## Evaluation
 
@@ -968,6 +1125,23 @@ must produce, so the mining shapes a recorded corpus lacks are asserted where th
 
 ## Limitations
 
+- **Learning is a multiplier, not an authority.** The learned path may only reorder within the
+  `learning.mult_min … mult_max` clamp, and only where the policy left room; a snapshot that
+  cannot beat the policy publishes the neutral one.  It needs labels — dozens per document, a
+  thousand per scope before a model earns its keep — and on a corpus with a handful of verified
+  fixes per month it will correctly decline to publish anything, forever.  Read the learner's
+  report before concluding it is broken: `too_few_labels` and `holdout_auc_below_floor` are the
+  honest answers on a young knowledge base, and both leave the layer behaving exactly as it did
+  without learning.
+- **The training log is bounded and lossy by design.** `learning.stream_key` is capped with
+  `MAXLEN ~` like the indexing stream, and a verdict that arrives after its exposure has aged
+  out of the window trains nothing.  A learner that runs once a week reads a stream it can hold;
+  one that runs once a quarter should expect to fit on less than it collected.
+- **A credit is a hypothesis.** The graded label is the strongest attribution the turn's
+  evidence supports, not proof that the agent followed the advice: a recipe about the failure
+  that got fixed may have been read and ignored while the agent fixed it by hand.  The coarse
+  fallback is marked as such, and `labelled` in the annotation is the number to read against
+  any claim the model makes.
 - **Signature quality decides everything.** Loop detection and recipe relevance both hang on `signature.py`, which
   normalizes paths, line numbers, addresses, hashes and timestamps. Verify on real output before trusting a threshold.
 - **Token cost.** Re-injecting every request of a generation costs tokens, bounded per mode by `max_chars`; the
