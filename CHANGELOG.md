@@ -45,7 +45,12 @@ release tagged as `v<version>`.
   went green, `0.0` proves nothing about that document and trains nothing, `-1.0` was about the
   failure that came back, `-0.3` rode along in a block that did not help; a document whose own
   header names nothing falls back to the block's verdict, marked `coarse` so a fit can tell the
-  two kinds of credit apart.  Off by default (`learning.enabled`,
+  two kinds of credit apart.  A graded verdict enters the fit as its **direction** with weight
+  `|label|` — half an observation of success, a third of an observation against — because the
+  likelihood is Bernoulli's; putting the graded number in the target instead makes `+0.5` an
+  observation that `p = 0.5`, which teaches nothing while still counting as labelled when the
+  fit is gated, so a scope of plausible verdicts would clear the holdout and publish a model
+  that had learned nothing.  Off by default (`learning.enabled`,
   `LLM_ROUTER_KNOWLEDGE_AGENTIC_LEARNING_ENABLED`); **the training log is written either way**,
   because a label can only be attached to an exposure that was recorded while it happened, and
   collecting with learning off is the recommended first step.

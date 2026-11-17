@@ -11,6 +11,8 @@ import json
 import random
 import time
 
+from dataclasses import replace
+
 
 import pytest
 
@@ -345,6 +347,57 @@ def test_ranker_refuses_a_corpus_too_small_to_fit():
         corpus(40, signal=True), "repo", config=config, rng=random.Random(9)
     )
     assert report["refused"] == "too_few_labels"
+    assert snapshot.neutral is True
+
+
+def test_a_graded_verdict_teaches_in_proportion_to_how_sure_it_was():
+    """
+    A plausible fix is half an observation of success, not half a coin flip.
+
+    The graded labels of the settle path are weaker *evidence*, not weaker
+    *claims*.  Folding ``+0.5`` into the target makes it an observation that
+    ``p = 0.5`` — the one thing a corpus can state without teaching anything —
+    and yet the verdict still counts as labelled when the fit is gated, so a
+    whole scope of plausible fixes could clear the holdout and publish a model
+    that had learned nothing at all.  The direction has to come through, with
+    a magnitude that says how sure the verdict was.
+    """
+    config = LearningConfig(enabled=True, min_samples=200, min_holdout_auc=0.6)
+    signature = FEATURE_NAMES.index("signature_match")
+
+    sure = ContextRanker(config=config, rng=random.Random(4))
+    sure.fit(corpus(600, signal=True), holdout_fraction=0.25)
+
+    graded = ContextRanker(config=config, rng=random.Random(4))
+    report = graded.fit(
+        [
+            replace(row, label=0.5 if row.label > 0 else -0.3)
+            for row in corpus(600, signal=True)
+        ],
+        holdout_fraction=0.25,
+    )
+
+    assert graded.weights[signature] > 0.05, "a graded verdict taught nothing"
+    assert graded.weights[signature] < sure.weights[signature]
+    # The holdout agrees the direction was there rather than a coin flip.
+    assert report["holdout_auc"] > 0.9
+
+
+def test_a_corpus_of_one_verdict_only_is_refused_not_flattered():
+    """
+    A scope that has only ever seen success has nothing to be taught.
+
+    One class is nothing to separate, so the holdout cannot say the fit did
+    anything — which is also what keeps a base rate with no counter-evidence
+    from running to the clip and publishing a saturated block as a model.
+    """
+    snapshot, report = train_ranker(
+        [replace(row, label=1.0) for row in corpus(300, signal=True)],
+        "repo",
+        config=LearningConfig(enabled=True, min_samples=200, min_holdout_auc=0.6),
+        rng=random.Random(5),
+    )
+    assert report["refused"] == "holdout_auc_below_floor"
     assert snapshot.neutral is True
 
 

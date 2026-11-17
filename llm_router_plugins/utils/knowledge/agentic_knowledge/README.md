@@ -1031,6 +1031,15 @@ The learner grades each document against the evidence of the turn that judged it
 `0.0` is not a downvote.  It is "this turn proves nothing about this document", and training it as a failure would
 teach the model that being shown is bad — which is the opposite of what a knowledge base is for.
 
+The *weight* column is how the fit reads a graded verdict, and it is the part that matters.  The likelihood is
+Bernoulli's, so the verdict's **direction** is the target and its **strength** is the observation's weight: a
+plausible fix is half an observation of success, a debunked recipe a whole observation of failure, a document that
+merely rode along a third of an observation against it.  Folding the graded number into the target instead —
+`+0.5` as "75% useful" or "50% useful" — reads as an observation that `p = 0.5`, the one thing a corpus can state
+without teaching anything, while the verdict still counts as labelled when the fit is gated.  That is how a scope
+of plausible fixes clears the holdout and publishes a model that had learned nothing, so the direction comes
+through with a magnitude that says how sure the verdict was, and a test pins it.
+
 ### The features, and why they are safe
 
 Every feature is a number the assembler already has when it builds a candidate: the normalized score and the scale

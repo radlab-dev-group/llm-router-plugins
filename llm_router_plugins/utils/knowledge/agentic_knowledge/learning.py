@@ -1484,24 +1484,32 @@ def _split(
 
 def _target(label: float) -> Tuple[float, float]:
     """
-    One graded verdict as a soft target and its weight.
+    One graded verdict as a target direction and an evidence weight.
 
     The layer's labels are graded and signed — ``1.0`` for a confirmed fix,
     ``0.5`` for a plausible one, ``-1.0`` for a debunked recipe — and the
-    honest reading of those is a soft target ``(label + 1) / 2`` observed with
+    honest reading of those is the *direction* of the verdict, observed with
     weight ``|label|``: a plausible fix is half an observation of success, a
-    debunked one is a whole observation of failure.
+    debunked recipe a whole observation of failure, and a document that merely
+    rode along a third of an observation against it.
 
-    Fitting the signed number as if it were the target instead would be worse
-    than wrong, it would be unbounded: ``-[y log p + (1-y) log(1-p)]`` with
-    ``y = -1`` keeps falling as ``p`` falls, so the objective has no optimum and
-    the fit runs to whatever clip it hits.  That is not a numerical detail; it
-    is the difference between a model and a random reordering.
+    The weight is what says how sure the verdict is; the target stays binary
+    because the likelihood is Bernoulli's.  Folding the signed label into the
+    target instead would be worse than wrong, it would be unbounded:
+    ``-[y log p + (1-y) log(1-p)]`` with ``y = -1`` keeps falling as ``p``
+    falls, so the objective has no optimum and the fit runs to whatever clip
+    it hits.  Reading a graded label as a middling target — ``(label + 1) / 2``,
+    or the label itself — fails the other way, and more quietly: a target of
+    ``0.5`` is an observation that ``p = 0.5``, the one thing a corpus can
+    state without teaching anything, yet the verdict still counts as labelled
+    when the fit is gated.  A corpus of such verdicts then clears the holdout
+    and publishes a model that learned nothing, which is the failure the gate
+    exists to catch.
     """
     label = float(label)
     if label >= 0.0:
-        return _clamp(label, 0.0, 1.0), label
-    return _clamp((label + 1.0) / 2.0, 0.0, 1.0), -label
+        return 1.0, label
+    return 0.0, -label
 
 
 def _ridge(lambda_per_100: float, count: int) -> float:
