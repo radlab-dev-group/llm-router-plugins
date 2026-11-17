@@ -25,6 +25,15 @@ release tagged as `v<version>`.
 
 ## [Unreleased]
 
+### Fixed
+- **A timeout the operator set is the timeout the layer uses.** Both `read.sse_timeout_seconds`
+  (`…_SSE_API_TIMEOUT`) and `read.timeout_seconds` (`…_READ_TIMEOUT_SECONDS`) were clamped to a
+  hard 10 s, silently: a deployment that set `40` waited 10 and read the failure as a broken
+  timeout setting rather than as a ceiling nobody had set. The ceiling is now 60 s — a limit on a
+  typo, not a policy — and a clamp that does bite logs a warning naming the setting it clamped
+  and the number it settled on.  What bounds a request remains `read.timeout_seconds`, the
+  budget.
+
 ### Added
 - **A literal question is asked of the engine's text index alone.** When the tokens of a query
   are mostly identifiers — an exception class, a dotted module path, a `::`-qualified name, an

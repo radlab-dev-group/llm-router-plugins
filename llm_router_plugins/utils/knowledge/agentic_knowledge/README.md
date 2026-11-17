@@ -630,6 +630,16 @@ counters it can see.
 
 ## Configuration
 
+**Sizing the two timeouts.**  `…_SSE_API_TIMEOUT` is what one call to the engine may take;
+`…_READ_TIMEOUT_SECONDS` is what one request may spend on the engine in total, and a search
+starts only while a whole call still fits before that budget ends.  Size the budget as a
+multiple of the call: a mode that reads three collections and is given `20` and `20` asks one
+question and skips two, while `20` and `60` asks all three.  Both are clamped to `0.1…60` s —
+a ceiling meant for a typo, not a policy — and a clamp that bites says so at WARNING with the
+setting it clamped and the number it settled on, because a silent ceiling reads as "the timeout
+setting does not work".
+
+
 Policy is JSON (reviewable, versionable, no secrets); every connection is ENV only. Precedence: **ENV → JSON →
 built-in defaults**. A value present but malformed is an error, except connection settings, where a missing host just
 means the feature is unavailable.  `read.timeout_seconds` is the budget a whole request may spend on the engine, and a
@@ -753,9 +763,9 @@ All use the prefix `LLM_ROUTER_KNOWLEDGE_AGENTIC_`. Booleans accept `1/0`, `true
 | `…_SSE_API_PREFIX`                    | **empty**        | empty ⇒ `sse_lib.endpoints.DEFAULT_API_PREFIX` (`api`); set it only when the engine is mounted elsewhere |
 | `…_SSE_API_TOKEN`                     | empty            | SSE token (never logged); when set, it wins over a login |
 | `…_SSE_API_USERNAME` / `…_SSE_API_PASSWORD` | empty      | engine login for an engine that authenticates by login rather than by a token; the client logs in on its first call; neither is ever logged |
-| `…_SSE_API_TIMEOUT`                   | `2.0`            | ceiling of one call to the engine, clamped to `0.1…10` s |
+| `…_SSE_API_TIMEOUT`                   | `2.0`            | ceiling of one call to the engine, clamped to `0.1…60` s (a clamp that bites is logged, never applied in silence) |
 | `…_SSE_VERIFY`                        | `true`           | TLS certificate verification                             |
-| `…_READ_TIMEOUT_SECONDS`              | `4.0`            | read budget: what one request may spend on the engine **in total**; never smaller than `…_SSE_API_TIMEOUT`, so one call always fits |
+| `…_READ_TIMEOUT_SECONDS`              | `4.0`            | read budget: what one request may spend on the engine **in total**, clamped to `0.1…60` s; never smaller than `…_SSE_API_TIMEOUT`, so one call always fits.  A cold engine that embeds and reranks needs both numbers well above the defaults — see below |
 | `…_SSE_IGNORE_LANGUAGE_DETECT`        | `true`           | ask the engine not to guess the language of the query (it would filter the vector leg to it and name the full-text configuration after it) |
 | `…_MIN_SIMILARITY`                    | `0.35`           | floor for a hit                                          |
 | `…_HYBRID_SEARCH`                     | `true`           | fuse the vector leg with the full-text leg               |
