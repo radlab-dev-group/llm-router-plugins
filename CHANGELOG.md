@@ -40,6 +40,20 @@ release tagged as `v<version>`.
   `precision_at_3` and `mrr` against the document that eventually closed the failure, ranked where the search
   returned it and at a document's first appearance. These are measured offline because a live request has no
   ground truth — only the replay knows which document the agent went on to need.
+- **The knowledge the layer shows is scored by the engine, not only by one process.** The feedback the read
+  path settles — a turn that verified a fix credits the document it was shown, a turn that repeated the same
+  failure blames it — now increments a shared Redis hash and, once a policy interval has passed, is handed to
+  the engine's `update_knowledge_quality` endpoint as absolute totals: a name the engine does not accept stays
+  queued for the next attempt, and a verdict that outlives a restart is the deployment's verdict, not one
+  worker's. A document is paired with the collection it was retrieved from while the block is still in hand,
+  so the push asks the engine for the right one.
+- **A source chooses how its full-text keywords are combined.** The keywords of a turn are a disjunction of
+  candidate signals — an exception class, a file stem, an identifier — and the engine's default conjunction
+  asked the full-text leg to hold all of them in one chunk, which no recipe does: with fifteen keywords the
+  lexical half of a hybrid search retrieved nothing. A source may now say `keywords_match: "any"` or `"and"`,
+  the mode sets the default for its sources, and a bucket that mixes sources keeps the strictest, because one
+  request cannot hold two match modes at once. The shipped policy asks `any`, where the failure shapes the
+  query, so a stack trace retrieves the recipe mined from the same stack trace by literal token again.
 
 ### Changed
 - **`agentic_knowledge` reads the escalation threshold on the scale the recipe was scored on.**
@@ -53,6 +67,14 @@ release tagged as `v<version>`.
   `AgenticKnowledgeConfig.threshold_for_scale(hit.score_scale)` per hit, and the start-up check names
   the label a bound came from instead of assuming one scale for the whole deployment.
   Overridable as JSON with `LLM_ROUTER_KNOWLEDGE_AGENTIC_STRONG_RECIPE_SCORES`.
+- **A new recipe retires the older recipe of the same failure.** A recipe is keyed by the failure it
+  solves, not by the patch that solved it, so a second recipe for the same signature is a correction:
+  the first fix met a wall that is no longer there, and a reader who is shown it walks into the same
+  moved wall. The worker keeps the pairing in Redis under the failure's digest, and a recipe older than
+  `write.supersede_after_days` — one day by default, zero for off — is deactivated on the indexing of the
+  newer one: taken out of the search, not deleted, so the quality the verdicts put on the document
+  survives the retirement, and a reader who asks by name still finds it. A same-day refinement retires
+  nothing.
 
 ## [0.1.9] - 2026-11-10
 
