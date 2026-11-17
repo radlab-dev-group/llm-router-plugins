@@ -55,6 +55,14 @@ _MAX_QUERY_CHARS = 900
 #: diluting the user's own words.
 _MAX_QUERY_PATHS = 8
 
+#: A turn that named no file, met no failure and ran no command asks the
+#: knowledge base with its own sentence alone.  Below this many characters
+#: that sentence is an acknowledgement, not a question, and three searches of
+#: it are three payments for nothing; the read is skipped instead.  It applies
+#: only in the absence of the structured signals a query is built from, so a
+#: short question that names a file is still a question.
+_MIN_QUESTION_CHARS = 12
+
 
 @dataclass(frozen=True)
 class QueryBuilder:
@@ -103,6 +111,15 @@ class QueryBuilder:
             searchable or the scope is unknown.
         """
         if not turn.scope:
+            return ()
+        # A question is a failure, a path, a command — or a sentence worth
+        # searching.  None of the three structured signals and a sentence
+        # too short to be a question is a turn that has nothing to ask the
+        # knowledge base, and the read is skipped rather than paid for.
+        if (
+            self._trivial_turn(turn)
+            and len((turn.latest_user_text or "").strip()) < _MIN_QUESTION_CHARS
+        ):
             return ()
         query = self.query_for(turn)
         if not query.strip():
@@ -210,6 +227,25 @@ class QueryBuilder:
                 )
             )
         return tuple(requests)
+
+    @staticmethod
+    def _trivial_turn(turn: AgentTurn) -> bool:
+        """
+        Whether the turn carries no structured signal to search with.
+
+        The three facts a query is built from are the failure the miner read,
+        the files the turn touched and the command it ran; a turn with none of
+        them has only its own sentence, which is what the character ceiling in
+        :meth:`build` then judges.  The archive is not a signal here: it is a
+        source the query is asked of, not a fact the query is built from.
+        """
+        if turn.touched_paths:
+            return False
+        if (_failure_signature(turn) or "").strip():
+            return False
+        if (_test_command(turn) or "").strip():
+            return False
+        return True
 
     def keywords_for(self, turn: AgentTurn) -> Tuple[str, ...]:
         """Extract lexical/BM25 keywords: exception types, symbols, paths."""

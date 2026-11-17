@@ -614,3 +614,56 @@ def test_the_strictest_source_in_a_bucket_wins():
     ]
     assert knowledge_requests
     assert all(request.keywords_match == "and" for request in knowledge_requests)
+
+
+# ---------------------------------------------------- the trivial-turn guard --
+def test_an_acknowledgement_that_names_nothing_is_not_asked():
+    """A short turn with no file, no failure, no command pays no search."""
+    from agentic_knowledge_support import _assistant, _user, codex_payload
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        SourcePolicy,
+    )
+
+    items = [
+        _user(
+            "<environment_context>\n  <cwd>/repo/webapp</cwd>\n</environment_context>"
+        ),
+        _assistant("tak, dobrze"),
+    ]
+    turn = CodexAgentAdapter().parse(codex_payload(items, mode="implement"))
+    requests = builder().build(turn, _policy(SourcePolicy(category="recipe")))
+    assert requests == ()
+
+
+def test_a_short_sentence_that_names_a_file_is_still_asked():
+    """The guard is about structured signals, not about the user being brief."""
+    from agentic_knowledge_support import (
+        _assistant,
+        _patch,
+        base_items,
+        codex_payload,
+    )
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        SourcePolicy,
+    )
+
+    turn = CodexAgentAdapter().parse(
+        codex_payload(
+            base_items(cwd="/repo/webapp")
+            + [_assistant("tak"), _patch("p1", "e1", paths=("src/export.py",))],
+            mode="implement",
+        )
+    )
+    requests = builder().build(turn, _policy(SourcePolicy(category="recipe")))
+    assert requests, "a turn that touched a file has something to ask"
+
+
+def test_a_short_turn_with_a_failure_is_still_asked():
+    """A failure is the strongest signal there is; brevity never hides it."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        SourcePolicy,
+    )
+
+    turn = turn_for(mode="debug", failures=1)
+    requests = builder().build(turn, _policy(SourcePolicy(category="recipe")))
+    assert requests
