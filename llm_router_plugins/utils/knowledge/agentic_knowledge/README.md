@@ -292,6 +292,16 @@ it again would only spend the mode's budget on words it has been given.
 {"category": "doc", "weight": 0.8, "max_items": 3, "doc_types": ["guide", "contributing", "security"]}
 ```
 
+A source — or the mode it belongs to — may also set **`keywords_match`**:
+how the engine's full-text leg combines the keywords the query carries,
+`"and"` (the engine's default: every keyword must match) or `"any"` (one is
+enough).  The keywords of a turn are a disjunction of candidate signals — an
+exception class, a file stem, an identifier — so the conjunction asks the
+engine for a chunk that holds all fifteen at once, and the lexical half of a
+hybrid search returns nothing: the request pays for a leg it never used.  The
+shipped policy therefore asks `any` in every mode, and a bucket that mixes
+sources keeps the strictest match, because one request cannot carry two.
+
 `ContextAssembler` normalizes SSE's `score_normalized`, multiplies by the source weight, adds a bonus when a document's
 error signature or paths match the current turn, and a further documentation bonus when a retrieved guide
 **documents a file the turn is touching** — `docs/export.md` for an edited `src/export.py` — a link no retrieval leg
@@ -364,6 +374,10 @@ The worker (`llm-router-agentic-kb-worker`) consumes the stream with a consumer 
 collection on first use, then sends mined events through `index_documents` and documentation through `upload_files`,
 preserving `category` and `options` metadata in both paths. Logs never contain document text. Retention
 deletes only this plugin's own documents older than the configured TTL (`session_archive` on `archive.ttl_seconds`).
+A new `recipe` for a failure retires the older `recipe` of the same `signature_hash` that is more than
+`write.supersede_after_days` old (one day by default; zero turns the supersession off): the older document is
+deactivated, not deleted, so the quality its feedback earned survives the retirement, and the pairing is kept
+in Redis under the digest, so a worker that restarts remembers what it retired.
 Events with an unknown version are acknowledged and logged; an indexing error is retried up to a bounded number of
 attempts and then dropped with a log, so one poison event cannot stall the stream.
 Masking is **fail closed for writes**: an exception or an invalid masker result for the body, signature, or masked
@@ -583,6 +597,7 @@ fire-and-forget: a Redis that cannot be written costs a metric and never a reque
 | `green_after_injection` | the turn mined a verified fix after being shown knowledge on the previous request |
 | `feedback_up` / `feedback_down` | the same verdict, per settled injection |
 | `read_failures` | a search came back unreachable |
+| `memo_hits` | a search was answered from this process's memo of an identical question instead of from the engine — the saving, counted against the `searches_per_request` that asks whether the engine was |
 
 `derived()` turns those into the rates the layer is read by. Each is `null` when its denominator is zero — a day
 that injected nothing measured nothing, and printing `0.0` would let a quiet day read as a bad one.
@@ -596,6 +611,20 @@ that injected nothing measured nothing, and printing `0.0` would let a quiet day
 - **`escalation_rate`** = `escalations / turns` — how far the escalation policy actually reaches.
 
 A deployment without Redis still counts, in process only: the numbers describe a run, not a history.
+
+The same verdicts are also **handed to the engine**, where they outlive the process that formed them:
+a turn that verified a fix credits the documents it was shown, a turn that repeated the failure they
+were about blames them, the tracker keeps the running totals in a shared Redis hash, and once
+`write.feedback_push_interval_seconds` has passed the read path posts them to the engine's
+`update_knowledge_quality` endpoint as **absolute totals** (its counters are monotonic, so a re-send is
+a no-op and a duplicate is not a second opinion). A document is paired with the collection it was
+retrieved from while the block is still in hand, because the turn that settles a verdict does not carry
+it. A name the engine did not accept stays queued for the next attempt. The push runs in a daemon
+thread the request path never waits on — a verdict is of use to nobody but the engine, and one
+HTTP call per document in the path of a live agent is exactly the latency the read path exists to
+avoid — so a request decides only whether to push, and one flush runs at a time. What the engine
+does with `success_rate` is the engine's business — the plugin's own ranking keeps using the
+counters it can see.
 
 ---
 
@@ -626,6 +655,7 @@ per repository, naming both numbers.
   "write": {"enabled": true, "stream_key": "agentic_kb:events",
              "max_stream_len": 100000, "dedup_ttl_seconds": 604800,
              "max_patch_chars": 4000,
+             "feedback_push_interval_seconds": 60, "supersede_after_days": 1,
              "archive": {"enabled": true, "max_chunk_chars": 2000,
                           "ttl_seconds": 1209600}},
   "escalation": {"enabled": false, "loop_threshold": 3, "strong_recipe_score": 0.6,
@@ -743,6 +773,8 @@ All use the prefix `LLM_ROUTER_KNOWLEDGE_AGENTIC_`. Booleans accept `1/0`, `true
 | `…_LOOP_THRESHOLD`                    | `3`              | repetitions of one signature that make a loop            |
 | `…_STRONG_RECIPE_SCORE`               | `0.6`            | a recipe this good keeps the routed model                |
 | `…_STRONG_RECIPE_SCORES`              | `{"reranker": null}` | per-scale bound; `null` ⇒ decide by identity, JSON over the shipped table |
+| `…_FEEDBACK_PUSH_INTERVAL_SECONDS`    | `60`             | between pushes of settled verdicts to the engine |
+| `…_SUPERSEDE_AFTER_DAYS`              | `1`              | a recipe retires the older one of the same failure after this many days; `0` ⇒ off |
 | `…_REDIS_HOST`                        | **empty**        | **empty ⇒ no writes, no cache**                          |
 | `…_REDIS_PORT` / `…_REDIS_DB` / `…_REDIS_PROTOCOL` | `6379` / `0` / `3` | Redis connection                           |
 | `…_REDIS_USERNAME` / `…_REDIS_PASSWORD`  | empty         | optional ACL / AUTH                                      |

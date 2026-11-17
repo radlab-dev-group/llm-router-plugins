@@ -20,11 +20,12 @@ plugin cannot serve comes back the very object it was given.
 """
 
 import logging
+import threading
 import time
 
 from collections import OrderedDict
 from dataclasses import replace
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from llm_router_plugins.plugin_interface import PluginInterface
 from llm_router_plugins.utils.knowledge.agentic_knowledge.adapters.base import (
@@ -50,6 +51,9 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
     GenerationContextCache,
     InMemoryContextCache,
     LookupLimiter,
+)
+from llm_router_plugins.utils.knowledge.agentic_knowledge.redisclient import (
+    RedisClientHandle,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
@@ -82,6 +86,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.miner import EpisodeMi
 from llm_router_plugins.utils.knowledge.agentic_knowledge.query import QueryBuilder
 from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import ScopeResolver
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+    REASON_MEMO,
     REASON_READ_BUDGET,
     KnowledgeStore,
     STATUS_DISABLED,
@@ -172,6 +177,9 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._pending_feedback: "OrderedDict[str, Tuple[Tuple[str, ...], str]]" = (
             OrderedDict()
         )
+        self._feedback_pushed_at = 0.0
+        self._feedback_flush_lock = threading.Lock()
+        self._feedback_thread: Optional[threading.Thread] = None
         self._budget_warnings: Dict[str, float] = {}
         self._wire(self._config)
 
@@ -237,7 +245,12 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._docs = DocsIndexer(
             config=config, publisher=self._publisher, logger=self._logger
         )
-        self._feedback_tracker = FeedbackTracker(key_prefix=config.key_prefix)
+        self._feedback_tracker = FeedbackTracker(
+            key_prefix=config.key_prefix,
+            handle=(
+                RedisClientHandle(config.redis) if config.redis.configured else None
+            ),
+        )
         if self._metrics is None:
             # Built on the same connection the cache and the publisher use, so
             # a deployment without Redis still counts in-process: the numbers
@@ -370,6 +383,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         # to avoid (it did not).  Settled before this request assembles, so
         # the verdict already weighs what this request ranks.
         self._settle_feedback(turn, mining)
+        self._flush_feedback(turn)
         if fresh:
             context = KnowledgeContext(
                 hits=cached.context.hits,
@@ -562,6 +576,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         skipped = sum(
             1 for result, _ in results if result.reason == REASON_READ_BUDGET
         )
+        memo_hits = sum(1 for result, _ in results if result.reason == REASON_MEMO)
         for result, _ in results:
             statuses.add(result.status)
         if self._metrics is not None and turn.scope:
@@ -573,9 +588,18 @@ class AgenticKnowledgePlugin(PluginInterface):
             unavailable = sum(
                 1 for result, _ in results if result.status == STATUS_UNAVAILABLE
             )
+            counts = {}
             if unavailable:
+                counts["read_failures"] = unavailable
+            if memo_hits:
+                # The number that says the memo earned its staleness window:
+                # engine calls this process did not make.  It is read against
+                # `searches_per_request`, which counts the question whether or
+                # not the engine was asked it.
+                counts["memo_hits"] = memo_hits
+            if counts:
                 try:
-                    self._metrics.record(turn.scope, read_failures=unavailable)
+                    self._metrics.record(turn.scope, **counts)
                 except Exception:  # a scoreboard is never a reason to fail a read
                     pass
         if skipped:
@@ -608,6 +632,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             doc_context=context.doc_context,
             searches=len(results),
             budget_skipped=skipped,
+            memo_hits=memo_hits,
             cache_miss_reason="cold",
         )
 
@@ -743,6 +768,77 @@ class AgenticKnowledgePlugin(PluginInterface):
             widened[index] = (retry, request.categories)
         return widened
 
+    def _flush_feedback(self, turn: AgentTurn) -> None:
+        """
+        Start a push of the settled verdicts, without waiting for it.
+
+        The verdicts of one process are of use to nobody but the engine, and
+        the push is one HTTP call per document: run here, it would make one
+        request in every interval wait seconds for work that has nothing to do
+        with answering it.  So the request path only decides *whether* to push
+        — the interval has passed, there is something queued, this turn knows
+        a collection — and a daemon thread carries the calls.  One flush at a
+        time: a push still running is a push that will finish and drain the
+        queue, not a reason to start a second one behind it.
+        """
+        tracker = self._feedback_tracker
+        if tracker is None or self._store is None or not turn.scope:
+            return
+        if not tracker.touched():
+            return
+        interval = int(
+            getattr(self._config, "feedback_push_interval_seconds", 0) or 0
+        )
+        if time.monotonic() - self._feedback_pushed_at < interval:
+            return
+        if not self._feedback_flush_lock.acquire(blocking=False):
+            return
+        try:
+            self._feedback_thread = threading.Thread(
+                target=self._push_feedback,
+                args=(tracker, turn.scope),
+                name="agentic-kb-feedback",
+                daemon=True,
+            )
+            self._feedback_thread.start()
+        except Exception:  # a thread that will not start is a push not made
+            self._feedback_flush_lock.release()
+
+    def _push_feedback(self, tracker: Any, scope: str) -> None:
+        """
+        Push the queued verdicts; runs off the request path, never raises.
+
+        The engine's counters are monotonic and the endpoint takes absolute
+        totals, so a name is sent as the deployment has counted it and a
+        refused name simply stays queued for the next flush.  The interval
+        clock moves only when something actually reached the engine, so a
+        deployment whose endpoint is down costs one thread per interval and
+        no verdicts.
+        """
+        pushed: List[str] = []
+        try:
+            for name in tracker.touched():
+                collection = tracker.collection_of(name)
+                if not collection:
+                    continue
+                totals = tracker.get_feedback(name)
+                up = int(totals.get("upvotes", 0))
+                down = int(totals.get("downvotes", 0))
+                if not (up or down):
+                    continue
+                try:
+                    if self._store.push_quality(collection, name, up, down):
+                        pushed.append(name)
+                except Exception:  # one document is not the flush's end
+                    continue
+            if pushed:
+                tracker.pushed(*pushed)
+                self._feedback_pushed_at = time.monotonic()
+        except Exception:
+            pass
+        finally:
+            self._feedback_flush_lock.release()
+
     def _feedback_weights(self) -> Optional[Dict[str, Dict[str, int]]]:
         """Reinforcement recorded so far; a debunked recipe ranks lower."""
         if self._feedback_tracker is None:
@@ -780,7 +876,11 @@ class AgenticKnowledgePlugin(PluginInterface):
         if not doc_names or not (repeated or resolved):
             return
         for doc_name in doc_names:
-            tracker.record_feedback(doc_name, success=resolved)
+            tracker.record_feedback(
+                doc_name,
+                success=resolved,
+                collection=tracker.collection_of(doc_name),
+            )
         if self._metrics is not None and turn.scope:
             # The turn's own verdict on what it was shown last request, counted
             # once for the request rather than once per document: adoption is a
@@ -809,6 +909,17 @@ class AgenticKnowledgePlugin(PluginInterface):
         )
         if not doc_names:
             return
+        tracker = self._feedback_tracker
+        for hit in context.hits:
+            if hit.document_name and hit.category in _SCORED_KINDS:
+                # The collection is the config's answer, not the hit's: a hit
+                # carries no collection because the search that produced it was
+                # built from this same name, so re-deriving it is exact and
+                # costs the assembled block no new field.
+                tracker.remember_collection(
+                    hit.document_name,
+                    self._config.collection(turn.scope, hit.category),
+                )
         self._pending_feedback[turn.session_id] = (doc_names, mining.signature_hash)
         while len(self._pending_feedback) > _FEEDBACK_PENDING_LIMIT:
             self._pending_feedback.popitem(last=False)
@@ -968,6 +1079,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             "read_budget_skips": int(
                 getattr(context, "budget_skipped", 0) if context else 0
             ),
+            "memo_hits": int(getattr(context, "memo_hits", 0) if context else 0),
             "cache_miss_reason": (
                 context.cache_miss_reason if context is not None else ""
             ),

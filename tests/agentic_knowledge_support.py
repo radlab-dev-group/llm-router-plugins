@@ -283,11 +283,17 @@ class FakeStore:
         self.status = status
         self.requests = []
         self.deadlines = []
+        self.quality_pushes = []
+        self.push_ok = True
 
     def search(self, request, *, deadline=None):
         self.requests.append(request)
         self.deadlines.append(deadline)
         return SearchResult(self.status, hits=self.hits)
+
+    def push_quality(self, collection, document_name, upvotes, downvotes):
+        self.quality_pushes.append((collection, document_name, upvotes, downvotes))
+        return self.push_ok
 
 
 def store_hit(category="recipe", name=None, text="a verified fix", score=0.9):
@@ -344,6 +350,8 @@ class FakeRedis:
         self.acked = []
         self.groups = []
         self.fail_on = set(fail_on or ())
+        self.sets = {}
+        self.set_members = {}
 
     def _maybe_fail(self, name):
         if name in self.fail_on:
@@ -435,6 +443,25 @@ class FakeRedis:
         self._maybe_fail("xack")
         self.acked.append(entry_id)
 
+    def sadd(self, key, *members):
+        self._maybe_fail("sadd")
+        bucket = self.set_members.setdefault(key, set())
+        for member in members:
+            if isinstance(member, bytes):
+                member = member.decode("utf-8", "replace")
+            bucket.add(member)
+        return len(members)
+
+    def smembers(self, key):
+        self._maybe_fail("smembers")
+        return set(self.set_members.get(key, ()))
+
+    def sismember(self, key, member):
+        self._maybe_fail("sismember")
+        if isinstance(member, bytes):
+            member = member.decode("utf-8", "replace")
+        return member in self.set_members.get(key, ())
+
 
 DocumentRef = namedtuple("DocumentRef", ["name"])
 Collection = namedtuple("Collection", ["name"])
@@ -523,9 +550,18 @@ class FakeSSE:
 
 
 def knowledge_event(
-    kind="recipe", fingerprint="abc123", scope="webapp", text="body"
+    kind="recipe",
+    fingerprint="abc123",
+    scope="webapp",
+    text="body",
+    signature_hash="h1",
+    created_at=None,
 ):
     """One event for the worker and publisher tests."""
+    if created_at is None:
+        created_at = datetime.datetime(
+            2026, 10, 17, tzinfo=datetime.timezone.utc
+        ).timestamp()
     return KnowledgeEvent(
         version=1,
         kind=kind,
@@ -535,11 +571,9 @@ def knowledge_event(
         mode="debug",
         thread_id="thread-1",
         generation="turn-7",
-        created_at=datetime.datetime(
-            2026, 10, 17, tzinfo=datetime.timezone.utc
-        ).timestamp(),
+        created_at=created_at,
         signature="AssertionError",
-        signature_hash="h1",
+        signature_hash=signature_hash,
         text=text,
         metadata={"paths": ["a.py"], "thread_id": "thread-1"},
     )

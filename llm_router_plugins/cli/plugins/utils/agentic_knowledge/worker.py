@@ -77,6 +77,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
 from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     ENGINE_NAME_SUFFIX,
     KIND_DOC,
+    KIND_RECIPE,
     KIND_SESSION_ARCHIVE,
     MINED_KINDS,
     build_document_text,
@@ -658,6 +659,10 @@ class KnowledgeIndexWorker:
         document = self._document(text, event)
         collection = self._config.collection(event.scope, event.kind)
         self._ensure_collection(collection)
+        # A new recipe for a failure retires the older recipe of the same
+        # signature, whatever its fingerprint: the wall moved, and a fix that
+        # solved it before the move is no longer a fix.
+        self._supersede(event, collection)
         # The same chunking the collection was created with: the engine splits
         # what this call tells it to, and a document indexed with other numbers
         # is a document split unlike its neighbours.
@@ -978,6 +983,140 @@ class KnowledgeIndexWorker:
         )
         return len(stale)
 
+    # ------------------------------------------------------ supersession ---
+    def _supersede(self, event: KnowledgeEvent, collection: str) -> int:
+        """
+        Retire the older documents this event replaces, and record the pairing.
+
+        A recipe is keyed by the failure it solves, not by the patch that
+        solved it, so a second recipe for the same signature is a correction,
+        not a duplicate: the first one's fix met a wall that is no longer
+        there.  The pairing is kept where the worker keeps its other state,
+        in Redis under the signature, so a second recipe does not have to
+        list the collection to find the first, and a worker that restarts
+        remembers what it retired.  The day is part of the name, so a recipe
+        of today supersedes nothing: a same-day fix is a refinement, and the
+        supersession waits for the day the policy asks for.
+
+        Parameters
+        ----------
+        event : KnowledgeEvent
+            The episode being indexed, with its failure's digest.
+        collection : str
+            The collection its documents live in.
+
+        Returns
+        -------
+        int
+            Documents retired.
+        """
+        if event.kind != KIND_RECIPE or not event.signature_hash:
+            return 0
+        after = int(self._config.supersede_after_days)
+        if after <= 0:
+            return 0
+        client = self._redis_client()
+        if client is None:
+            return 0
+        key = f"{self._config.key_prefix}:sig:{event.scope}:{event.signature_hash}"
+        name = self._name_of(event)
+        today = _day_of(event.created_at)
+        try:
+            known = client.smembers(key)
+        except Exception as exc:
+            self._log(
+                "warning",
+                "knowledge supersession could not read %s: %s",
+                key,
+                type(exc).__name__,
+            )
+            return 0
+        retired = 0
+        for member in known or ():
+            stale_name = self._member_name(member)
+            if not stale_name or stale_name == name:
+                continue
+            meta = parse_document_name(stale_name)
+            if meta.kind != KIND_RECIPE or meta.date is None:
+                continue
+            if (today - meta.date).days < after:
+                # A recipe of the same day is a refinement, not a correction:
+                # the day has to pass over it before it is retired.
+                continue
+            retired += self._retire(collection, stale_name)
+        try:
+            client.sadd(key, name)
+            client.expire(key, self._sig_ttl_seconds())
+        except Exception as exc:
+            self._log(
+                "warning",
+                "knowledge supersession could not remember %s: %s",
+                key,
+                type(exc).__name__,
+            )
+        if retired:
+            self._log(
+                "info",
+                "knowledge superseded %d older recipe(s) of %s in %s",
+                retired,
+                event.signature_hash[:12],
+                collection,
+            )
+        return retired
+
+    def _name_of(self, event: KnowledgeEvent) -> str:
+        """The engine-level name of one event's document, before indexing."""
+        return document_name(
+            event.kind, _day_of(event.created_at), event.fingerprint
+        )
+
+    def _member_name(self, member: Any) -> str:
+        """One set member, bytes or not, as a name."""
+        if isinstance(member, bytes):
+            return member.decode("utf-8", "replace")
+        return str(member)
+
+    def _retire(self, collection: str, name: str) -> int:
+        """
+        Take one document out of the search, without deleting it.
+
+        Deactivation rather than deletion, so the quality the verdicts put on
+        the document survives the retirement: a recipe that was right for a
+        while and then met a moved wall is still worth the counters it earned,
+        and a reader who asks the engine for it by name still finds it.  The
+        engine resolves a name it does not have as a no-op, so a replay of a
+        supersession retires nothing twice.
+        """
+        candidates = {name, f"{name}{ENGINE_NAME_SUFFIX}"}
+        client = self._sse_client()
+        try:
+            details = client.list_document_details(collection)
+        except Exception:
+            return 0
+        live = [
+            str(ref.name)
+            for ref in details or ()
+            if getattr(ref, "name", None) and str(ref.name) in candidates
+        ]
+        if not live:
+            return 0
+        try:
+            client.deactivate_documents(collection, documents=live)
+        except Exception as exc:
+            self._log(
+                "warning",
+                "knowledge supersession could not retire %s: %s",
+                name,
+                type(exc).__name__,
+            )
+            return 0
+        return len(live)
+
+    def _sig_ttl_seconds(self) -> int:
+        """How long a signature pairing is remembered; the recipes' own clock."""
+        return max(self._config.dedup_ttl_seconds, 604_800)
+
+    # ---------------------------------------------------------- retention ---
     def _maybe_retain(self) -> None:
         """Run a retention pass if the interval has elapsed."""
         interval = int(self._config.worker.retention_interval_seconds)

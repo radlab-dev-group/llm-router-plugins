@@ -1180,3 +1180,99 @@ def test_a_poison_entry_with_an_unusable_scope_does_not_wedge_the_batch():
     # and the worker is not wedged: a second read on the now-empty stream
     # returns cleanly instead of raising
     assert work.run_once(block_ms=0) == 0
+
+
+# ----------------------------------------------------------- supersession --
+def _recipe_event(fingerprint, day, scope="webapp"):
+    """One recipe event on a given day, sharing the failure's digest."""
+    return knowledge_event(
+        kind="recipe",
+        fingerprint=fingerprint,
+        scope=scope,
+        signature_hash="h1",
+        created_at=datetime.datetime(
+            day.year, day.month, day.day, tzinfo=datetime.timezone.utc
+        ).timestamp(),
+    )
+
+
+def test_a_new_recipe_retires_the_older_recipe_of_the_same_failure():
+    """The wall moved: the older fix is deactivated, not deleted."""
+    sse = FakeSSE(names={"agentic_kb_webapp": ["recipe:20261101:aaa111.input_text"]})
+    redis = FakeRedis()
+    redis.sadd("agentic-kb:sig:webapp:h1", "recipe:20261101:aaa111.input_text")
+    work = worker(redis=redis, sse=sse)
+    today = datetime.date(2026, 11, 15)
+    work.index_event(_recipe_event("bbb222", today))
+    assert sse.deactivated == [
+        ("agentic_kb_webapp", ["recipe:20261101:aaa111.input_text"])
+    ]
+    assert sse.deleted == []
+    # The pairing is remembered under the failure's digest.
+    assert "recipe:20261115:bbb222" in redis.set_members["agentic-kb:sig:webapp:h1"]
+
+
+def test_a_recipe_of_the_same_day_retires_nothing():
+    """A same-day fix is a refinement; the supersession waits a day."""
+    sse = FakeSSE(names={"agentic_kb_webapp": ["recipe:20261115:aaa111.input_text"]})
+    redis = FakeRedis()
+    work = worker(redis=redis, sse=sse)
+    today = datetime.date(2026, 11, 15)
+    work.index_event(_recipe_event("bbb222", today))
+    assert sse.deactivated == []
+
+
+def test_a_supersession_that_finds_nothing_to_retire_still_remembers():
+    """A first recipe records the pairing for the next day's correction."""
+    sse = FakeSSE()
+    redis = FakeRedis()
+    work = worker(redis=redis, sse=sse)
+    today = datetime.date(2026, 11, 15)
+    work.index_event(_recipe_event("ccc333", today))
+    assert sse.deactivated == []
+    assert "recipe:20261115:ccc333" in redis.set_members["agentic-kb:sig:webapp:h1"]
+
+
+def test_a_supersession_is_a_no_op_without_a_signature():
+    """A document without a failure has nothing to supersede."""
+    sse = FakeSSE()
+    redis = FakeRedis()
+    work = worker(redis=redis, sse=sse)
+    today = datetime.date(2026, 11, 15)
+    event = knowledge_event(
+        kind="recipe",
+        fingerprint="ddd444",
+        signature_hash="",
+        created_at=datetime.datetime(
+            today.year, today.month, today.day, tzinfo=datetime.timezone.utc
+        ).timestamp(),
+    )
+    work.index_event(event)
+    assert sse.deactivated == []
+    assert redis.set_members == {}
+
+
+def test_the_supersession_can_be_turned_off():
+    """supersede_after_days of zero retires nothing and records nothing."""
+    config = knowledge_config(supersede_after_days=0)
+    sse = FakeSSE(names={"agentic_kb_webapp": ["recipe:20261101:aaa111.input_text"]})
+    redis = FakeRedis()
+    work = worker(redis=redis, sse=sse, config=config)
+    today = datetime.date(2026, 11, 15)
+    work.index_event(_recipe_event("eee555", today))
+    assert sse.deactivated == []
+    assert redis.set_members == {}
+
+
+def test_a_supersession_that_cannot_retire_is_reported_not_raised():
+    """An engine that refuses a retirement is a warning, not a crash."""
+    sse = FakeSSE(
+        names={"agentic_kb_webapp": ["recipe:20261101:aaa111.input_text"]},
+        fail_methods=("deactivate_documents",),
+    )
+    redis = FakeRedis()
+    work = worker(redis=redis, sse=sse)
+    today = datetime.date(2026, 11, 15)
+    work.index_event(_recipe_event("fff666", today))
+    # The new document is still indexed; the retirement failed and was noted.
+    assert sse.indexed

@@ -300,6 +300,31 @@ _RERANKER_RELEVANT_CEILING = 0.75
 #: the set's best hit with almost nothing separating it from the rest.
 _FUSED_REACHABLE_CEILING = 0.9
 _DEFAULT_RETENTION_INTERVAL_SECONDS = 21_600
+#: How long the read path keeps the in-process verdicts before pushing them to
+#: the engine.  The engine's counters are monotonic and the endpoint takes
+#: absolute totals, so a flush is "send what this process has counted", and a
+#: second that is too small would turn every settled turn into a call into the
+#: path of a live request.  Sixty is short enough that a restart loses little
+#: and long enough that a request never pays for the flush of the request
+#: before it.
+_DEFAULT_FEEDBACK_PUSH_INTERVAL_SECONDS = 60
+#: A failure's recipe is retired when a newer one is mined for the same
+#: signature: the wall the agent met moved, and a recipe that solved it before
+#: the move points at a fix that no longer exists.  The day is part of the
+#: document name, so a recipe of today supersedes nothing yet — the old one
+#: stays until a day has passed and the failure proved itself fixed again.
+#: ``0`` turns the supersession off.
+_DEFAULT_SUPERSEDE_AFTER_DAYS = 1
+#: The fast path of the read: a query made almost entirely of identifiers — a
+#: normalized failure signature, a test command, file stems — is asked of the
+#: engine's full-text leg alone.  For such a query the vector leg is an
+#: embedding model call whose answer the exact match has already won: a stack
+#: trace retrieves the recipe mined from the same stack trace by literal
+#: token, and the fusion of the two legs only costs the request the latency of
+#: the slower one.  The value is the share of a query's tokens that have to
+#: look like identifiers before the vector leg is dropped; ``1.0`` asks every
+#: token to be one, and ``0`` never takes the fast path at all.
+_DEFAULT_FTS_ONLY_MIN_IDENTIFIER_SHARE = 0.5
 _DEFAULT_MAX_PENDING = 1_000
 _DEFAULT_WORKER_BATCH = 32
 
@@ -361,11 +386,11 @@ class SourcePolicy:
         `implement`), the document kind is what it produced (`recipe`).
     doc_types : Tuple[str, ...]
         Documentation kinds this source reads; empty — the default — reads
-        every kind.  A second metadata dimension for the ``doc`` category,
-        which otherwise would have none: the engine unions several
-        ``metadata_filters`` with each other, so the list is the one that
-        is put in the slot.  Allowed on the ``doc`` source only, because
-        it is the only category whose documents carry a ``doc_type``.
+        every kind.
+    keywords_match : str
+        How the source's keywords are combined when the engine's full-text
+        leg is asked with them: ``and`` — the default — keeps every keyword,
+        ``any`` keeps one of them.
     modes : Tuple[str, ...]
         Routing modes this source is read in; empty — the default — reads it in
         every mode.  Mutually exclusive with *phases* for sources retrieved by
@@ -380,6 +405,12 @@ class SourcePolicy:
     phases: Tuple[str, ...] = ()
     modes: Tuple[str, ...] = ()
     doc_types: Tuple[str, ...] = ()
+    #: How the source's full-text keywords are combined on the engine:
+    #: ``and`` — the default — requires every keyword, ``any`` any of them.
+    #: A failure signature is one phrase, so every one of its keywords has to
+    #: match; a documentation query is a subject, and one matching stem of it
+    #: is enough to be worth reading.
+    keywords_match: str = "and"
 
 
 @dataclass(frozen=True)
@@ -401,6 +432,9 @@ class ModePolicy:
     cheap_model_name : str
         Model to prefer when a strong recipe was found; ``""`` leaves routing
         alone, which is the default.
+    keywords_match : str
+        The mode's default for a source that does not choose its own
+        :attr:`SourcePolicy.keywords_match`.
     """
 
     name: str
@@ -408,6 +442,9 @@ class ModePolicy:
     sources: Tuple[SourcePolicy, ...] = ()
     escalation_model_name: str = ""
     cheap_model_name: str = ""
+    #: The mode's default for a source that does not choose its own
+    #: :attr:`SourcePolicy.keywords_match`.
+    keywords_match: str = "and"
 
     def policy_signature(self) -> str:
         """
@@ -433,9 +470,11 @@ class ModePolicy:
                     list(source.phases),
                     list(source.modes),
                     list(source.doc_types),
+                    source.keywords_match,
                 ]
                 for source in self.sources
             ],
+            self.keywords_match,
         ]
         digest = hashlib.sha256(
             json.dumps(parts, sort_keys=True, default=str).encode("utf-8")
@@ -533,6 +572,10 @@ class AgenticKnowledgeConfig:
     hybrid_search: bool = _DEFAULT_HYBRID_SEARCH
     #: Re-score what the engine retrieved with its cross-encoder.
     rerank_results: bool = _DEFAULT_RERANK_RESULTS
+    #: Share of a query's tokens that have to look like identifiers before the
+    #: request drops the vector leg and asks the full-text leg alone; see
+    #: :data:`_DEFAULT_FTS_ONLY_MIN_IDENTIFIER_SHARE`.
+    fts_only_min_identifier_share: float = _DEFAULT_FTS_ONLY_MIN_IDENTIFIER_SHARE
     cache_ttl_seconds: int = _DEFAULT_CACHE_TTL_SECONDS
     max_lookups_per_generation: int = _DEFAULT_MAX_LOOKUPS
 
@@ -553,6 +596,13 @@ class AgenticKnowledgeConfig:
     archive_enabled: bool = True
     archive_max_chunk_chars: int = _DEFAULT_ARCHIVE_CHUNK_CHARS
     archive_ttl_seconds: int = _DEFAULT_ARCHIVE_TTL_SECONDS
+    #: Seconds between pushes of the in-process feedback verdicts to the
+    #: engine; see :data:`_DEFAULT_FEEDBACK_PUSH_INTERVAL_SECONDS`.
+    feedback_push_interval_seconds: int = _DEFAULT_FEEDBACK_PUSH_INTERVAL_SECONDS
+    #: A recipe mined for a failure retires the older recipe of the same
+    #: signature once this many days have passed over the older one; ``0``
+    #: turns the supersession off.
+    supersede_after_days: int = _DEFAULT_SUPERSEDE_AFTER_DAYS
 
     #: Whether the repository's own documentation belongs to the knowledge base.
     docs_enabled: bool = True
@@ -721,6 +771,13 @@ class AgenticKnowledgeConfig:
                 read.get("rerank_results", _DEFAULT_RERANK_RESULTS),
                 "read.rerank_results",
             ),
+            fts_only_min_identifier_share=_fraction(
+                read.get(
+                    "fts_only_min_identifier_share",
+                    _DEFAULT_FTS_ONLY_MIN_IDENTIFIER_SHARE,
+                ),
+                "read.fts_only_min_identifier_share",
+            ),
             cache_ttl_seconds=_positive(
                 read.get("cache_ttl_seconds", _DEFAULT_CACHE_TTL_SECONDS),
                 "read.cache_ttl_seconds",
@@ -762,6 +819,17 @@ class AgenticKnowledgeConfig:
             archive_ttl_seconds=_positive(
                 archive.get("ttl_seconds", _DEFAULT_ARCHIVE_TTL_SECONDS),
                 "write.archive.ttl_seconds",
+            ),
+            feedback_push_interval_seconds=_positive(
+                write.get(
+                    "feedback_push_interval_seconds",
+                    _DEFAULT_FEEDBACK_PUSH_INTERVAL_SECONDS,
+                ),
+                "write.feedback_push_interval_seconds",
+            ),
+            supersede_after_days=_non_negative(
+                write.get("supersede_after_days", _DEFAULT_SUPERSEDE_AFTER_DAYS),
+                "write.supersede_after_days",
             ),
             docs_enabled=_boolean(docs.get("enabled", True), "docs.enabled"),
             docs_auto_index=_boolean(
@@ -892,6 +960,17 @@ class AgenticKnowledgeConfig:
             ("HYBRID_SEARCH", "hybrid_search", _boolean),
             ("RERANK_RESULTS", "rerank_results", _boolean),
             ("CACHE_TTL_SECONDS", "cache_ttl_seconds", _positive),
+            (
+                "FTS_ONLY_MIN_IDENTIFIER_SHARE",
+                "fts_only_min_identifier_share",
+                _fraction,
+            ),
+            (
+                "FEEDBACK_PUSH_INTERVAL_SECONDS",
+                "feedback_push_interval_seconds",
+                _positive,
+            ),
+            ("SUPERSEDE_AFTER_DAYS", "supersede_after_days", _non_negative),
             ("MAX_LOOKUPS_PER_GENERATION", "max_lookups_per_generation", _positive),
             ("MAX_STREAM_LEN", "max_stream_len", _positive),
             ("DEDUP_TTL_SECONDS", "dedup_ttl_seconds", _positive),
@@ -1435,22 +1514,29 @@ def _modes(raw: Any) -> Dict[str, ModePolicy]:
             "sources",
             "escalation_model_name",
             "cheap_model_name",
+            "keywords_match",
         }
         if unknown:
             raise ValueError(f"Unknown modes.{name} keys: {sorted(unknown)}")
+        mode_match = _keywords_match(
+            value.get("keywords_match", "and"), f"modes.{name}.keywords_match"
+        )
         policies[str(name)] = ModePolicy(
             name=str(name),
             max_chars=_positive(
                 value.get("max_chars", _DEFAULT_MAX_CHARS), f"modes.{name}.max_chars"
             ),
-            sources=_sources(value.get("sources", ()), name),
+            sources=_sources(value.get("sources", ()), name, mode_match),
             escalation_model_name=str(value.get("escalation_model_name", "") or ""),
             cheap_model_name=str(value.get("cheap_model_name", "") or ""),
+            keywords_match=mode_match,
         )
     return policies
 
 
-def _sources(raw: Any, mode: str) -> Tuple[SourcePolicy, ...]:
+def _sources(
+    raw: Any, mode: str, keywords_match: str = "and"
+) -> Tuple[SourcePolicy, ...]:
     """Validate one mode's source list."""
     if not isinstance(raw, (list, tuple)):
         raise ValueError(f"modes.{mode}.sources must be a list")
@@ -1465,6 +1551,7 @@ def _sources(raw: Any, mode: str) -> Tuple[SourcePolicy, ...]:
             "phases",
             "modes",
             "doc_types",
+            "keywords_match",
         }
         if unknown:
             raise ValueError(f"Unknown modes.{mode}.sources keys: {sorted(unknown)}")
@@ -1485,9 +1572,21 @@ def _sources(raw: Any, mode: str) -> Tuple[SourcePolicy, ...]:
                     entry.get("doc_types", ()),
                     f"modes.{mode}.sources.doc_types",
                 ),
+                keywords_match=_keywords_match(
+                    entry.get("keywords_match", keywords_match),
+                    f"modes.{mode}.sources.keywords_match",
+                ),
             )
         )
     return tuple(sources)
+
+
+def _keywords_match(value: Any, label: str) -> str:
+    """Validate one spelling of how full-text keywords are combined."""
+    value = str(value or "and").strip().lower()
+    if value not in ("and", "any"):
+        raise ValueError(f"{label} must be 'and' or 'any', got {value!r}")
+    return value
 
 
 def _phase_names(raw: Any, label: str) -> Tuple[str, ...]:

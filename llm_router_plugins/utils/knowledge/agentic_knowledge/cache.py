@@ -23,6 +23,7 @@ import json
 import threading
 import time
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -383,53 +384,153 @@ class LookupLimiter:
 
 
 class FeedbackTracker:
-    """Tracks reinforcement feedback (upvotes/downvotes) for knowledge documents."""
+    """
+    Reinforcement feedback of the knowledge documents, per document name.
 
-    def __init__(self, client: Any = None, key_prefix: str = "agentic-kb") -> None:
+    The verdicts of one process live in memory, and the verdicts of the
+    deployment live in the Redis hash the tracker increments: a proxy with
+    several workers is several processes, and the engine must be told what the
+    workers together have seen, not what one of them has.  A name is recorded
+    with the collection its document lives in, so a push can ask the engine
+    for the right one; a name seen without a collection is pushed to the
+    collection it was first seen in, or not at all.
+    """
+
+    def __init__(
+        self,
+        client: Any = None,
+        key_prefix: str = "agentic-kb",
+        handle: Any = None,
+    ) -> None:
         self._client = client
+        self._handle = handle
         self._key_prefix = key_prefix
         self._local: Dict[str, Dict[str, int]] = {}
+        self._collections: Dict[str, str] = {}
+        #: Names this process has touched since they were last pushed; a push
+        #: that the engine refused keeps them for the next attempt, so the
+        #: set is bounded.
+        self._touched: "OrderedDict[str, None]" = OrderedDict()
         self._lock = threading.Lock()
 
-    def record_feedback(self, doc_name: str, success: bool) -> None:
+    # --------------------------------------------------------------- record -
+    def record_feedback(
+        self, doc_name: str, success: bool, collection: str = ""
+    ) -> None:
+        """
+        Record one verdict on one document.
+
+        Parameters
+        ----------
+        doc_name : str
+            The engine-level name of the document that was shown.
+        success : bool
+            Whether the turn the document was shown in verified a fix.
+        collection : str, optional
+            The document's collection; the first non-empty one wins.
+        """
         if not doc_name:
             return
         field_name = "upvotes" if success else "downvotes"
         with self._lock:
             stats = self._local.setdefault(doc_name, {"upvotes": 0, "downvotes": 0})
             stats[field_name] = stats.get(field_name, 0) + 1
-        if self._client is not None:
+            if collection and not self._collections.get(doc_name):
+                self._collections[doc_name] = collection
+            self._touched[doc_name] = None
+            while len(self._touched) > 4096:
+                self._touched.popitem(last=False)
+        client = self._redis_client()
+        if client is not None:
             try:
                 key = f"{self._key_prefix}:fb:{doc_name}"
-                self._client.hincrby(key, field_name, 1)
+                client.hincrby(key, field_name, 1)
             except Exception:
                 pass
 
+    def collection_of(self, doc_name: str) -> str:
+        """The collection a name was first recorded in; ``""`` if none."""
+        with self._lock:
+            return self._collections.get(doc_name, "")
+
+    def remember_collection(self, doc_name: str, collection: str) -> None:
+        """
+        Note which collection a document was retrieved from, counting nothing.
+
+        A verdict arrives a turn after the injection that earned it, and the
+        turn that settles it does not carry the collection the hit came from,
+        so the pairing is recorded while the block is still in hand.  It is a
+        note and not a verdict: it never touches the counters, which belong to
+        :meth:`record_feedback` alone.
+        """
+        if not doc_name or not collection:
+            return
+        with self._lock:
+            if doc_name not in self._collections:
+                self._collections[doc_name] = collection
+            while len(self._collections) > 4096:
+                self._collections.pop(next(iter(self._collections)))
+
+    def touched(self) -> Tuple[str, ...]:
+        """The names recorded since the last :meth:`pushed`, in order."""
+        with self._lock:
+            return tuple(self._touched)
+
+    def pushed(self, *names: str) -> None:
+        """
+        Mark the names whose verdicts the engine accepted.
+
+        A name the engine refused is not marked, so the next push retries it;
+        the engine's counters are monotonic, so a retry of an accepted total
+        changes nothing on its side.
+        """
+        with self._lock:
+            for name in names:
+                self._touched.pop(name, None)
+
+    # ---------------------------------------------------------------- totals -
     def get_feedback(self, doc_name: str) -> Dict[str, int]:
+        """
+        The verdicts of *doc_name*: what the deployment has counted together.
+
+        Redis wins over the process memory, because it is the sum of every
+        worker's verdicts on the same name; without Redis the memory of this
+        process is all there is, and it says so by being less.
+        """
         if not doc_name:
             return {"upvotes": 0, "downvotes": 0}
+        client = self._redis_client()
+        if client is not None:
+            try:
+                key = f"{self._key_prefix}:fb:{doc_name}"
+                raw = client.hgetall(key)
+                if raw:
+                    up = raw.get(b"upvotes") or raw.get("upvotes") or 0
+                    down = raw.get(b"downvotes") or raw.get("downvotes") or 0
+                    return {"upvotes": int(up), "downvotes": int(down)}
+            except Exception:
+                pass
         with self._lock:
             local_stats = self._local.get(doc_name)
             if local_stats:
                 return dict(local_stats)
-        if self._client is not None:
-            try:
-                key = f"{self._key_prefix}:fb:{doc_name}"
-                raw = self._client.hgetall(key)
-                if raw:
-                    up = raw.get(b"upvotes") or raw.get("upvotes") or 0
-                    down = raw.get(b"downvotes") or raw.get("downvotes") or 0
-                    return {
-                        "upvotes": int(up),
-                        "downvotes": int(down),
-                    }
-            except Exception:
-                pass
         return {"upvotes": 0, "downvotes": 0}
 
     def all_feedback(self) -> Dict[str, Dict[str, int]]:
+        """The verdicts this process recorded, for the ranker's multiplier."""
         with self._lock:
             return {k: dict(v) for k, v in self._local.items()}
+
+    def _redis_client(self) -> Any:
+        """A Redis client for the shared counters; ``None`` when there is none."""
+        if self._client is not None:
+            return self._client
+        if self._handle is None:
+            return None
+        try:
+            return self._handle.get()
+        except Exception:
+            return None
 
 
 def _encode(entry: CachedContext) -> str:

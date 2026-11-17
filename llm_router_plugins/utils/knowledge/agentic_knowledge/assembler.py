@@ -236,6 +236,9 @@ class KnowledgeContext:
     searches: int = 0
     #: How many of those searches the read budget could not start.
     budget_skipped: int = 0
+    #: How many of those searches were answered from this process's memo of an
+    #: identical question instead of from the engine: the saving, not a cost.
+    memo_hits: int = 0
     #: Why the cache did not serve this request: ``mode`` for a switch to a
     #: mode that reads a different question, ``evidence`` for new evidence,
     #: ``cold`` for nothing cached at all, ``""`` when the cache did serve.

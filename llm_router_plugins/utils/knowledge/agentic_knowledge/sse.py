@@ -43,13 +43,20 @@ this module sends it by default (:meth:`KnowledgeStore.search`).
 
 import inspect
 import logging
+import threading
 import time
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+    parse_document_name,
+)
+
 __all__ = [
     "KnowledgeStore",
+    "REASON_MEMO",
     "REASON_READ_BUDGET",
     "SCALE_COSINE",
     "SCALE_RRF",
@@ -88,11 +95,31 @@ SCALE_RERANKER = "reranker"
 
 _MAX_HIT_CHARS = 4000
 
+#: How much of a query a log line quotes: enough to recognize the question
+#: again in a log, short enough that one search is one line and not a
+#: paragraph of stack trace.
+_LOG_QUERY_CHARS = 160
+
 #: The engine's code for "collection not found or access denied"
 #: (``sse_api/engine/core/errors.py``, ``COLLECTION_ACCESS_DENIED``).  The
 #: engine answers with HTTP 200 and this code in the body, so it arrives as an
 #: API error rather than as an empty answer.
 _COLLECTION_MISSING_CODE = "engine_001"
+
+#: How long an identical, already answered question is remembered: long enough
+#: that a generation which asks the same question of the same collection more
+#: than once pays the engine only the first time, short enough that an answer
+#: that goes stale goes stale inside one generation and not across them.
+_MEMO_TTL_SECONDS = 300.0
+
+#: The memo is a per-process LRU; the ceiling is what one generation of
+#: requests can plausibly fill, not what the machine can hold.
+_MEMO_MAX_ENTRIES = 128
+
+#: :attr:`SearchResult.reason` — the answer came from this process's memo of
+#: an identical question, not from the engine.  It is an ``ok`` result; the
+#: reason is how the caller tells a remembered answer from a fresh one.
+REASON_MEMO = "memo"
 
 
 @dataclass(frozen=True)
@@ -141,6 +168,10 @@ class SearchRequest:
     modes: Tuple[str, ...] = ()
     doc_types: Tuple[str, ...] = ()
     keywords: Tuple[str, ...] = ()
+    #: How the engine combines the keywords on its full-text leg: ``and``
+    #: keeps every keyword, ``any`` one of them; ``""`` leaves the choice to
+    #: the engine, which is ``and``.
+    keywords_match: str = ""
     relative_path_contains: str = ""
 
 
@@ -306,6 +337,8 @@ class KnowledgeStore:
         self._unavailable_reason = (
             "" if (client is not None or self._host) else ("no host configured")
         )
+        self._memo: "OrderedDict[SearchRequest, SearchResult]" = OrderedDict()
+        self._memo_lock = threading.Lock()
 
     @property
     def available(self) -> bool:
@@ -347,6 +380,26 @@ class KnowledgeStore:
             return SearchResult(STATUS_OK)
         if deadline is not None and deadline - time.monotonic() < self._timeout:
             return SearchResult(STATUS_UNAVAILABLE, reason=REASON_READ_BUDGET)
+        # The question is frozen, and a generation asks the same frozen
+        # question of the same collection more than once: once for the query
+        # and once more when the same wording resurfaces.  The first answer is
+        # good enough for the second within the memo's life, so the second
+        # never reaches the engine at all.
+        started = time.monotonic()
+        memoed = self._memo_get(request, started)
+        if memoed is not None:
+            self._info(
+                "knowledge search answered from memo (%s): %d hits, engine not asked",
+                request.collection,
+                len(memoed.hits),
+            )
+            return SearchResult(
+                memoed.status,
+                hits=memoed.hits,
+                reason=REASON_MEMO,
+                score_scale=memoed.score_scale,
+            )
+        self._info("knowledge search asked %s", _log_subject(request))
         try:
             client = self._ensure_client()
         except Exception as exc:
@@ -373,22 +426,98 @@ class KnowledgeStore:
                 # collection — nothing known yet — so it is reported as an
                 # empty result rather than as a failure on every request of a
                 # young project.
-                self._note(
-                    "knowledge base of %s is not indexed yet", request.collection
+                self._info(
+                    "knowledge search answered (%s): nothing indexed yet",
+                    request.collection,
                 )
                 return SearchResult(STATUS_OK, reason="no collection")
             self._warn(
-                "knowledge search failed (%s): %s",
+                "knowledge search failed (%s) after %d ms: %s",
                 request.collection,
+                _elapsed_ms(started),
                 type(exc).__name__,
             )
             return SearchResult(STATUS_UNAVAILABLE, reason=type(exc).__name__)
         scale = _score_scale(response)
-        return SearchResult(
+        result = SearchResult(
             STATUS_OK,
             hits=tuple(_hits(request.collection, response, scale)),
             score_scale=scale,
         )
+        described = _log_answer(result.hits)
+        self._info(
+            "knowledge search answered (%s): %d hits in %d ms, scale=%s%s",
+            request.collection,
+            len(result.hits),
+            _elapsed_ms(started),
+            scale or "unknown",
+            f"; {described}" if described else "",
+        )
+        # Only a real answer is worth remembering: a failure is a state the
+        # engine may leave before the next identical question, and a missing
+        # collection is the worker's to create, so neither is memoed.
+        if result.status == STATUS_OK and result.reason != "no collection":
+            self._memo_put(request, started, result)
+        return result
+
+    def push_quality(
+        self,
+        collection: str,
+        document_name: str,
+        upvotes: int,
+        downvotes: int,
+    ) -> bool:
+        """
+        Push one document's quality verdict to the engine's metadata.
+
+        The engine's counters are monotonic and its endpoint takes absolute
+        totals, so a caller sends what it has counted and never re-sends the
+        same verdict twice: an upvote recorded in this process is the one the
+        engine will hold, and a second process's recount of the same turn is
+        not a second opinion, it is a duplicate the engine cannot tell from a
+        real one.  The document is named the way the engine knows it — the
+        name a search reports, suffix and all — because the endpoint resolves
+        against its own listing.
+
+        Parameters
+        ----------
+        collection : str
+            The document's collection.
+        document_name : str
+            The engine-level name of the document.
+        upvotes : int
+            The total of recorded successes; never a delta.
+        downvotes : int
+            The total of recorded failures; never a delta.
+
+        Returns
+        -------
+        bool
+            Whether the engine accepted the totals.  A failure is a status,
+            not an exception: the request path must not die on the way to
+            answering an agent because the scoreboard could not be updated.
+        """
+        if not self.available or not collection or not document_name:
+            return False
+        try:
+            client = self._ensure_client()
+            client.post(
+                "update_knowledge_quality",
+                {
+                    "collection_name": collection,
+                    "document_name": document_name,
+                    "upvotes": int(upvotes),
+                    "downvotes": int(downvotes),
+                },
+            )
+        except Exception as exc:
+            self._note(
+                "knowledge quality push failed for %s: %s",
+                document_name,
+                type(exc).__name__,
+            )
+            return False
+        return True
 
     def close(self) -> None:
         """
@@ -409,6 +538,31 @@ class KnowledgeStore:
                 except Exception:  # closing must not raise
                     return
                 return
+
+    def _memo_get(
+        self, request: SearchRequest, now: float
+    ) -> Optional[SearchResult]:
+        """The remembered answer to an identical question, if it is still young."""
+        with self._memo_lock:
+            entry = self._memo.get(request)
+            if entry is None:
+                return None
+            result, stored_at = entry
+            if now - stored_at > _MEMO_TTL_SECONDS:
+                del self._memo[request]
+                return None
+            self._memo.move_to_end(request)
+            return result
+
+    def _memo_put(
+        self, request: SearchRequest, now: float, result: SearchResult
+    ) -> None:
+        """Remember *result* for *request*, evicting the oldest past the ceiling."""
+        with self._memo_lock:
+            self._memo[request] = (result, now)
+            self._memo.move_to_end(request)
+            while len(self._memo) > _MEMO_MAX_ENTRIES:
+                self._memo.popitem(last=False)
 
     # -------------------------------------------------------------- helpers -
     def _ensure_client(self) -> Any:
@@ -456,6 +610,11 @@ class KnowledgeStore:
         if self._logger is not None:
             self._logger.warning(message, *args)
 
+    def _info(self, message: str, *args: Any) -> None:
+        """Log one operational fact when a logger was given."""
+        if self._logger is not None:
+            self._logger.info(message, *args)
+
     def _note(self, message: str, *args: Any) -> None:
         """Log at debug level when a logger was given."""
         if self._logger is not None:
@@ -484,6 +643,61 @@ def _accepts_language_switch(client: Any) -> bool:
         parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in parameters.values()
     )
+
+
+def _elapsed_ms(started: float) -> int:
+    """Milliseconds since *started*, the unit a timeout is read in."""
+    return int((time.monotonic() - started) * 1000)
+
+
+def _log_subject(request: SearchRequest) -> str:
+    """
+    Describe what is being asked, on one line, for a log.
+
+    The filters travel with the sentence because the same sentence asked of a
+    different bucket is a different search: a mode fans its sources out over
+    threads, and an operator reading the lines back has to be able to tell
+    which source asked what, and why one of them came back empty.
+    """
+    quoted = " ".join((request.query or "").split())
+    if len(quoted) > _LOG_QUERY_CHARS:
+        quoted = quoted[:_LOG_QUERY_CHARS] + "..."
+    parts = [f"'{quoted}'"]
+    for label, values in (
+        ("categories", request.categories),
+        ("doc_types", request.doc_types),
+        ("modes", request.modes),
+        ("phases", request.phases),
+    ):
+        if values:
+            parts.append(f"{label}={','.join(str(value) for value in values)}")
+    if request.thread_id:
+        parts.append(f"thread={request.thread_id}")
+    if request.relative_path_contains:
+        parts.append(f"path~{request.relative_path_contains}")
+    if request.keywords:
+        match = f"/{request.keywords_match}" if request.keywords_match else ""
+        parts.append(f"keywords={len(request.keywords)}{match}")
+    return f"{request.collection}: {' '.join(parts)}"
+
+
+def _log_answer(hits: Iterable[StoreHit]) -> str:
+    """
+    Describe what came back: how many of each kind, and the best-scoring
+    document.  A count alone says the engine answered; the kinds say whether
+    it answered with a recipe, a dead end or a documentation page, which is
+    the difference between knowledge working and knowledge noise.  The kind is
+    read back out of the document name, the one field a search always reports.
+    """
+    kinds: Dict[str, int] = {}
+    best = ""
+    for hit in hits:
+        kind = parse_document_name(hit.document_name).kind or "other"
+        kinds[kind] = kinds.get(kind, 0) + 1
+        if not best:
+            best = hit.document_name
+    described = " ".join(f"{kind}={count}" for kind, count in sorted(kinds.items()))
+    return f"{described} best={best}" if best else described
 
 
 def _collection_missing(exc: Exception) -> bool:
@@ -556,6 +770,9 @@ def _options(
         options["categories"] = list(request.categories)
     if getattr(request, "keywords", None):
         options["keywords"] = list(request.keywords)
+    keywords_match = str(getattr(request, "keywords_match", "") or "")
+    if keywords_match:
+        options["keywords_match"] = keywords_match
     if getattr(request, "relative_path_contains", ""):
         options["relative_path_contains"] = request.relative_path_contains
     # Exactly one metadata filter, whatever it filters on: the engine unions

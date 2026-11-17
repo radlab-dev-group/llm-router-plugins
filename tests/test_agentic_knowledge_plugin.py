@@ -1297,3 +1297,83 @@ def test_a_scoreboard_that_cannot_be_written_costs_a_metric_not_a_request():
     assert metrics.raises > 0
     # the request still got its knowledge and its annotation
     assert out["routing"]["knowledge"]["injected"] >= 1
+
+
+# ------------------------------------------------------- feedback to the engine --
+def _two_turns_that_credit(plugin):
+    """Run a turn that injects a recipe and the next one that fixes the failure."""
+    plugin.apply(_recipe_turn("turn-1"))
+    plugin.apply(recipe_payload(turn_id="turn-2", root_turn_id="gen-2"))
+    _drain_feedback(plugin)
+
+
+def _drain_feedback(plugin):
+    """Wait for the push the request path handed to its background thread."""
+    thread = getattr(plugin, "_feedback_thread", None)
+    if thread is not None:
+        thread.join(timeout=5)
+
+
+def test_a_credited_recipe_is_pushed_to_the_engine():
+    """A verdict the tracker settles reaches the engine's quality endpoint."""
+    config = knowledge_config()
+    store = FakeStore(hits=(store_hit("recipe", score=0.9),))
+    plugin = make_plugin(config, store=store)
+    _two_turns_that_credit(plugin)
+    assert store.quality_pushes, "the verdict never reached the engine"
+    collection, name, up, down = store.quality_pushes[0]
+    assert collection == config.collection("webapp", "recipe")
+    assert up >= 1 and down == 0
+    # A push the engine accepted is not queued for the next attempt.
+    assert plugin._feedback_tracker.touched() == ()
+
+
+def test_a_push_the_engine_refused_stays_queued():
+    """A refused push is retried; the verdict is not lost with the attempt."""
+    config = knowledge_config()
+    store = FakeStore(hits=(store_hit("recipe", score=0.9),))
+    store.push_ok = False
+    plugin = make_plugin(config, store=store)
+    _two_turns_that_credit(plugin)
+    assert store.quality_pushes
+    # The name is still queued because the engine did not accept it.
+    assert plugin._feedback_tracker.touched() != ()
+
+
+def test_a_blamed_recipe_is_pushed_as_a_downvote():
+    """A loop that survived the injection is the downvote the engine counts."""
+    config = knowledge_config()
+    store = FakeStore(hits=(store_hit("recipe", score=0.9),))
+    plugin = make_plugin(config, store=store)
+    plugin.apply(_recipe_turn("turn-1"))
+    plugin.apply(_recipe_turn("turn-2"))
+    assert store.quality_pushes
+    _, _, up, down = store.quality_pushes[0]
+    assert up == 0 and down >= 1
+
+
+def test_the_push_is_rate_limited_to_the_policy_interval():
+    """A push at most once per interval; a settled verdict still arrives."""
+    config = knowledge_config(feedback_push_interval_seconds=3600)
+    store = FakeStore(hits=(store_hit("recipe", score=0.9),))
+    plugin = make_plugin(config, store=store)
+    _two_turns_that_credit(plugin)
+    first = len(store.quality_pushes)
+    assert first >= 1
+    # The next settled verdict of the same generation does not push again.
+    _two_turns_that_credit(plugin)
+    assert len(store.quality_pushes) == first
+
+
+def test_the_request_path_does_not_wait_on_the_push():
+    """The push is a background thread: a request that settles a verdict returns."""
+    config = knowledge_config()
+    store = FakeStore(hits=(store_hit("recipe", score=0.9),))
+    plugin = make_plugin(config, store=store)
+    plugin.apply(_recipe_turn("turn-1"))
+    plugin.apply(recipe_payload(turn_id="turn-2", root_turn_id="gen-2"))
+    # The thread exists and carries the work; the request path did not call
+    # the engine itself, so it cannot have waited on it.
+    assert getattr(plugin, "_feedback_thread", None) is not None
+    plugin._feedback_thread.join(timeout=5)
+    assert store.quality_pushes

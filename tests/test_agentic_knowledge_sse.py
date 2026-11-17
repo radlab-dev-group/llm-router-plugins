@@ -20,6 +20,7 @@ import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+    REASON_MEMO,
     REASON_READ_BUDGET,
     STATUS_OK,
     STATUS_UNAVAILABLE,
@@ -474,3 +475,140 @@ def test_no_budget_means_the_store_behaves_as_it_always_did():
         == STATUS_OK
     )
     assert len(client.calls) == 1
+
+
+# ------------------------------------------------------------------------ memo -
+class _FailureCountingClient:
+    """A down engine that still counts how often it was asked."""
+
+    def __init__(self, error):
+        self.error = error
+        self.calls = []
+
+    def search(self, collection, query, options):
+        self.calls.append((collection, query, options))
+        raise self.error
+
+
+def _reply(document="recipe-a"):
+    return _Reply([_Hit(text="run it again", document_name=document)])
+
+
+def _question(text="why does it fail"):
+    return SearchRequest(collection="agentic_kb_webapp", query=text)
+
+
+def test_an_identical_question_is_asked_the_engine_once():
+    """
+    One generation asks the same frozen question of one collection twice.
+
+    The first answer is good enough for the second inside the memo's life, so
+    the engine sees one call and the caller still gets the same hits — with a
+    reason that says where they came from.
+    """
+    client = _Client(_reply())
+    store = KnowledgeStore(client=client)
+
+    first = store.search(_question())
+    second = store.search(_question())
+
+    assert len(client.calls) == 1
+    assert first.status == STATUS_OK
+    assert first.reason != REASON_MEMO
+    assert second.status == STATUS_OK
+    assert second.reason == REASON_MEMO
+    assert [hit.document_name for hit in second.hits] == ["recipe-a"]
+    assert second.score_scale == first.score_scale
+
+
+def test_a_different_question_still_reaches_the_engine():
+    """The memo is keyed by the question, so a new one is a new answer."""
+    client = _Client(_reply())
+    store = KnowledgeStore(client=client)
+
+    store.search(_question())
+    store.search(_question("how to deploy"))
+    store.search(
+        SearchRequest(collection="agentic_kb_other", query="why does it fail")
+    )
+
+    assert len(client.calls) == 3
+
+
+def test_a_remembered_answer_ages_out(monkeypatch):
+    """The memo is a saving, not a stale answer: past its life it asks again."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge import sse
+
+    monkeypatch.setattr(sse, "_MEMO_TTL_SECONDS", -1.0)
+    client = _Client(_reply())
+    store = KnowledgeStore(client=client)
+
+    store.search(_question())
+    second = store.search(_question())
+
+    assert len(client.calls) == 2
+    assert second.reason != REASON_MEMO
+
+
+def test_a_failure_is_not_remembered():
+    """A down engine is a state it may leave; freezing the failure would lie."""
+    client = _FailureCountingClient(_EngineError("engine_002", "unreachable"))
+    store = KnowledgeStore(client=client)
+
+    first = store.search(_question())
+    second = store.search(_question())
+
+    assert first.status == STATUS_UNAVAILABLE
+    assert second.status == STATUS_UNAVAILABLE
+    assert len(client.calls) == 2
+
+
+def test_a_collection_that_does_not_exist_yet_is_not_remembered():
+    """
+    A young repository gains its collection when the worker indexes the first
+    episode, and the reader must keep asking until it does: the answer changes
+    underneath the very same question.
+    """
+    client = _FailureCountingClient(
+        _EngineError("engine_001", "Kolekcja nie istnieje lub brak dostępu!")
+    )
+    store = KnowledgeStore(client=client)
+
+    first = store.search(_question())
+    store.search(_question())
+
+    assert first.status == STATUS_OK
+    assert first.reason == "no collection"
+    assert len(client.calls) == 2
+
+
+def test_the_memo_holds_a_generation_not_a_lifetime(monkeypatch):
+    """Past the ceiling the oldest question is asked again, not remembered."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge import sse
+
+    monkeypatch.setattr(sse, "_MEMO_MAX_ENTRIES", 2)
+    client = _Client(_reply())
+    store = KnowledgeStore(client=client)
+    oldest = _question("oldest")
+
+    store.search(oldest)
+    store.search(_question("second"))
+    store.search(_question("third"))
+    assert len(client.calls) == 3
+
+    store.search(oldest)
+    assert len(client.calls) == 4
+
+
+def test_a_remembered_answer_needs_no_client(monkeypatch):
+    """The saving is the point: a hit answers without reaching for the engine."""
+    client = _Client(_reply())
+    store = KnowledgeStore(client=client)
+    request = _question()
+    store.search(request)
+
+    def _no_client(*args, **kwargs):
+        raise AssertionError("a memo hit must not touch the client")
+
+    monkeypatch.setattr(store, "_ensure_client", _no_client)
+    assert store.search(request).reason == REASON_MEMO
