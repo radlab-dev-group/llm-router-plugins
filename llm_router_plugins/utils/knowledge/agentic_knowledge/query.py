@@ -122,6 +122,7 @@ class QueryBuilder:
         phase_limits: Dict[str, Optional[List[str]]] = {}
         mode_limits: Dict[str, Optional[List[str]]] = {}
         doc_type_limits: Dict[str, Optional[List[str]]] = {}
+        keywords_match_limits: Dict[str, str] = {}
         for source in policy.sources:
             kind = source.category
             archived = kind == KIND_SESSION_ARCHIVE
@@ -167,6 +168,17 @@ class QueryBuilder:
                     doc_type_limits[name] = list(
                         dict.fromkeys(known + list(source.doc_types))
                     )
+            match = source.keywords_match or "and"
+            if name not in keywords_match_limits:
+                keywords_match_limits[name] = match
+            elif keywords_match_limits[name] != "and":
+                # A bucket is asked once: the engine combines the keywords one
+                # way, so the strictest source in it wins.  A source that
+                # wants ``any`` next to one that wants ``and`` is a
+                # contradiction the engine cannot express, and the fix is the
+                # one that retrieves less noise, not the one that retrieves
+                # more.
+                keywords_match_limits[name] = "and"
         requests: List[SearchRequest] = []
         for name, categories in grouped.items():
             archived = KIND_SESSION_ARCHIVE in categories
@@ -189,6 +201,7 @@ class QueryBuilder:
                     modes=() if archived else tuple(restricted_modes or ()),
                     doc_types=() if archived else tuple(restricted_types or ()),
                     keywords=self.keywords_for(turn),
+                    keywords_match=keywords_match_limits.get(name, "and"),
                     relative_path_contains=(
                         self.path_scope_for(turn)
                         if not archived and not documented

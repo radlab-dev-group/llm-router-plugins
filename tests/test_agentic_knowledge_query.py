@@ -562,3 +562,55 @@ def base_items_for_bare():
     from agentic_knowledge_support import base_items
 
     return base_items()
+
+
+# ---------------------------------------------------------- keywords_match --
+def test_a_source_that_wants_any_is_sent_any():
+    """A source's keywords_match reaches the request, not the config alone."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        SourcePolicy,
+    )
+
+    requests = builder().build(
+        turn_for(mode="debug"),
+        _policy(SourcePolicy(category="recipe", keywords_match="any")),
+    )
+    assert requests, "a debug turn asks at least one question"
+    assert all(request.keywords_match == "any" for request in requests)
+    assert all(request.keywords for request in requests)
+
+
+def test_the_default_match_is_strict():
+    """A source that names no match keeps the engine's strict conjunction."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        SourcePolicy,
+    )
+
+    requests = builder().build(
+        turn_for(mode="debug"),
+        _policy(SourcePolicy(category="recipe")),
+    )
+    assert requests
+    assert all(request.keywords_match == "and" for request in requests)
+
+
+def test_the_strictest_source_in_a_bucket_wins():
+    """A bucket is asked once, so the engine cannot hold two match modes at once."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        SourcePolicy,
+    )
+
+    requests = builder().build(
+        turn_for(mode="debug"),
+        _policy(
+            SourcePolicy(category="recipe", keywords_match="any"),
+            SourcePolicy(category="deadend", keywords_match="and"),
+        ),
+    )
+    knowledge_requests = [
+        request
+        for request in requests
+        if set(request.categories) == {"recipe", "deadend"}
+    ]
+    assert knowledge_requests
+    assert all(request.keywords_match == "and" for request in knowledge_requests)
