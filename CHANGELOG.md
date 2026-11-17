@@ -26,6 +26,22 @@ release tagged as `v<version>`.
 ## [Unreleased]
 
 ### Added
+- **The read path stops asking the engine a question a turn cannot have.** A turn
+  that named no file, met no failure and ran no command builds its query from its
+  own sentence alone, and below a dozen characters that sentence is an
+  acknowledgement, not a question; such a turn now makes no search at all instead
+  of three. A short turn that carries any of the three structured signals is still
+  asked, so the guard is about what a query is built from, not about how briefly
+  the operator wrote.
+- **An identical question, asked twice in one generation, reaches the engine once.**
+  `KnowledgeStore` keeps a short-lived, per-process memo of the answers it has
+  already given to a frozen `SearchRequest`, so a read that asks the same question
+  of the same collection more than once pays the transport only the first time.
+  Only a real answer is remembered — a down engine and a collection not indexed
+  yet are states that change, and both are asked again. A memo hit carries
+  `reason: "memo"`, and the scoreboard counts it as `memo_hits`, the saving read
+  against `searches_per_request`; the `llm-router-agentic-kb-stats` table gains a
+  `memo` column.
 - **`agentic_knowledge` measures itself, and says so on one line.** `KnowledgeMetrics` counts every read-path
   request onto a per-scope, per-day Redis hash and derives the rates the knowledge layer is judged by:
   `adoption_rate` (of the turns shown knowledge, how many went on to mine a verified fix),

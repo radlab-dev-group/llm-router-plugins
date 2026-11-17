@@ -597,6 +597,7 @@ fire-and-forget: a Redis that cannot be written costs a metric and never a reque
 | `green_after_injection` | the turn mined a verified fix after being shown knowledge on the previous request |
 | `feedback_up` / `feedback_down` | the same verdict, per settled injection |
 | `read_failures` | a search came back unreachable |
+| `memo_hits` | a search was answered from this process's memo of an identical question instead of from the engine — the saving, counted against the `searches_per_request` that asks whether the engine was |
 
 `derived()` turns those into the rates the layer is read by. Each is `null` when its denominator is zero — a day
 that injected nothing measured nothing, and printing `0.0` would let a quiet day read as a bad one.
