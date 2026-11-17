@@ -648,6 +648,7 @@ per repository, naming both numbers.
   "scope": {"strategy": "repo_basename", "overrides": {}, "default": ""},
   "read": {"enabled": true, "timeout_seconds": 1.5, "min_similarity": 0.35,
             "hybrid_search": true, "rerank_results": false,
+            "fts_only_min_identifier_share": 0.5,
             "cache_ttl_seconds": 3600, "max_lookups_per_generation": 20},
   "modes": { "debug": {…}, "test": {…}, "implement": {…},
               "plan": {…}, "git_review": {…}, "review": {…} },
@@ -672,10 +673,16 @@ per repository, naming both numbers.
 ```
 
 The retrieval legs of one search are `read.hybrid_search` and `read.rerank_results`,
-switched by `…_HYBRID_SEARCH` and `…_RERANK_RESULTS`.  They also decide the scale every score comes
-back on — the engine's `results.score_scale`: a squashed cross-encoder logit with the reranker on,
-a Reciprocal Rank Fusion rank in a plain hybrid search, and a cosine similarity when the legs are
-off — so a threshold is a threshold *on one of those scales*, which is what
+switched by `…_HYBRID_SEARCH` and `…_RERANK_RESULTS`.  A third leg is skipped by default: when a
+query's tokens are mostly identifiers — `read.fts_only_min_identifier_share`, the share of
+tokens that look like code (an exception class, a module path, an underscored name; prose
+words never count), default `0.5` — the request is asked of the engine's full-text leg
+alone, with no embedding and no vector store, because an exact term is what a text index is
+for.  Set the share to `0` to keep every search on both legs.  They also decide the scale
+every score comes back on — the engine's `results.score_scale`: a squashed cross-encoder
+logit with the reranker on, a Reciprocal Rank Fusion rank in a plain hybrid search, the
+full-text rank in a lexical-only search, and a cosine similarity when the legs are off — so a
+threshold is a threshold *on one of those scales*, which is what
 `escalation.strong_recipe_scores` states per scale (`strong_recipe_score` remains the fallback for
 a scale the table leaves unnamed): a reranker logit under `rerank_results: true`, a cosine
 similarity with the legs off, and — in the default hybrid search — a fused rank the assembler

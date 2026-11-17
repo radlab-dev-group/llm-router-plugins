@@ -26,6 +26,18 @@ release tagged as `v<version>`.
 ## [Unreleased]
 
 ### Added
+- **A literal question is asked of the engine's text index alone.** When the tokens of a query
+  are mostly identifiers — an exception class, a dotted module path, a `::`-qualified name, an
+  underscored function — the request drops the vector leg: no embedding of the query, no round
+  trip to the vector store, and no cosine drifting to whatever the code merely resembles. The
+  share that decides is `read.fts_only_min_identifier_share` (`…_FTS_ONLY_MIN_IDENTIFIER_SHARE`,
+  default `0.5`; `0` keeps every search on both legs), and it counts only tokens that look like
+  code — the prose words of a question never count, so a query that merely *mentions* one
+  identifier among its words still asks both legs. The engine answers such a search on its own
+  scale, `score_scale: "fts"`: a `Postgres` text rank, which `escalation.strong_recipe_scores`
+  leaves unnamed and so measures against the fallback `strong_recipe_score`. The fast path asks
+  the engine that already supports it (`lexical_only` in the search options, added to the engine
+  beside this change) and says so in the read's own log line.
 - **The read path stops asking the engine a question a turn cannot have.** A turn
   that named no file, met no failure and ran no command builds its query from its
   own sentence alone, and below a dozen characters that sentence is an

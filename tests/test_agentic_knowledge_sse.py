@@ -612,3 +612,127 @@ def test_a_remembered_answer_needs_no_client(monkeypatch):
 
     monkeypatch.setattr(store, "_ensure_client", _no_client)
     assert store.search(request).reason == REASON_MEMO
+
+
+# ------------------------------------------------------- lexical-only search -
+def _literal_store():
+    """A store whose fast path is on at the policy's default share."""
+    return KnowledgeStore(
+        client=_Client(_reply()),
+        fts_only_min_identifier_share=0.5,
+    )
+
+
+def test_a_sentence_keeps_both_retrieval_legs():
+    """A question made of words is a question for the vector leg too."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import _options
+
+    request = SearchRequest(
+        collection="agentic_kb_webapp",
+        query="why does the login form reject a valid password",
+    )
+    options = _options(request, 0.35, hybrid_search=True)
+    assert options["lexical_only"] is False
+    assert options["hybrid_search"] is True
+
+
+def test_a_literal_question_asks_the_text_index_alone():
+    """
+    An exception class is an exact term, and an exact term is what a text
+    index is for: the vector leg is skipped, and the engine is told so.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import _options
+
+    request = SearchRequest(
+        collection="agentic_kb_webapp",
+        query="ConnectionTimeoutError redis.asyncio.retry",
+        lexical_only=True,
+    )
+    options = _options(request, 0.35, hybrid_search=True)
+    assert options["lexical_only"] is True
+    # Hybrid on top of lexical-only is asking to skip the vectors, and the
+    # engine would fuse a leg that never ran.
+    assert options["hybrid_search"] is False
+
+
+def test_the_store_asks_lexically_for_a_query_of_identifiers():
+    """The decision is the store's, made on the query it is about to send."""
+    store = _literal_store()
+    store.search(
+        SearchRequest(
+            collection="agentic_kb_webapp",
+            query="ConnectionTimeoutError redis.asyncio.retry",
+        )
+    )
+    assert store._client.calls[0][2]["lexical_only"] is True
+
+
+def test_the_store_keeps_both_legs_for_a_query_of_prose():
+    """A question that merely names one file is still a question."""
+    store = _literal_store()
+    store.search(
+        SearchRequest(
+            collection="agentic_kb_webapp",
+            query="how should we handle retries in the payment client",
+        )
+    )
+    assert store._client.calls[0][2]["lexical_only"] is False
+
+
+def test_the_fast_path_is_off_until_it_is_asked_for():
+    """
+    A store built without the share behaves exactly as it did before it: the
+    engine is never told to skip a leg nobody asked it to skip.
+    """
+    store = KnowledgeStore(client=_Client(_reply()))
+    store.search(
+        SearchRequest(
+            collection="agentic_kb_webapp",
+            query="ConnectionTimeoutError redis.asyncio.retry",
+        )
+    )
+    assert store._client.calls[0][2]["lexical_only"] is False
+
+
+def test_an_identifier_share_of_one_leaves_nothing_literal():
+    """The share is a fraction of tokens, and its ceiling asks nothing."""
+    assert KnowledgeStore(client=None, fts_only_min_identifier_share=1.5) is not None
+
+
+def test_an_exception_class_alone_is_fully_literal():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+        _identifier_share,
+    )
+
+    assert _identifier_share("ConnectionTimeoutError") == 1.0
+    # The same class named inside a sentence is a sentence.
+    assert (
+        _identifier_share(
+            "why does the worker raise ConnectionTimeoutError on startup"
+        )
+        < 0.5
+    )
+
+
+def test_a_module_path_and_an_underscored_name_are_identifiers():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+        _identifier_share,
+    )
+
+    assert _identifier_share("sse_api.engine.core.search_engine") == 1.0
+    assert _identifier_share("resolve_provider_hosts") == 1.0
+    assert _identifier_share("std::vector::iterator") == 1.0
+
+
+def test_prose_words_do_not_count_as_identifiers():
+    """
+    The words a question is made of are not "long enough to look like code".
+    Without them a query of ordinary English would reach its threshold on the
+    length of its own words alone.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+        _identifier_share,
+    )
+
+    assert _identifier_share("because the running worker was broken") == 0.0
+    assert _identifier_share("") == 0.0
