@@ -24,11 +24,14 @@ import datetime
 import math
 import re
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dataclasses import replace as _replace_meta
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import ModePolicy
+from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+    CandidateFeatures,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.doc_context import (
     DocContext,
     render_doc_context,
@@ -282,6 +285,29 @@ class ContextAssembler:
     touched_paths: Tuple[str, ...] = ()
     local_deadends: Tuple[str, ...] = ()
     feedback: Optional[Dict[str, Dict[str, int]]] = None
+    #: The learned multiplier of the layer, when the deployment runs one.  It
+    #: answers ``multiplier_for(features, document_name, scope)`` and is asked
+    #: only for candidates the ranking actually reaches; ``None`` — or a policy
+    #: that is switched off — leaves every multiplier ``1.0`` and the vote is
+    #: the one this file computed before the learner existed.
+    learning: Optional[Any] = None
+    #: Repository the block is assembled for; the key the model snapshot lives
+    #: under.  Empty means no learner can be consulted, which is the same as
+    #: having none.
+    scope: str = ""
+    #: Command this turn ran and lost with, when it names one; the learner's
+    #: strongest "this recipe is about that failure" feature.
+    failing_command: str = ""
+    #: Character budget the mode spends the block on; the denominator of the
+    #: cost feature, because a document's worth is per character it occupies.
+    #: ``0`` means "not charged", and the cost feature reads as zero rather
+    #: than dividing by it.
+    budget_chars: int = 0
+    #: What each ranked candidate looked like to the learner, by document name.
+    #: Filled while ranking so the caller can log the exposure it just made
+    #: without computing the features a second time; empty when no learner is
+    #: attached.
+    candidate_features: Dict[str, Any] = field(default_factory=dict)
 
     def assemble(
         self,
@@ -383,9 +409,18 @@ class ContextAssembler:
             # third of what the engine could fuse", and the ceiling of that
             # statement is the best hit actually in hand.
             ceiling = _rank_ceiling(result.hits, scale)
-            for hit in result.hits:
+            for position, hit in enumerate(result.hits):
                 candidate = self._candidate(
-                    hit, categories, weights, caps, order, types, scale, ceiling
+                    hit,
+                    categories,
+                    weights,
+                    caps,
+                    order,
+                    types,
+                    scale,
+                    ceiling,
+                    position,
+                    policy.name,
                 )
                 if candidate is None:
                     continue
@@ -409,6 +444,8 @@ class ContextAssembler:
         types: Optional[Dict[str, Tuple[str, ...]]] = None,
         score_scale: str = "",
         rank_ceiling: float = 0.0,
+        rank: int = 0,
+        mode: str = "",
     ) -> Optional[_Candidate]:
         """Turn one retrieved chunk into a candidate, or drop it."""
         meta, body = self._meta(hit)
@@ -451,8 +488,26 @@ class ContextAssembler:
                 except OverflowError:
                     base = 0.0 if base < 0 else 1.0
         weight = weights.get(kind, min(weights.values()) if weights else 1.0)
-        feedback_mult = self._feedback_multiplier(hit.document_name)
-        vote = (base * weight + self._bonus(meta, kind)) * feedback_mult
+        learned = self._learning_multiplier(
+            hit=hit,
+            meta=meta,
+            kind=kind,
+            base=base,
+            scale=scale,
+            rank=rank,
+            body=body,
+            mode=mode,
+        )
+        # The learner's reputation and the counter below are two readings of
+        # the same evidence, so only one of them ever weighs a vote: with a
+        # learner attached the counters stop multiplying, which is what keeps
+        # the influence of feedback inside the range the policy names.
+        feedback_mult = (
+            1.0 if learned > 0.0 else self._feedback_multiplier(hit.document_name)
+        )
+        vote = (base * weight + self._bonus(meta, kind)) * feedback_mult * (
+            learned if learned > 0.0 else 1.0
+        )
         return _Candidate(
             hit=KnowledgeHit(
                 category=kind,
@@ -575,6 +630,131 @@ class ContextAssembler:
         if not chosen:
             chosen = _force_one_recipe(candidates, max_chars - spent, opened)
         return chosen
+
+    def _learning_multiplier(
+        self,
+        hit: StoreHit,
+        meta: DocumentMeta,
+        kind: str,
+        base: float,
+        scale: str,
+        rank: int,
+        body: str,
+        mode: str = "",
+    ) -> float:
+        """
+        Ask the learner what this candidate is worth, and remember what it asked.
+
+        Returns ``0.0`` when there is nothing to ask — no learner, no scope, a
+        learner switched off, or a learner that raised — and the caller then
+        weighs the candidate exactly as it did before the learner existed.  The
+        features are recorded whether or not the answer moved anything, because
+        an injection whose exposure was never logged cannot be credited or
+        blamed a turn later, and the log is the one part of this that cannot be
+        reconstructed afterwards.
+        """
+        learner = self.learning
+        if learner is None or not self.scope or not hit.document_name:
+            return 0.0
+        features = self._features(
+            meta=meta,
+            kind=kind,
+            base=base,
+            scale=scale,
+            rank=rank,
+            body=body,
+            mode=mode,
+            document_name=hit.document_name,
+        )
+        try:
+            multiplier, _ = learner.multiplier_for(
+                features, document_name=hit.document_name, scope=self.scope
+            )
+        except Exception:  # a learner is never a reason to fail a read
+            return 0.0
+        if not multiplier or multiplier <= 0.0:
+            return 0.0
+        self.candidate_features[hit.document_name] = features
+        return float(multiplier)
+
+    def _features(
+        self,
+        meta: DocumentMeta,
+        kind: str,
+        base: float,
+        scale: str,
+        rank: int,
+        body: str,
+        mode: str = "",
+        document_name: str = "",
+    ) -> CandidateFeatures:
+        """
+        Describe one candidate for the learner, in numbers only.
+
+        Every value is one the ranking above already computed or the document
+        header declares.  Nothing here is content: no text, no path, no command
+        — only whether the command matched.  The record goes to the training
+        stream, and the worker masks the documents it is fitted on precisely so
+        that the layer never keeps content it cannot re-identify.
+        """
+        touched = self.touched_paths
+        shared = 0
+        stems = 0
+        if touched and meta.paths:
+            touched_names = {path.rsplit("/", 1)[-1] for path in touched}
+            for path in meta.paths:
+                if path in touched:
+                    shared += 1
+                elif path.rsplit("/", 1)[-1] in touched_names:
+                    stems += 1
+        age_days = 0.0
+        if meta.date is not None:
+            today = datetime.date.today()
+            age_days = float(max(0, (today - meta.date).days))
+        stats = (self.feedback or {}).get(document_name, {}) or {}
+        up = int(stats.get("upvotes", 0) or 0)
+        down = int(stats.get("downvotes", 0) or 0)
+        return CandidateFeatures(
+            kind=kind,
+            mode=mode,
+            score=float(base),
+            score_scale=scale,
+            signature_match=bool(
+                self.signature_hash and meta.signature_hash == self.signature_hash
+            ),
+            path_match=shared,
+            path_stem_match=min(stems, 4),
+            command_match=self._command_matches(meta),
+            age_days=age_days,
+            upvotes=up,
+            downvotes=down,
+            # Judgements, not impressions.  The request path counts what the
+            # deployment has *decided* about a document, never how often it was
+            # displayed: an exposure count would cost one Redis read per
+            # candidate, and the read path is the one place this layer is not
+            # allowed to spend a round-trip.
+            exposure=up + down,
+            rank=rank,
+            size_chars=len(body or ""),
+            budget_chars=self.budget_chars,
+        )
+
+    def _command_matches(self, meta: DocumentMeta) -> bool:
+        """
+        Whether the recipe's verification command is the one now failing.
+
+        A mined recipe names the command that turned it green; the turn names
+        the command that went red.  When they are the same command, the recipe
+        is about this failure and not merely about text that resembles it — the
+        strongest evidence available without asking a model anything.
+        """
+        declared = str(meta.test_command or "").strip()
+        failing = str(self.failing_command or "").strip()
+        if not declared or not failing:
+            return False
+        if declared == failing:
+            return True
+        return declared.split()[-1] == failing.split()[-1]
 
     def _feedback_multiplier(self, document_name: str) -> float:
         """Weight multiplier based on recorded reinforcement feedback."""
