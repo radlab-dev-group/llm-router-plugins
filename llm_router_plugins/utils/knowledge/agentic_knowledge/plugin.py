@@ -20,6 +20,7 @@ plugin cannot serve comes back the very object it was given.
 """
 
 import logging
+import threading
 import time
 
 from collections import OrderedDict
@@ -176,6 +177,8 @@ class AgenticKnowledgePlugin(PluginInterface):
             OrderedDict()
         )
         self._feedback_pushed_at = 0.0
+        self._feedback_flush_lock = threading.Lock()
+        self._feedback_thread: Optional[threading.Thread] = None
         self._budget_warnings: Dict[str, float] = {}
         self._wire(self._config)
 
@@ -755,41 +758,74 @@ class AgenticKnowledgePlugin(PluginInterface):
 
     def _flush_feedback(self, turn: AgentTurn) -> None:
         """
-        Hand the verdicts this process has settled to the engine.
+        Start a push of the settled verdicts, without waiting for it.
 
-        The endpoint's counters are monotonic and take absolute totals, so the
-        push sends what the tracker has counted and nothing more, and a name
-        the engine did not accept stays queued for the next attempt.  The push
-        is rate-limited by the policy's interval, and a request whose turn has
-        no scope has no collection to ask for, so it waits for one that does.
+        The verdicts of one process are of use to nobody but the engine, and
+        the push is one HTTP call per document: run here, it would make one
+        request in every interval wait seconds for work that has nothing to do
+        with answering it.  So the request path only decides *whether* to push
+        — the interval has passed, there is something queued, this turn knows
+        a collection — and a daemon thread carries the calls.  One flush at a
+        time: a push still running is a push that will finish and drain the
+        queue, not a reason to start a second one behind it.
         """
         tracker = self._feedback_tracker
-        if tracker is None or self._store is None:
+        if tracker is None or self._store is None or not turn.scope:
             return
-        names = tracker.touched()
-        if not names:
+        if not tracker.touched():
             return
         interval = int(
             getattr(self._config, "feedback_push_interval_seconds", 0) or 0
         )
-        now = time.monotonic()
-        if now - self._feedback_pushed_at < interval:
+        if time.monotonic() - self._feedback_pushed_at < interval:
             return
+        if not self._feedback_flush_lock.acquire(blocking=False):
+            return
+        try:
+            self._feedback_thread = threading.Thread(
+                target=self._push_feedback,
+                args=(tracker, turn.scope),
+                name="agentic-kb-feedback",
+                daemon=True,
+            )
+            self._feedback_thread.start()
+        except Exception:  # a thread that will not start is a push not made
+            self._feedback_flush_lock.release()
+
+    def _push_feedback(self, tracker: Any, scope: str) -> None:
+        """
+        Push the queued verdicts; runs off the request path, never raises.
+
+        The engine's counters are monotonic and the endpoint takes absolute
+        totals, so a name is sent as the deployment has counted it and a
+        refused name simply stays queued for the next flush.  The interval
+        clock moves only when something actually reached the engine, so a
+        deployment whose endpoint is down costs one thread per interval and
+        no verdicts.
+        """
         pushed: List[str] = []
-        for name in names:
-            collection = tracker.collection_of(name)
-            if not collection or not turn.scope:
-                continue
-            totals = tracker.get_feedback(name)
-            up = int(totals.get("upvotes", 0))
-            down = int(totals.get("downvotes", 0))
-            if not (up or down):
-                continue
-            if self._store.push_quality(collection, name, up, down):
-                pushed.append(name)
-        if pushed:
-            tracker.pushed(*pushed)
-            self._feedback_pushed_at = now
+        try:
+            for name in tracker.touched():
+                collection = tracker.collection_of(name)
+                if not collection:
+                    continue
+                totals = tracker.get_feedback(name)
+                up = int(totals.get("upvotes", 0))
+                down = int(totals.get("downvotes", 0))
+                if not (up or down):
+                    continue
+                try:
+                    if self._store.push_quality(collection, name, up, down):
+                        pushed.append(name)
+                except Exception:  # one document is not the flush's end
+                    continue
+            if pushed:
+                tracker.pushed(*pushed)
+                self._feedback_pushed_at = time.monotonic()
+        except Exception:
+            pass
+        finally:
+            self._feedback_flush_lock.release()
 
     def _feedback_weights(self) -> Optional[Dict[str, Dict[str, int]]]:
         """Reinforcement recorded so far; a debunked recipe ranks lower."""

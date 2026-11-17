@@ -618,9 +618,12 @@ were about blames them, the tracker keeps the running totals in a shared Redis h
 `update_knowledge_quality` endpoint as **absolute totals** (its counters are monotonic, so a re-send is
 a no-op and a duplicate is not a second opinion). A document is paired with the collection it was
 retrieved from while the block is still in hand, because the turn that settles a verdict does not carry
-it. A name the engine did not accept stays queued for the next attempt; a push costs a request nothing
-it was not already going to spend. What the engine does with `success_rate` is the engine's business —
-the plugin's own ranking keeps using the counters it can see.
+it. A name the engine did not accept stays queued for the next attempt. The push runs in a daemon
+thread the request path never waits on — a verdict is of use to nobody but the engine, and one
+HTTP call per document in the path of a live agent is exactly the latency the read path exists to
+avoid — so a request decides only whether to push, and one flush runs at a time. What the engine
+does with `success_rate` is the engine's business — the plugin's own ranking keeps using the
+counters it can see.
 
 ---
 

@@ -1304,6 +1304,14 @@ def _two_turns_that_credit(plugin):
     """Run a turn that injects a recipe and the next one that fixes the failure."""
     plugin.apply(_recipe_turn("turn-1"))
     plugin.apply(recipe_payload(turn_id="turn-2", root_turn_id="gen-2"))
+    _drain_feedback(plugin)
+
+
+def _drain_feedback(plugin):
+    """Wait for the push the request path handed to its background thread."""
+    thread = getattr(plugin, "_feedback_thread", None)
+    if thread is not None:
+        thread.join(timeout=5)
 
 
 def test_a_credited_recipe_is_pushed_to_the_engine():
@@ -1355,3 +1363,17 @@ def test_the_push_is_rate_limited_to_the_policy_interval():
     # The next settled verdict of the same generation does not push again.
     _two_turns_that_credit(plugin)
     assert len(store.quality_pushes) == first
+
+
+def test_the_request_path_does_not_wait_on_the_push():
+    """The push is a background thread: a request that settles a verdict returns."""
+    config = knowledge_config()
+    store = FakeStore(hits=(store_hit("recipe", score=0.9),))
+    plugin = make_plugin(config, store=store)
+    plugin.apply(_recipe_turn("turn-1"))
+    plugin.apply(recipe_payload(turn_id="turn-2", root_turn_id="gen-2"))
+    # The thread exists and carries the work; the request path did not call
+    # the engine itself, so it cannot have waited on it.
+    assert getattr(plugin, "_feedback_thread", None) is not None
+    plugin._feedback_thread.join(timeout=5)
+    assert store.quality_pushes
