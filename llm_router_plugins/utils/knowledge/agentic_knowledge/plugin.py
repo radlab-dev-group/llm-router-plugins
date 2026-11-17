@@ -24,7 +24,7 @@ import threading
 import time
 
 from collections import OrderedDict
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 from llm_router_plugins.plugin_interface import PluginInterface
@@ -79,6 +79,11 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.escalation import (
     EscalationPolicy,
     REASON_LOOP_WITHOUT_RECIPE,
 )
+from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+    CandidateFeatures,
+    FeedbackSample,
+    LearningPolicy,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.events import (
     KnowledgeEventPublisher,
     PublishStatus,
@@ -115,6 +120,26 @@ _BUDGET_WARNING_SCOPES = 512
 #: Request classes the plugin does not enrich.
 _REQUEST_CLASS_AUX = "aux_title"
 _REQUEST_CLASS_COMPACTION = "compaction"
+
+
+@dataclass(frozen=True)
+class _InjectedDoc:
+    """
+    What one request was shown, kept until the next turn judges it.
+
+    The name alone would be enough for the counters, which vote a whole block
+    up or down; it is not enough for the learner, which credits the documents
+    that could have caused what this turn did and leaves the rest unlabelled.
+    So the three facts a verdict is read against — the failure the document is
+    about, the files it names, the command it declares — are kept next to the
+    features the ranking weighed, for one turn, in this process only.
+    """
+
+    document_name: str = ""
+    signature_hash: str = ""
+    paths: Tuple[str, ...] = ()
+    test_command: str = ""
+    features: Optional[CandidateFeatures] = None
 
 
 class AgenticKnowledgePlugin(PluginInterface):
@@ -180,6 +205,15 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._limiter: Optional[LookupLimiter] = None
         self._docs: Optional[DocsIndexer] = None
         self._feedback_tracker: Optional[FeedbackTracker] = None
+        self._redis: Optional[RedisClientHandle] = None
+        self._learning: Optional[LearningPolicy] = None
+        #: Per session: what the previous request of this session was shown —
+        #: the document, the evidence it names and the features the learner saw
+        #: — so the verdict of the next turn can be credited per document
+        #: instead of per block.
+        self._pending_injections: "OrderedDict[str, Tuple[_InjectedDoc, ...]]" = (
+            OrderedDict()
+        )
         self._metrics: Optional[KnowledgeMetrics] = metrics
         #: Per session: the knowledge documents injected on the previous
         #: request, and the failure signature the request was stuck on.
@@ -256,11 +290,13 @@ class AgenticKnowledgePlugin(PluginInterface):
             config=config, publisher=self._publisher, logger=self._logger
         )
         # One fork-aware holder for every Redis the request path touches: the
-        # votes live there, and a proxy that preloads and then forks must not
-        # hand a worker its parent's sockets.  It is built even when Redis is
-        # not configured, so a deployment without Redis keeps the in-process
-        # state it always had, and one with Redis shares the votes across
-        # workers and across restarts.
+        # votes, the reputation, the bandit, the training stream and the model
+        # snapshots all live in the same place, and a proxy that preloads and
+        # then forks must not hand a worker its parent's sockets.  It is built
+        # even when Redis is not configured, so every reader has one thing to
+        # ask and gets ``None`` back: a deployment without Redis keeps the
+        # in-process state it always had, and one with Redis shares that state
+        # across workers and across restarts.
         self._redis = RedisClientHandle(
             connection=config.redis,
             client=self._redis_client,
@@ -269,6 +305,17 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._feedback_tracker = FeedbackTracker(
             client=LazyRedisClient(self._redis),
             key_prefix=config.key_prefix,
+        )
+        # The learned path.  Built whether or not it is enabled, for the same
+        # reason the indexer is: the one that says *why* it did nothing is the
+        # one that did nothing.  When disabled every multiplier is 1.0 and the
+        # training log still records what a request was shown, because the
+        # labels of today are the corpus of next month and they cannot be
+        # recovered after the fact.
+        self._learning = LearningPolicy(
+            config=config.learning,
+            client=LazyRedisClient(self._redis),
+            logger=self._logger,
         )
         if self._metrics is None:
             # Built on the same connection the cache and the publisher use, so
@@ -403,6 +450,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         # the verdict already weighs what this request ranks.
         self._settle_feedback(turn, mining)
         self._flush_feedback(turn)
+        candidate_features: Dict[str, CandidateFeatures] = {}
         if fresh:
             context = KnowledgeContext(
                 hits=cached.context.hits,
@@ -415,7 +463,7 @@ class AgenticKnowledgePlugin(PluginInterface):
                 doc_context=cached.context.doc_context,
             )
         else:
-            context = self._assemble(
+            context, candidate_features = self._assemble(
                 turn, config, policy, mining, self._doc_context(turn, docs)
             )
             # Nothing cached for this generation is a cold read; a switch to a
@@ -490,7 +538,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             ):
                 recipe_trials.setdefault(mining.signature_hash, mining.loop_count)
             self._remember_context(turn, context, target, recipe_trials, config)
-        self._remember_injected(turn, context, mining)
+        self._remember_injected(turn, context, mining, candidate_features)
         self._record_metrics(turn, context, decision)
         self._annotate(
             payload, adapter, turn, context, decision, publish, docs, mining
@@ -542,19 +590,28 @@ class AgenticKnowledgePlugin(PluginInterface):
         policy: Any,
         mining: Any,
         doc_context: Any = None,
-    ) -> KnowledgeContext:
-        """Search the sources and assemble the block; fail-open to an empty one."""
+    ) -> Tuple[KnowledgeContext, Dict[str, CandidateFeatures]]:
+        """
+        Search the sources and assemble the block; fail-open to an empty one.
+
+        The second value is what the learner saw per document, so the caller can
+        note the exposure with the same numbers the ranking weighed — computing
+        them a second time would be a second answer to the same question.
+        """
         if policy is None:
-            return KnowledgeContext(
-                cache="disabled", status="disabled", doc_context=doc_context
+            return (
+                KnowledgeContext(
+                    cache="disabled", status="disabled", doc_context=doc_context
+                ),
+                {},
             )
         if not turn.scope:
-            return KnowledgeContext(cache="miss", status="disabled")
+            return KnowledgeContext(cache="miss", status="disabled"), {}
         generation = turn.cache_generation
         if self._limiter is not None and not self._limiter.allow(
             turn.scope, generation
         ):
-            return KnowledgeContext(cache="miss", status="ok")
+            return KnowledgeContext(cache="miss", status="ok"), {}
 
         results = []
         statuses = set()
@@ -638,8 +695,17 @@ class AgenticKnowledgePlugin(PluginInterface):
             touched_paths=turn.touched_paths,
             local_deadends=mining.tried,
             feedback=self._feedback_weights(),
+            learning=self._learning,
+            scope=turn.scope,
+            failing_command=getattr(mining, "failing_command", "") or "",
+            budget_chars=getattr(policy, "max_chars", 0) or 0,
         )
         context = assembler.assemble(results, policy, doc_context=doc_context)
+        # The exposure this request made, with the features the learner saw:
+        # logged before the verdict exists, so a turn that never proves anything
+        # still leaves a record of what it was shown — the record the credit
+        # assignment of the next turn needs and that cannot be written later.
+        self._log_exposure(turn, assembler, context)
         return KnowledgeContext(
             hits=context.hits,
             rendered=context.rendered,
@@ -653,7 +719,7 @@ class AgenticKnowledgePlugin(PluginInterface):
             budget_skipped=skipped,
             memo_hits=memo_hits,
             cache_miss_reason="cold",
-        )
+        ), dict(getattr(assembler, "candidate_features", None) or {})
 
     def _skip_cold_knowledge(self, turn: AgentTurn, requests) -> tuple:
         """
@@ -878,11 +944,20 @@ class AgenticKnowledgePlugin(PluginInterface):
         agent simply moved on — neither credits nor blames, and the pending
         entry is spent either way: one turn is the whole window of
         attribution the plugin claims.
+
+        The coarse verdict above is one bit for the whole block, and the block
+        is several documents: crediting all of them with a fix one of them
+        describes teaches the layer to inject more of everything.  So each
+        document is graded against the evidence of *this* turn — its signature,
+        the files it names, the command it declares — and the graded label is
+        what the learner folds in.  The counters keep the coarse bit, because
+        the engine's quality signal is a vote and a vote has two values.
         """
         tracker = self._feedback_tracker
         if tracker is None:
             return
         pending = self._pending_feedback.pop(turn.session_id, None)
+        injected = self._pending_injections.pop(turn.session_id, ())
         if not pending:
             return
         doc_names, previous_signature = pending
@@ -900,6 +975,14 @@ class AgenticKnowledgePlugin(PluginInterface):
                 success=resolved,
                 collection=tracker.collection_of(doc_name),
             )
+        self._learn_from_verdict(
+            turn,
+            mining,
+            injected,
+            resolved=resolved,
+            repeated=repeated,
+            previous_signature=previous_signature,
+        )
         if self._metrics is not None and turn.scope:
             # The turn's own verdict on what it was shown last request, counted
             # once for the request rather than once per document: adoption is a
@@ -915,8 +998,160 @@ class AgenticKnowledgePlugin(PluginInterface):
             except Exception:
                 pass
 
+    def _learn_from_verdict(
+        self,
+        turn: AgentTurn,
+        mining: Any,
+        injected: Tuple["_InjectedDoc", ...],
+        resolved: bool,
+        repeated: bool,
+        previous_signature: str = "",
+    ) -> None:
+        """
+        Fold this turn's verdict into the learner, one document at a time.
+
+        The label is a reading of the evidence this turn produced, per document:
+
+        * ``+1.0`` — the document was about the very failure that has now been
+          verified fixed, so it is credited with the fix it describes;
+        * ``+0.5`` — the turn was resolved and the document speaks about a file
+          the turn touched or declares the command that just went green: it
+          plausibly held, without the evidence proving it;
+        * ``0.0`` — the turn was resolved and this document has nothing in
+          common with what the turn did.  That is not a failure and must not be
+          trained as one, so it is logged as an exposure and fitted as nothing;
+        * ``-1.0`` — the same failure came back and this document was about it:
+          the advice was on screen and the loop survived it;
+        * ``-0.3`` — the failure came back and this document is unrelated to
+          it.  Weak evidence against a document that was merely along for the
+          block, so it weighs a third of a judgement.
+
+        A document that names neither signature nor file of its own — the
+        common case for a chunk the engine matched by text — falls back to the
+        block's verdict, marked ``coarse``: the credit is collective, and the
+        model is told so, rather than the exposure being dropped from the
+        corpus the next fit trains on.  Never raises: a learner that cannot be
+        fed is a learner that did not learn, not a request that failed.
+        """
+        policy = self._learning
+        if policy is None or not injected:
+            return
+        signature = getattr(mining, "signature_hash", "") or ""
+        failing_command = str(getattr(mining, "failing_command", "") or "").strip()
+        touched = {str(path) for path in turn.touched_paths or () if path}
+        touched_names = {path.rsplit("/", 1)[-1] for path in touched}
+        for record in injected:
+            if not record.document_name:
+                continue
+            # The document's own account of which failure it is about.  A mined
+            # recipe of a failure keeps that signature in its metadata; a hit
+            # that carries neither a signature nor a file cannot be matched to
+            # a verdict by anything more than the block it was in, and is
+            # settled as the block was — marked ``coarse`` so a fit can tell
+            # the two kinds of credit apart.
+            about_previous = bool(
+                record.signature_hash
+                and previous_signature
+                and record.signature_hash == previous_signature
+            )
+            about_current = bool(
+                record.signature_hash
+                and signature
+                and record.signature_hash == signature
+            )
+            paths = {str(path) for path in record.paths if path}
+            shares_path = bool(
+                paths
+                and (
+                    paths & touched
+                    or {path.rsplit("/", 1)[-1] for path in paths} & touched_names
+                )
+            )
+            command_matches = bool(
+                record.test_command
+                and failing_command
+                and (
+                    record.test_command.strip() == failing_command
+                    or record.test_command.strip().split()[-1]
+                    == failing_command.split()[-1]
+                )
+            )
+            if about_previous or about_current or shares_path or command_matches:
+                if resolved:
+                    if about_current:
+                        label, kind = 1.0, "confirmed"
+                    else:
+                        label, kind = 0.5, "plausible"
+                elif repeated and about_previous:
+                    label, kind = -1.0, "debunked"
+                elif repeated:
+                    label, kind = -0.3, "rejected"
+                else:
+                    continue
+            else:
+                if not (resolved or repeated):
+                    continue
+                # The block's verdict, unattributed to anything in this
+                # document's own header: a collective credit, and a fit that
+                # sees it can weigh it accordingly.
+                label, kind = (1.0 if resolved else -1.0), "coarse"
+            try:
+                policy.settle(
+                    FeedbackSample(
+                        scope=turn.scope,
+                        session_id=turn.session_id,
+                        generation=turn.cache_generation,
+                        document_name=record.document_name,
+                        features=record.features or CandidateFeatures(),
+                        label=label,
+                        label_kind=kind,
+                    )
+                )
+            except Exception:  # a learner that will not eat is not a failed turn
+                continue
+
+    def _log_exposure(
+        self, turn: AgentTurn, assembler: Any, context: KnowledgeContext
+    ) -> None:
+        """
+        Record what this request was shown, before it has a verdict.
+
+        Kept off the annotated path and never allowed to raise: the record is
+        worth having and a training log is never worth a request.  Written even
+        when learning is switched off, because a label can only be attached to
+        an exposure that was written down while it happened.
+        """
+        policy = self._learning
+        if policy is None or not turn.session_id:
+            return
+        features = getattr(assembler, "candidate_features", None) or {}
+        if not features:
+            return
+        shown = [
+            (hit.document_name, features[hit.document_name])
+            for hit in context.hits
+            if hit.document_name and hit.document_name in features
+        ]
+        if not shown:
+            return
+        try:
+            policy.log.append_injection(
+                scope=turn.scope,
+                session_id=turn.session_id,
+                generation=turn.cache_generation,
+                model_id=str(policy.annotation(turn.scope).get("model_id") or ""),
+                features=[item for _, item in shown],
+                document_names=[name for name, _ in shown],
+            )
+        except Exception:  # an unwritten log line is a lost sample, not a failure
+            return
+
     def _remember_injected(
-        self, turn: AgentTurn, context: KnowledgeContext, mining: Any
+        self,
+        turn: AgentTurn,
+        context: KnowledgeContext,
+        mining: Any,
+        candidate_features: Optional[Dict[str, CandidateFeatures]] = None,
     ) -> None:
         """Remember what this request injected so the next one can score it."""
         if self._feedback_tracker is None or not turn.session_id:
@@ -928,6 +1163,21 @@ class AgenticKnowledgePlugin(PluginInterface):
         )
         if not doc_names:
             return
+        features = candidate_features or {}
+        recorded = tuple(
+            _InjectedDoc(
+                document_name=hit.document_name,
+                signature_hash=hit.signature_hash,
+                paths=tuple(hit.paths or ()),
+                test_command=hit.test_command,
+                features=features.get(hit.document_name),
+            )
+            for hit in context.hits
+            if hit.document_name and hit.category in _SCORED_KINDS
+        )
+        self._pending_injections[turn.session_id] = recorded
+        while len(self._pending_injections) > _FEEDBACK_PENDING_LIMIT:
+            self._pending_injections.popitem(last=False)
         tracker = self._feedback_tracker
         for hit in context.hits:
             if hit.document_name and hit.category in _SCORED_KINDS:
@@ -1128,6 +1378,20 @@ class AgenticKnowledgePlugin(PluginInterface):
             }
         if docs is not None:
             knowledge["docs"] = docs.as_dict()
+        if self._learning is not None:
+            # Why a recipe was first must be answerable from the response, not
+            # from a log nobody kept: the model that served this request, its
+            # evidence, and the range its multipliers may move a vote through.
+            knowledge["learning"] = self._learning.annotation(turn.scope)
+            votes = self._feedback_tracker.all_feedback() if (
+                self._feedback_tracker
+            ) else {}
+            knowledge["metrics"]["feedback"] = {
+                "docs": len(votes),
+                "up": sum(int(v.get("upvotes", 0) or 0) for v in votes.values()),
+                "down": sum(int(v.get("downvotes", 0) or 0) for v in votes.values()),
+                "source": "redis" if self._redis is not None else "memory",
+            }
         if context is not None and getattr(context, "doc_context", None):
             digest = context.doc_context
             knowledge["doc_context"] = {
