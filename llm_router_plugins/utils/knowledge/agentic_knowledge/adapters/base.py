@@ -167,6 +167,11 @@ class KnowledgeEvent:
         Normalized failure the episode is about; ``""`` for an archive.
     signature_hash : str
         Digest of :attr:`signature`; empty when there is none.
+    supersedes : Tuple[str, ...]
+        Names of older documents this episode retires: the recipes mined for
+        the same failure before the wall moved, by their engine name.  A
+        document the engine does not have is skipped by the worker, so a name
+        is only an intent and not a promise.
     text : str
         The document to index, header included.
     metadata : Dict[str, Any]
@@ -185,6 +190,7 @@ class KnowledgeEvent:
     created_at: float = 0.0
     signature: str = ""
     signature_hash: str = ""
+    supersedes: Tuple[str, ...] = ()
     text: str = ""
     metadata: Dict[str, Any] = None  # type: ignore[assignment]
 
@@ -215,6 +221,7 @@ class KnowledgeEvent:
             "created_at": self.created_at,
             "signature": self.signature,
             "signature_hash": self.signature_hash,
+            "supersedes": list(self.supersedes or ()),
             "text": self.text,
             "metadata": dict(self.metadata or {}),
         }
@@ -242,6 +249,10 @@ class KnowledgeEvent:
         metadata = known.get("metadata")
         if not isinstance(metadata, dict):
             known["metadata"] = {}
+        supersedes = known.get("supersedes")
+        if supersedes is not None and not isinstance(supersedes, tuple):
+            supersedes = tuple(supersedes) if isinstance(supersedes, list) else ()
+            known["supersedes"] = supersedes
         return cls(**known)
 
 

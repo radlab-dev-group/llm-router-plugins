@@ -532,32 +532,6 @@ class FeedbackTracker:
         except Exception:
             return None
 
-    def get_feedback(self, doc_name: str) -> Dict[str, int]:
-        if not doc_name:
-            return {"upvotes": 0, "downvotes": 0}
-        with self._lock:
-            local_stats = self._local.get(doc_name)
-            if local_stats:
-                return dict(local_stats)
-        if self._client is not None:
-            try:
-                key = f"{self._key_prefix}:fb:{doc_name}"
-                raw = self._client.hgetall(key)
-                if raw:
-                    up = raw.get(b"upvotes") or raw.get("upvotes") or 0
-                    down = raw.get(b"downvotes") or raw.get("downvotes") or 0
-                    return {
-                        "upvotes": int(up),
-                        "downvotes": int(down),
-                    }
-            except Exception:
-                pass
-        return {"upvotes": 0, "downvotes": 0}
-
-    def all_feedback(self) -> Dict[str, Dict[str, int]]:
-        with self._lock:
-            return {k: dict(v) for k, v in self._local.items()}
-
 
 def _encode(entry: CachedContext) -> str:
     """Serialize one cache entry."""

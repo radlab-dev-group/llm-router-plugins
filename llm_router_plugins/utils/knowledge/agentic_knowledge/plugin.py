@@ -243,7 +243,9 @@ class AgenticKnowledgePlugin(PluginInterface):
         )
         self._feedback_tracker = FeedbackTracker(
             key_prefix=config.key_prefix,
-            handle=RedisClientHandle(config.redis) if config.redis.configured else None,
+            handle=(
+                RedisClientHandle(config.redis) if config.redis.configured else None
+            ),
         )
         if self._metrics is None:
             # Built on the same connection the cache and the publisher use, so
@@ -767,7 +769,9 @@ class AgenticKnowledgePlugin(PluginInterface):
         names = tracker.touched()
         if not names:
             return
-        interval = int(getattr(self._config, "feedback_push_interval_seconds", 0) or 0)
+        interval = int(
+            getattr(self._config, "feedback_push_interval_seconds", 0) or 0
+        )
         now = time.monotonic()
         if now - self._feedback_pushed_at < interval:
             return
@@ -825,7 +829,9 @@ class AgenticKnowledgePlugin(PluginInterface):
             return
         for doc_name in doc_names:
             tracker.record_feedback(
-                doc_name, success=resolved, collection=tracker.collection_of(doc_name)
+                doc_name,
+                success=resolved,
+                collection=tracker.collection_of(doc_name),
             )
         if self._metrics is not None and turn.scope:
             # The turn's own verdict on what it was shown last request, counted

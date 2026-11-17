@@ -390,11 +390,7 @@ class SourcePolicy:
     keywords_match : str
         How the source's keywords are combined when the engine's full-text
         leg is asked with them: ``and`` — the default — keeps every keyword,
-        ``any`` keeps one of them.  A second metadata dimension for the ``doc`` category,
-        which otherwise would have none: the engine unions several
-        ``metadata_filters`` with each other, so the list is the one that
-        is put in the slot.  Allowed on the ``doc`` source only, because
-        it is the only category whose documents carry a ``doc_type``.
+        ``any`` keeps one of them.
     modes : Tuple[str, ...]
         Routing modes this source is read in; empty — the default — reads it in
         every mode.  Mutually exclusive with *phases* for sources retrieved by
