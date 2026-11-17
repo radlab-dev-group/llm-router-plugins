@@ -50,6 +50,10 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+    parse_document_name,
+)
+
 __all__ = [
     "KnowledgeStore",
     "REASON_MEMO",
@@ -90,6 +94,11 @@ SCALE_RRF = "rrf"
 SCALE_RERANKER = "reranker"
 
 _MAX_HIT_CHARS = 4000
+
+#: How much of a query a log line quotes: enough to recognize the question
+#: again in a log, short enough that one search is one line and not a
+#: paragraph of stack trace.
+_LOG_QUERY_CHARS = 160
 
 #: The engine's code for "collection not found or access denied"
 #: (``sse_api/engine/core/errors.py``, ``COLLECTION_ACCESS_DENIED``).  The
@@ -376,15 +385,21 @@ class KnowledgeStore:
         # and once more when the same wording resurfaces.  The first answer is
         # good enough for the second within the memo's life, so the second
         # never reaches the engine at all.
-        now = time.monotonic()
-        memoed = self._memo_get(request, now)
+        started = time.monotonic()
+        memoed = self._memo_get(request, started)
         if memoed is not None:
+            self._info(
+                "knowledge search answered from memo (%s): %d hits, engine not asked",
+                request.collection,
+                len(memoed.hits),
+            )
             return SearchResult(
                 memoed.status,
                 hits=memoed.hits,
                 reason=REASON_MEMO,
                 score_scale=memoed.score_scale,
             )
+        self._info("knowledge search asked %s", _log_subject(request))
         try:
             client = self._ensure_client()
         except Exception as exc:
@@ -411,13 +426,15 @@ class KnowledgeStore:
                 # collection — nothing known yet — so it is reported as an
                 # empty result rather than as a failure on every request of a
                 # young project.
-                self._note(
-                    "knowledge base of %s is not indexed yet", request.collection
+                self._info(
+                    "knowledge search answered (%s): nothing indexed yet",
+                    request.collection,
                 )
                 return SearchResult(STATUS_OK, reason="no collection")
             self._warn(
-                "knowledge search failed (%s): %s",
+                "knowledge search failed (%s) after %d ms: %s",
                 request.collection,
+                _elapsed_ms(started),
                 type(exc).__name__,
             )
             return SearchResult(STATUS_UNAVAILABLE, reason=type(exc).__name__)
@@ -427,11 +444,20 @@ class KnowledgeStore:
             hits=tuple(_hits(request.collection, response, scale)),
             score_scale=scale,
         )
+        described = _log_answer(result.hits)
+        self._info(
+            "knowledge search answered (%s): %d hits in %d ms, scale=%s%s",
+            request.collection,
+            len(result.hits),
+            _elapsed_ms(started),
+            scale or "unknown",
+            f"; {described}" if described else "",
+        )
         # Only a real answer is worth remembering: a failure is a state the
         # engine may leave before the next identical question, and a missing
         # collection is the worker's to create, so neither is memoed.
         if result.status == STATUS_OK and result.reason != "no collection":
-            self._memo_put(request, now, result)
+            self._memo_put(request, started, result)
         return result
 
     def push_quality(
@@ -584,6 +610,11 @@ class KnowledgeStore:
         if self._logger is not None:
             self._logger.warning(message, *args)
 
+    def _info(self, message: str, *args: Any) -> None:
+        """Log one operational fact when a logger was given."""
+        if self._logger is not None:
+            self._logger.info(message, *args)
+
     def _note(self, message: str, *args: Any) -> None:
         """Log at debug level when a logger was given."""
         if self._logger is not None:
@@ -612,6 +643,61 @@ def _accepts_language_switch(client: Any) -> bool:
         parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in parameters.values()
     )
+
+
+def _elapsed_ms(started: float) -> int:
+    """Milliseconds since *started*, the unit a timeout is read in."""
+    return int((time.monotonic() - started) * 1000)
+
+
+def _log_subject(request: SearchRequest) -> str:
+    """
+    Describe what is being asked, on one line, for a log.
+
+    The filters travel with the sentence because the same sentence asked of a
+    different bucket is a different search: a mode fans its sources out over
+    threads, and an operator reading the lines back has to be able to tell
+    which source asked what, and why one of them came back empty.
+    """
+    quoted = " ".join((request.query or "").split())
+    if len(quoted) > _LOG_QUERY_CHARS:
+        quoted = quoted[:_LOG_QUERY_CHARS] + "..."
+    parts = [f"'{quoted}'"]
+    for label, values in (
+        ("categories", request.categories),
+        ("doc_types", request.doc_types),
+        ("modes", request.modes),
+        ("phases", request.phases),
+    ):
+        if values:
+            parts.append(f"{label}={','.join(str(value) for value in values)}")
+    if request.thread_id:
+        parts.append(f"thread={request.thread_id}")
+    if request.relative_path_contains:
+        parts.append(f"path~{request.relative_path_contains}")
+    if request.keywords:
+        match = f"/{request.keywords_match}" if request.keywords_match else ""
+        parts.append(f"keywords={len(request.keywords)}{match}")
+    return f"{request.collection}: {' '.join(parts)}"
+
+
+def _log_answer(hits: Iterable[StoreHit]) -> str:
+    """
+    Describe what came back: how many of each kind, and the best-scoring
+    document.  A count alone says the engine answered; the kinds say whether
+    it answered with a recipe, a dead end or a documentation page, which is
+    the difference between knowledge working and knowledge noise.  The kind is
+    read back out of the document name, the one field a search always reports.
+    """
+    kinds: Dict[str, int] = {}
+    best = ""
+    for hit in hits:
+        kind = parse_document_name(hit.document_name).kind or "other"
+        kinds[kind] = kinds.get(kind, 0) + 1
+        if not best:
+            best = hit.document_name
+    described = " ".join(f"{kind}={count}" for kind, count in sorted(kinds.items()))
+    return f"{described} best={best}" if best else described
 
 
 def _collection_missing(exc: Exception) -> bool:
