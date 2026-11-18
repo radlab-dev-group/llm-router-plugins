@@ -1263,6 +1263,11 @@ class FeedbackLog:
             seen = (
                 entry_id.decode() if isinstance(entry_id, bytes) else str(entry_id)
             )
+            if last_id and last_id != "0-0" and seen == last_id:
+                # XRANGE includes its lower bound, so the id a previous pass
+                # stopped at is handed back to it.  Skipping it is what lets a
+                # caller resume by id without reading one record twice forever.
+                continue
             raw = dict(fields or {})
             payload = raw.get(b"d") or raw.get("d")
             if payload is None:
@@ -1274,6 +1279,131 @@ class FeedbackLog:
             except (TypeError, ValueError):
                 continue
         return seen, samples
+
+
+class LabelStore:
+    """
+    The persistent, per-scope corpus of settled judgements.
+
+    The training stream is bounded and lossy by design: it is a queue, and a
+    queue is trimmed.  A model, though, is fitted on the *accumulation* of
+    judgements a scope has made, and that accumulation outlives any one batch
+    of the queue.  The store is that accumulation: one hash per scope, keyed
+    by (session, generation, document), so that a re-injection of the same
+    document in the same generation is a correction of one record rather than
+    a duplicate of it, and a verdict always wins over the unlabelled exposure
+    it settles.
+
+    A corpus kept this way has three properties a trimmed queue cannot: it is
+    deduplicated by construction, it survives the stream's ``MAXLEN``, and a
+    pass of the learner that reads only the newest batch still fits on
+    everything that ever settled, newest first.
+    """
+
+    def __init__(
+        self,
+        client: Optional[Any] = None,
+        key_prefix: str = "agentic-kb",
+        ttl_seconds: float = 0.0,
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
+        """Bind the store; keep a local copy when Redis is absent."""
+        self._client = client
+        self._key_prefix = key_prefix
+        self._ttl = max(float(ttl_seconds), 0.0)
+        self._logger = logger
+        self._local: Dict[Tuple[str, str], Dict[Tuple[str, str, str], str]] = {}
+        self._lock = threading.Lock()
+
+    # ------------------------------------------------------------------ api -
+    def merge(self, samples: Sequence[FeedbackSample]) -> int:
+        """
+        Fold settled samples into the store; return how many records changed.
+
+        Only records that carry a verdict change anything: an unlabelled
+        exposure is the state a document is in *before* it is judged, and
+        overwriting a judgement with it would be forgetting.  A second verdict
+        on the same (session, generation, document) replaces the first, which
+        is how the store stays a corpus rather than becoming a log.
+        """
+        by_scope: Dict[str, Dict[str, str]] = {}
+        for sample in samples:
+            if not sample.scope or not sample.document_name or not sample.label:
+                continue
+            by_scope.setdefault(self._key(sample.scope), {})[
+                self._field(sample)
+            ] = json.dumps(sample.to_json(), sort_keys=True)
+        if not by_scope:
+            return 0
+
+        changed = 0
+        with self._lock:
+            for key, fields in by_scope.items():
+                local = self._local.setdefault(key, {})
+                for field_name, payload in fields.items():
+                    if local.get(field_name) != payload:
+                        local[field_name] = payload
+                        changed += 1
+        # Nothing changed means this process already holds every one of these
+        # records, and a fresh process always sees them as new, so an unchanged
+        # batch is one that is already in Redis.
+        if changed and self._client is not None:
+            try:
+                for key, fields in by_scope.items():
+                    self._client.hset(key, mapping=fields)
+                    if self._ttl > 0.0:
+                        self._client.expire(key, int(self._ttl))
+            except Exception as exc:
+                self._warn("label store write failed: %s", type(exc).__name__)
+        return changed
+
+    def load(self, scope: str, limit: int = 10000) -> List[FeedbackSample]:
+        """
+        The settled corpus of one scope, newest first, bounded by *limit*.
+
+        A record that cannot be read back is dropped, not raised on: a corpus
+        that partially fails to load is still a corpus, and a fit that reads
+        less than it has is safer than one that fails outright.
+        """
+        key = self._key(scope)
+        raw: Optional[Dict[str, str]] = None
+        with self._lock:
+            if key in self._local:
+                raw = dict(self._local[key])
+        if raw is None and self._client is not None:
+            try:
+                stored = self._client.hgetall(key)
+            except Exception as exc:
+                if self._logger is not None:
+                    self._logger.warning(
+                        "label store read failed: %s", type(exc).__name__
+                    )
+                return []
+            raw = {}
+            for field_name, value in dict(stored or {}).items():
+                if isinstance(field_name, bytes):
+                    field_name = field_name.decode()
+                if isinstance(value, bytes):
+                    value = value.decode()
+                raw[str(field_name)] = str(value)
+        rows: List[FeedbackSample] = []
+        for field_name, value in raw.items():
+            try:
+                rows.append(FeedbackSample.from_json(json.loads(value)))
+            except (TypeError, ValueError):
+                continue
+        rows.sort(key=lambda s: s.at, reverse=True)
+        return rows[: max(int(limit), 0)]
+
+    # -------------------------------------------------------------- internals -
+    def _key(self, scope: str) -> str:
+        """One hash per scope, next to the snapshots the learner publishes."""
+        return f"{self._key_prefix}:labels:{scope}"
+
+    @staticmethod
+    def _field(sample: FeedbackSample) -> str:
+        """The deduplication key: one record per (session, generation, doc)."""
+        return f"{sample.session_id}|{sample.generation}|{sample.document_name}"
 
 
 class LearningPolicy:

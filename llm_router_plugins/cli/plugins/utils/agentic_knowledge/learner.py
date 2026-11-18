@@ -29,7 +29,9 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
 from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
     FeedbackLog,
     FeedbackSample,
+    LabelStore,
     LearningConfig,
+    load_snapshot,
     publish_snapshot,
     train_ranker,
 )
@@ -75,6 +77,21 @@ class Learner:
             stream_key=self._stream_key,
             logger=logger,
         )
+        # The corpus a scope is fitted on: the accumulation of its settled
+        # judgements, deduplicated, outliving the stream's MAXLEN.  The learner
+        # fits on this, not on the batch it happened to drain.
+        self._labels = LabelStore(
+            client=client,
+            key_prefix=self._key_prefix,
+            ttl_seconds=self._corpus_ttl_seconds(),
+            logger=logger,
+        )
+        self._cursor_key = "%s:learner:cursor" % self._key_prefix
+
+    def _corpus_ttl_seconds(self) -> float:
+        """How long a settled label stays in the corpus before it ages out."""
+        half_life = float(getattr(self._learning, "half_life_seconds", 0.0) or 0.0)
+        return half_life * 4.0
 
     def _learning_section(self) -> LearningConfig:
         """The learning section of what this learner was built with."""
@@ -115,46 +132,93 @@ class Learner:
         report["published"] = published
         return report
 
+    def read_cursor(self) -> str:
+        """Where the last pass stopped in the training stream; ``0-0`` at first."""
+        if self._client is None:
+            return "0-0"
+        try:
+            raw = self._client.get(self._cursor_key)
+        except Exception:
+            return "0-0"
+        if not raw:
+            return "0-0"
+        return raw.decode() if isinstance(raw, bytes) else str(raw)
+
+    def save_cursor(self, last_id: str) -> None:
+        """Remember where this pass stopped, so the next one starts there."""
+        if self._client is None or not last_id or last_id == "0-0":
+            return
+        try:
+            self._client.set(self._cursor_key, last_id)
+        except Exception:
+            # A cursor that will not persist means the next pass re-reads what
+            # this one read.  Labels are deduplicated by key, so the corpus is
+            # the same; only the work is repeated, which is not a corruption.
+            pass
+
     def drain_and_fit(
         self,
         count: int = 500,
-        last_id: str = "0-0",
+        last_id: Optional[str] = None,
         holdout_fraction: float = 0.2,
         now: float = 0.0,
+        max_records: int = 20000,
+        corpus_limit: int = 10000,
     ) -> Dict[str, Any]:
         """
-        One pass: read the stream, fit every scope in it, publish, report.
+        One pass: resume where the last pass stopped, fold what is new into
+        every scope's corpus, fit on that corpus, publish, save the cursor.
 
-        Returns ``{"last_id": …, "scanned": n, "scopes": {scope: report}}``.
-        A scope that appears in the batch with no labelled record publishes
-        nothing: labels are the only thing this process can do with, and a
-        stream of exposures without verdicts is a log, not a corpus.
+        The fit is on the corpus and not on the batch.  The stream is a queue
+        and a queue is trimmed, so a model fitted on the newest batch would be
+        fitted on whatever happened to survive ``MAXLEN`` this hour, and a
+        scope with ten thousand labels would be modelled from the last few
+        hundred.  The batch decides *which* scopes are worth refitting; the
+        corpus decides what the fit says.
+
+        Returns ``{"last_id": ..., "scanned": n, "merged": n, "scopes": {...}}``.
         """
-        last_id, samples = self._log.drain(count=count, last_id=last_id)
-        by_scope: Dict[str, List[FeedbackSample]] = {}
-        for sample in samples:
-            # A record nobody has judged yet is an exposure, not a corpus: the
-            # learner fits on labels, and a scope whose whole batch is unlabelled
-            # is a scope that has nothing to fit, which is not the same as a
-            # scope that fit nothing.
-            if not sample.scope or not sample.label:
-                continue
-            by_scope.setdefault(sample.scope, []).append(sample)
+        cursor = last_id if last_id is not None else self.read_cursor()
+        drained: List[FeedbackSample] = []
+        seen = cursor
+        while not drained or seen != cursor:
+            budget = max(1, int(max_records)) - len(drained)
+            if budget <= 0:
+                break
+            seen, rows = self._log.drain(count=min(int(count), budget), last_id=seen)
+            drained.extend(rows)
+            # Without Redis the log answers from a local tail, which is the
+            # same handful every time; one read of it is the whole of it.
+            if self._client is None or len(rows) < min(int(count), budget):
+                break
+
+        merged = self._labels.merge(drained)
+        touched = sorted({s.scope for s in drained if s.scope and s.label})
         scopes: Dict[str, Dict[str, Any]] = {}
-        for scope, rows in sorted(by_scope.items()):
+        for scope in touched:
+            corpus = self._labels.load(scope, limit=corpus_limit)
             scopes[scope] = self.fit_scope(
                 scope,
-                rows,
+                corpus,
                 now=now,
                 holdout_fraction=holdout_fraction,
             )
+        self.save_cursor(seen)
+
         if self._logger is not None:
+            self._logger.info(
+                "learner: drained=%d merged=%d cursor=%s scopes=%d",
+                len(drained),
+                merged,
+                seen,
+                len(scopes),
+            )
             for scope, report in scopes.items():
                 verdict = (
                     "accepted" if report.get("accepted") else report.get("refused")
                 )
                 self._logger.info(
-                    "learner: scope=%s scanned=%d labelled=%d holdout_auc=%.3f "
+                    "learner: scope=%s corpus=%d labelled=%d holdout_auc=%.3f "
                     "model_id=%s %s published=%s",
                     scope,
                     report.get("samples", 0),
@@ -165,8 +229,9 @@ class Learner:
                     report.get("published", False),
                 )
         return {
-            "last_id": last_id,
-            "scanned": len(samples),
+            "last_id": seen,
+            "scanned": len(drained),
+            "merged": merged,
             "scopes": scopes,
         }
 
@@ -230,6 +295,37 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Logging level; defaults to INFO.",
     )
+    parser.add_argument(
+        "--max-records",
+        type=int,
+        default=20000,
+        help=(
+            "Stop after reading this many stream entries in one pass; "
+            "defaults to 20000."
+        ),
+    )
+    parser.add_argument(
+        "--window",
+        type=int,
+        default=10000,
+        help=(
+            "Maximum corpus size per scope; the oldest labels are "
+            "dropped; defaults to 10000."
+        ),
+    )
+    parser.add_argument(
+        "--reset-cursor",
+        action="store_true",
+        help="Start at the head of the stream instead of the last saved cursor.",
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help=(
+            "Print the weight vector of the current snapshot for "
+            "each touched scope and exit."
+        ),
+    )
     return parser
 
 
@@ -272,10 +368,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger=logger,
         rng=random.Random(args.seed),
     )
+    last_id = None
+    if args.reset_cursor:
+        learner.save_cursor("0-0")
+        last_id = "0-0"
     result = learner.drain_and_fit(
         count=max(int(args.count), 1),
+        last_id=last_id,
         holdout_fraction=float(args.holdout),
+        max_records=max(int(args.max_records), 1),
+        corpus_limit=max(int(args.window), 1),
     )
+    self_prefix = config.key_prefix
+    if args.show:
+        for scope, report in (result.get("scopes") or {}).items():
+            snapshot = load_snapshot(client, scope, key_prefix=self_prefix)
+            if snapshot is not None:
+                print(json.dumps({"scope": scope, "weights": list(snapshot.weights)}))
     if args.report:
         print(json.dumps(result, sort_keys=True))
     if args.scope is not None:
