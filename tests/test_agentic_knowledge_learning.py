@@ -16,6 +16,8 @@ from dataclasses import replace
 
 import pytest
 
+from typing import Optional
+
 from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
     FEATURE_NAMES,
     CandidateFeatures,
@@ -735,15 +737,18 @@ def _graded(
     label: float,
     at: float = 0.0,
     label_kind: str = "counterfactual",
-    **features: float,
+    features: Optional[CandidateFeatures] = None,
+    **feature_values: float,
 ) -> FeedbackSample:
     """One labelled sample with the given feature values."""
+    if features is None:
+        features = CandidateFeatures(**feature_values)
     return FeedbackSample(
         scope=scope,
         session_id=session,
         generation=generation,
         document_name=document,
-        features=CandidateFeatures(**features),
+        features=features,
         label=label,
         label_kind=label_kind,
         at=at,
@@ -915,3 +920,82 @@ def test_evidence_counts_a_mix_of_kinds():
 def test_min_evidence_is_validated():
     with pytest.raises(ValueError):
         LearningConfig(min_evidence=0.0)
+
+
+# ------------------------------------------------------ bandit integration ---
+def test_source_bandit_moves_the_multiplier():
+    """A source arm with history shifts the multiplier."""
+    config = LearningConfig(enabled=True, min_observations=1)
+    policy = LearningPolicy(config=config, rng=random.Random(17))
+    feat = CandidateFeatures(
+        kind="recipe", mode="plan", score=0.8,
+        size_chars=120, budget_chars=1000,
+    )
+    # Before any history the arm returns the default.
+    mult_before, _ = policy.multiplier_for(feat)
+    # Feed the arm some good history: small recipes that earn wins.
+    for i in range(5):
+        policy.settle(
+            _graded("repo", f"s{i}", "g1", f"doc{i}", label=1.0, features=feat)
+        )
+    # A source that earns wins with little cost is worth more per character.
+    mult_after, detail = policy.multiplier_for(feat)
+    assert detail["arm"] > 1.0
+    assert mult_after >= mult_before
+
+
+def test_the_annotation_carries_arms_when_they_exist():
+    """An operator can see what the bandit knows from the annotation."""
+    policy = LearningPolicy(
+        config=LearningConfig(enabled=True, min_observations=1),
+        rng=random.Random(18),
+    )
+    feat = CandidateFeatures(kind="tool_recipe", mode="debug", score=0.7)
+    assert policy.annotation("repo").get("arms") is None
+    for i in range(3):
+        policy.settle(
+            _graded("repo", f"s{i}", "g1", f"doc{i}", label=1.0, features=feat)
+        )
+    arms = policy.annotation("repo").get("arms")
+    assert arms is not None
+    assert "debug|tool_recipe" in arms
+
+
+def test_arms_are_copied_into_the_published_snapshot():
+    """A snapshot says what a source was worth when it shipped."""
+    config = LearningConfig(enabled=True)
+    feat = CandidateFeatures(kind="recipe", mode="plan", score=0.9)
+    # The request path feeds the bandit.
+    bandit = SourceBandit(config=config, rng=random.Random(19))
+    for i in range(10):
+        bandit.observe("plan", "recipe", 1.0, chars=300)
+    # The learner fits and publishes, copying the arms.
+    samples = [
+        _graded("repo", f"s{i}", "g1", f"doc{i}", label=1.0, features=feat)
+        for i in range(250)
+    ]
+    snapshot, _ = train_ranker(
+        samples,
+        "repo",
+        config=config,
+        holdout_fraction=0.2,
+        rng=random.Random(19),
+        now=1.0,
+        arms=bandit.arms(),
+    )
+    assert snapshot is not None
+    assert "plan|recipe" in snapshot.arms
+
+
+def test_the_arms_flag_prints_the_bandit_state():
+    """An operator can ask the learner what the bandit has learned."""
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge.learner import (
+        Learner,
+    )
+    store = FakeRedis()
+    config = LearningConfig(enabled=True)
+    learner = Learner(config=config, client=store, rng=random.Random(20))
+    learner._bandit.observe("plan", "recipe", 1.0, chars=300)
+    summary = learner.arm_summary()
+    assert "plan|recipe" in summary
+    assert summary["plan|recipe"]["n"] == 1

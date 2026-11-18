@@ -912,6 +912,7 @@ def train_ranker(
     holdout_fraction: float = 0.2,
     rng: Optional[random.Random] = None,
     now: float = 0.0,
+    arms: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> Tuple[ModelSnapshot, Dict[str, Any]]:
     """
     Fit one scope and decide whether the fit is worth publishing.
@@ -954,6 +955,13 @@ def train_ranker(
         holdout_auc=float(report["holdout_auc"]),
         features=FEATURE_NAMES,
         ranker=published,
+        # The bandit keeps its own live hash; carrying a copy into the
+        # snapshot is not how the value reaches the request path, it is how
+        # the value can be read back after the fact.  A snapshot that says
+        # "the fit was this, and the sources were worth this" answers the
+        # operator's question without a Redis read of a live counter that
+        # has moved since.
+        arms={str(k): dict(v) for k, v in (arms or {}).items()},
     )
     return snapshot, report
 
@@ -1127,6 +1135,33 @@ class SourceBandit:
         """Everything known, for a snapshot or a report."""
         with self._lock:
             return {arm: dict(state) for arm, state in self._local.items()}
+
+    def summary(self) -> Dict[str, Dict[str, Any]]:
+        """
+        What each arm knows, in the two numbers an operator asks for.
+
+        ``n`` is how many judgements the arm has folded and ``mean`` is the
+        posterior mean of its reward: the value a reader can compare against
+        the policy weight the JSON still ships.  The sampled value is not
+        reported, because it is a draw and a draw is not a fact.
+        """
+        out: Dict[str, Dict[str, Any]] = {}
+        for arm, state in self.arms().items():
+            alpha = float(state.get("a", 1.0))
+            beta = float(state.get("b", 1.0))
+            total = alpha + beta
+            observations = float(state.get("n", 0.0))
+            mean_chars = (
+                float(state.get("chars", 0.0)) / observations
+                if observations
+                else 0.0
+            )
+            out[arm] = {
+                "n": int(observations),
+                "mean": round(alpha / total, 4) if total else 0.5,
+                "mean_chars": round(mean_chars, 1),
+            }
+        return out
 
     def _read(self, arm: str) -> Optional[Dict[str, float]]:
         """Local first; Redis fills a gap a fresh worker process has."""
@@ -1580,13 +1615,17 @@ class LearningPolicy:
                 "range": [cfg.mult_min, cfg.mult_max],
             }
         snapshot = self._snapshot(scope)
-        return {
+        detail = {
             "enabled": cfg.enabled,
             "model_id": snapshot.model_id if snapshot is not None else "",
             "holdout_auc": snapshot.holdout_auc if snapshot is not None else 0.0,
             "labelled": snapshot.labelled if snapshot is not None else 0,
             "range": [cfg.mult_min, cfg.mult_max],
         }
+        arms = self._bandit.summary()
+        if arms:
+            detail["arms"] = arms
+        return detail
 
     # ------------------------------------------------------------ internals -
     def _snapshot(self, scope: str) -> Optional[ModelSnapshot]:

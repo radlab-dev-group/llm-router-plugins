@@ -31,6 +31,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
     FeedbackSample,
     LabelStore,
     LearningConfig,
+    SourceBandit,
     load_snapshot,
     publish_snapshot,
     train_ranker,
@@ -87,6 +88,12 @@ class Learner:
             logger=logger,
         )
         self._cursor_key = "%s:learner:cursor" % self._key_prefix
+        # The bandit is written by the request path, not here: this process
+        # only reads what it has learned, so that a published snapshot can
+        # say what a character of each source was worth when the fit shipped.
+        self._bandit = SourceBandit(
+            client=client, config=self._learning, rng=self._rng
+        )
 
     def _corpus_ttl_seconds(self) -> float:
         """How long a settled label stays in the corpus before it ages out."""
@@ -104,6 +111,7 @@ class Learner:
         samples: List[FeedbackSample],
         now: float = 0.0,
         holdout_fraction: float = 0.2,
+        arms: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> Dict[str, Any]:
         """
         Fit one scope and decide whether the fit is worth publishing.
@@ -120,6 +128,7 @@ class Learner:
             holdout_fraction=holdout_fraction,
             rng=self._rng,
             now=now,
+            arms=self._bandit.arms() if arms is None else arms,
         )
         published = False
         if self._client is not None:
@@ -130,7 +139,19 @@ class Learner:
             )
         report["model_id"] = snapshot.model_id
         report["published"] = published
+        report["arms"] = self._bandit.summary()
         return report
+
+    def arm_summary(self) -> Dict[str, Dict[str, Any]]:
+        """
+        What the source bandit knows: judgements folded and reward expected.
+
+        The arm state belongs to the request path, which folds every settled
+        document into it; this process only reads it, so an operator can ask
+        the same question the snapshot answers — what was a character of each
+        source worth — without reaching into a live counter.
+        """
+        return self._bandit.summary()
 
     def read_cursor(self) -> str:
         """Where the last pass stopped in the training stream; ``0-0`` at first."""
@@ -326,6 +347,14 @@ def build_parser() -> argparse.ArgumentParser:
             "each touched scope and exit."
         ),
     )
+    parser.add_argument(
+        "--arms",
+        action="store_true",
+        help=(
+            "Print the bandit's view of each (mode, source) arm — how many "
+            "judgements it has folded and what reward it expects — and exit."
+        ),
+    )
     return parser
 
 
@@ -380,6 +409,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         corpus_limit=max(int(args.window), 1),
     )
     self_prefix = config.key_prefix
+    if args.arms:
+        print(json.dumps({"arms": learner.arm_summary()}, sort_keys=True))
+        return 0
     if args.show:
         for scope, report in (result.get("scopes") or {}).items():
             snapshot = load_snapshot(client, scope, key_prefix=self_prefix)
