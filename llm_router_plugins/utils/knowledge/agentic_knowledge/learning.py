@@ -50,7 +50,7 @@ import random
 import threading
 import time
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 __all__ = [
@@ -200,6 +200,10 @@ class LearningConfig:
     weight_clip: float = 3.0
     newton_steps: int = 4
     min_samples: int = 200
+    #: Minimum weighted evidence the fit must rest on.  Counterfactual labels
+    #: count fully; coarse labels count half.  Below this the fit is published
+    #: neutral: "a model that cannot beat the policy publishes the policy."
+    min_evidence: float = 100.0
     min_holdout_auc: float = 0.6
     explore_coeff: float = 0.25
     explore_rate: float = 0.1
@@ -227,6 +231,8 @@ class LearningConfig:
             raise ValueError("learning.newton_steps must be at least 1")
         if self.min_samples < 1:
             raise ValueError("learning.min_samples must be at least 1")
+        if self.min_evidence <= 0.0:
+            raise ValueError("learning.min_evidence must be positive")
         if not 0.0 <= self.min_holdout_auc <= 1.0:
             raise ValueError("learning.min_holdout_auc must be within 0..1")
         if self.explore_coeff < 0.0 or not 0.0 <= self.explore_rate <= 1.0:
@@ -807,6 +813,15 @@ class ContextRanker:
         if not labelled:
             return report
         train, holdout = _split(labelled, holdout_fraction, rng)
+        train = [_credit_kind(s) for s in train]
+        holdout = [_credit_kind(s) for s in holdout]
+        # How much evidence the fit rests on, weighted by kind.  The trust
+        # gate below uses this: a corpus with thousands of labels that are all
+        # coarse has less evidence than one with fewer counterfactual ones.
+        evidence = sum(
+            _KIND_CREDIT.get(s.label_kind, 1.0) for s in labelled
+        )
+        report["evidence"] = round(evidence, 2)
         varied, collinear = _varied_features(train)
         lam = _ridge(cfg.l2, len(train))
         report["collinear"] = collinear
@@ -814,7 +829,9 @@ class ContextRanker:
         report["features"] = tuple(FEATURE_NAMES[i] for i in varied)
         weights = [0.0] * _N_FEATURES
         for _ in range(cfg.newton_steps):
-            weights = _newton_step(weights, train, lam, cfg.weight_clip, varied)
+            weights = _newton_step(
+                weights, train, lam, cfg.weight_clip, varied
+            )
         self.weights = weights
         self.precision = _hessian(train, lam, varied, weights)
         report["train_auc"] = round(_auc(train, self), 4)
@@ -912,11 +929,15 @@ def train_ranker(
     report = ranker.fit(samples, holdout_fraction=holdout_fraction, rng=rng)
     enough = report["labelled"] >= cfg.min_samples
     separates = report["holdout_auc"] >= cfg.min_holdout_auc
-    accepted = bool(enough and separates)
+    trusted = report.get("evidence", 0.0) >= cfg.min_evidence
+    accepted = bool(enough and separates and trusted)
     if not accepted:
-        report["refused"] = (
-            "too_few_labels" if not enough else "holdout_auc_below_floor"
-        )
+        if not enough:
+            report["refused"] = "too_few_labels"
+        elif not separates:
+            report["refused"] = "holdout_auc_below_floor"
+        else:
+            report["refused"] = "evidence_below_threshold"
         published = ContextRanker(config=cfg, rng=rng)
     else:
         report["accepted"] = True
@@ -1602,14 +1623,80 @@ class LearningPolicy:
 def _split(
     samples: Sequence[FeedbackSample], fraction: float, rng: random.Random
 ) -> Tuple[List[FeedbackSample], List[FeedbackSample]]:
-    """Shuffle once and cut; a zero fraction keeps everything for training."""
+    """
+    Split by session: all injections from one session are train or holdout.
+
+    Random sample-level splits leak information when multiple injections from
+    the same session appear in the corpus (which they do, routinely).  Splitting
+    by session ensures the holdout measures generalisation to *new situations*,
+    not just new documents in familiar situations.
+    """
     ordered = list(samples)
-    rng.shuffle(ordered)
-    if fraction <= 0.0:
+    if not ordered or fraction <= 0.0:
         return ordered, []
-    cut = max(1, int(len(ordered) * (1.0 - fraction)))
-    cut = min(cut, len(ordered) - 1) if len(ordered) > 1 else len(ordered)
-    return ordered[:cut], ordered[cut:]
+
+    # Group by session
+    by_session: Dict[str, List[FeedbackSample]] = {}
+    for sample in ordered:
+        by_session.setdefault(sample.session_id, []).append(sample)
+
+    # One session has nothing to generalise across: holding it out against
+    # itself would train on nothing and score a model on the data it is
+    # supposed to measure, so it all stays in the fit.
+    if len(by_session) < 2:
+        return ordered, []
+
+    # Shuffle sessions (not samples)
+    sessions = list(by_session.keys())
+    rng.shuffle(sessions)
+
+    # Split sessions by count, keeping at least one on each side.
+    n_holdout = min(
+        max(1, int(len(sessions) * fraction)), len(sessions) - 1
+    )
+    holdout_sessions = sessions[:n_holdout]
+    train_sessions = sessions[n_holdout:]
+
+    holdout = []
+    train = []
+    for session in holdout_sessions:
+        holdout.extend(by_session[session])
+    for session in train_sessions:
+        train.extend(by_session[session])
+
+    return train, holdout
+
+
+#: How much a label of each kind is worth in the fit.
+#:
+#: ``counterfactual`` is a verdict with evidence behind it: the next turn
+#: mined a fix, and the documents that could have caused it are the ones
+#: credited.  ``coarse`` is the older rule that credits everything that was
+#: on screen, which is true as far as it goes but attributes a fix to the
+#: whole block rather than to the document that earned it.  The two are not
+#: the same strength of evidence, and a corpus that mixes them should not
+#: weigh them equally.
+#:
+#: The weight is applied to the magnitude of the label, which :func:`_target`
+#: already reads as an evidence weight, so the direction of a verdict is
+#: untouched and only how much it counts changes.
+_KIND_CREDIT: Dict[str, float] = {
+    "counterfactual": 1.0,
+    "coarse": 0.5,
+}
+
+
+def _credit_kind(sample: "FeedbackSample") -> "FeedbackSample":
+    """
+    The sample with its label scaled by how much its kind of evidence is worth.
+
+    An unknown kind is credited fully: a new kind of label is a reason to look
+    at the weighting, not a reason to silently discard the labels.
+    """
+    credit = _KIND_CREDIT.get(sample.label_kind)
+    if credit is None or credit == 1.0:
+        return sample
+    return replace(sample, label=float(sample.label) * credit)
 
 
 def _target(label: float) -> Tuple[float, float]:

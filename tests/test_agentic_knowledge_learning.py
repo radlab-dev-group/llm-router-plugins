@@ -30,6 +30,8 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
     load_snapshot,
     publish_snapshot,
     train_ranker,
+    _credit_kind,
+    _split,
 )
 
 
@@ -722,3 +724,194 @@ def test_snapshot_type_is_exported_and_immutable():
     assert snapshot.neutral is True
     with pytest.raises(Exception):
         snapshot.scope = "other"  # type: ignore[misc]
+
+
+# ------------------------------------------------------- split by session ----
+def _graded(
+    scope: str,
+    session: str,
+    generation: str,
+    document: str,
+    label: float,
+    at: float = 0.0,
+    label_kind: str = "counterfactual",
+    **features: float,
+) -> FeedbackSample:
+    """One labelled sample with the given feature values."""
+    return FeedbackSample(
+        scope=scope,
+        session_id=session,
+        generation=generation,
+        document_name=document,
+        features=CandidateFeatures(**features),
+        label=label,
+        label_kind=label_kind,
+        at=at,
+    )
+
+
+def test_split_never_breaks_a_session_across_the_two_sets():
+    """A session is in the train set or the holdout, never in both."""
+    samples = [
+        _graded("repo", f"s{i % 8}", "g1", f"doc{j}", 1.0 if j % 2 else 0.0)
+        for i in range(8)
+        for j in range(6)
+    ]
+    train, holdout = _split(samples, 0.25, random.Random(7))
+
+    trained = {s.session_id for s in train}
+    held = {s.session_id for s in holdout}
+    assert trained and held
+    assert not (trained & held)
+    assert len(train) + len(holdout) == len(samples)
+
+
+def test_split_of_one_session_keeps_it_whole_and_trains():
+    """One session cannot be held out against itself; it stays in train."""
+    samples = [
+        _graded("repo", "only", "g1", f"doc{j}", 1.0 if j % 2 else 0.0)
+        for j in range(20)
+    ]
+    train, holdout = _split(samples, 0.5, random.Random(1))
+    # The one session stays in train; there is nothing to hold out.
+    assert len(train) == 20
+    assert not holdout
+
+
+def test_split_is_reproducible_from_the_seed():
+    samples = [
+        _graded("repo", f"s{i}", "g1", f"doc{i}", 1.0 if i % 2 else 0.0)
+        for i in range(30)
+    ]
+    first = _split(samples, 0.3, random.Random(42))
+    second = _split(samples, 0.3, random.Random(42))
+    assert [s.document_name for s in first[0]] == [s.document_name for s in second[0]]
+    assert [s.document_name for s in first[1]] == [s.document_name for s in second[1]]
+
+
+def test_split_with_no_holdout_keeps_everything_for_training():
+    samples = [
+        _graded("repo", f"s{i}", "g1", f"doc{i}", 1.0) for i in range(10)
+    ]
+    train, holdout = _split(samples, 0.0, random.Random(3))
+    assert len(train) == 10
+    assert holdout == []
+
+
+# ------------------------------------------------------ credit by kind -------
+def test_a_coarse_label_is_worth_half_a_verdict():
+    """The kind of a label scales how much it counts, not which way it points."""
+    sample = _graded("repo", "s1", "g1", "doc", 1.0, label_kind="coarse")
+    assert _credit_kind(sample).label == pytest.approx(0.5)
+
+
+def test_crediting_a_verdict_leaves_it_untouched():
+    sample = _graded("repo", "s1", "g1", "doc", -1.0, label_kind="counterfactual")
+    assert _credit_kind(sample) is sample
+
+
+def test_crediting_keeps_the_direction_of_a_negative_label():
+    sample = _graded("repo", "s1", "g1", "doc", -1.0, label_kind="coarse")
+    credited = _credit_kind(sample)
+    assert credited.label == pytest.approx(-0.5)
+    assert (credited.label > 0) == (sample.label > 0)
+
+
+def test_an_unknown_kind_is_credited_rather_than_discarded():
+    """A kind this build does not know is not a reason to lose its labels."""
+    sample = _graded("repo", "s1", "g1", "doc", 1.0, label_kind="future_kind")
+    assert _credit_kind(sample) is sample
+
+
+def test_a_coarse_label_trains_a_weaker_weight_than_a_verdict():
+    """The same evidence, labelled two ways, moves the fit by different amounts."""
+    # Positive samples have higher scores; the weight on the score feature
+    # should grow, and it should grow more when the labels are verdicts.
+    strong = [
+        _graded(
+            "repo", f"s{i}", "g1", f"doc{i}",
+            label=1.0 if i % 2 else -1.0,
+            score=0.9 if i % 2 else 0.1,
+        )
+        for i in range(60)
+    ]
+    weak = [replace(s, label_kind="coarse") for s in strong]
+
+    config = LearningConfig(weight_clip=3.0)
+    strong_ranker = ContextRanker(config=config)
+    strong_ranker.fit(strong, holdout_fraction=0.0, rng=random.Random(5))
+    weak_ranker = ContextRanker(config=config)
+    weak_ranker.fit(weak, holdout_fraction=0.0, rng=random.Random(5))
+
+    strong_score = sum(abs(w) for w in strong_ranker.weights)
+    weak_score = sum(abs(w) for w in weak_ranker.weights)
+    assert strong_score > weak_score
+
+
+# ----------------------------------------------------------- trust gate ------
+def _corpus(count: int, label_kind: str = "counterfactual"):
+    """A separable corpus: positives score high, negatives score low."""
+    samples = []
+    for i in range(count):
+        positive = i % 2 == 0
+        samples.append(
+            _graded(
+                "repo", f"s{i}", "g1", f"doc{i}",
+                label=1.0 if positive else -1.0,
+                score=0.9 if positive else 0.1,
+                label_kind=label_kind,
+            )
+        )
+    return samples
+
+
+def test_a_corpus_of_only_coarse_labels_is_refused_for_thin_evidence():
+    """A thousand weak labels are not a thousand observations."""
+    samples = _corpus(250, label_kind="coarse")
+    config = LearningConfig(
+        min_samples=200, min_evidence=150.0, min_holdout_auc=0.6
+    )
+    _snapshot, report = train_ranker(
+        samples, "repo", config=config, holdout_fraction=0.2,
+        rng=random.Random(7), now=1.0,
+    )
+    assert report["labelled"] >= 200
+    assert report["evidence"] == pytest.approx(125.0, abs=2.0)
+    assert not report.get("accepted")
+    assert report.get("refused") == "evidence_below_threshold"
+
+
+def test_the_same_corpus_of_verdicts_clears_the_gate():
+    samples = _corpus(250, label_kind="counterfactual")
+    config = LearningConfig(
+        min_samples=200, min_evidence=250.0, min_holdout_auc=0.6
+    )
+    snapshot, report = train_ranker(
+        samples, "repo", config=config, holdout_fraction=0.2,
+        rng=random.Random(7), now=1.0,
+    )
+    assert report.get("accepted"), report
+    assert snapshot.ranker.trained
+
+
+def test_evidence_counts_a_mix_of_kinds():
+    """Half verdicts, half coarse: the evidence is the sum of their credits."""
+    samples = _corpus(200)
+    mixed = [
+        replace(s, label_kind="coarse") if i % 2 else s
+        for i, s in enumerate(samples)
+    ]
+    config = LearningConfig(
+        min_samples=200, min_evidence=10.0, min_holdout_auc=0.6
+    )
+    _snapshot, report = train_ranker(
+        mixed, "repo", config=config, holdout_fraction=0.2,
+        rng=random.Random(3), now=1.0,
+    )
+    assert report["labelled"] == 200
+    assert report["evidence"] == pytest.approx(150.0, abs=1.5)
+
+
+def test_min_evidence_is_validated():
+    with pytest.raises(ValueError):
+        LearningConfig(min_evidence=0.0)
