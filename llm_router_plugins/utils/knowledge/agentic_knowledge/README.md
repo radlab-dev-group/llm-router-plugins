@@ -676,7 +676,7 @@ per repository, naming both numbers.
                 "prior_alpha": 2.0, "prior_beta": 2.0,
                 "half_life_seconds": 2592000, "min_observations": 3,
                 "l2": 32.0, "weight_clip": 3.0, "newton_steps": 4,
-                "min_samples": 200, "min_holdout_auc": 0.6,
+                "min_samples": 200, "min_evidence": 100.0, "min_holdout_auc": 0.6,
                 "explore_coeff": 0.25, "explore_rate": 0.1,
                 "model_ttl_seconds": 60, "stream_key": "agentic_kb:training"},
   "docs": {"enabled": true, "auto_index": true,
@@ -907,6 +907,10 @@ llm-router-agentic-kb-learner --report            # the same, plus one JSON resu
 llm-router-agentic-kb-learner --scope webapp      # one scope only (warns when the batch held none)
 llm-router-agentic-kb-learner --count 2000        # read more of the stream in one pass
 llm-router-agentic-kb-learner --holdout 0.3 --seed 7   # a wider holdout, a reproducible split
+llm-router-agentic-kb-learner --max-records 50000      # cap one pass's work
+llm-router-agentic-kb-learner --window 20000           # keep the last 20k labels per scope
+llm-router-agentic-kb-learner --reset-cursor           # ignore the saved cursor, start at the head
+llm-router-agentic-kb-learner --show                   # print each touched scope's weight vector
 ```
 
 The offline half of [Learning (opt-in)](#learning-opt-in): it reads the training stream, fits
@@ -1011,7 +1015,8 @@ The policy's own thresholds — `strong_recipe_score`, `loop_threshold`, the sou
 overwritten by a model**.  The model multiplies; the policy clamps.  That is the brake an operator can read in a
 diff, and a snapshot that could not beat the policy publishes a *neutral* one — weights at zero, which reads as
 `1.0` everywhere and behaves exactly like the layer without learning.  A fit the holdout cannot separate better
-than `learning.min_holdout_auc`, or a scope with fewer than `learning.min_samples` labels, publishes that neutral
+than `learning.min_holdout_auc`, a scope with fewer than `learning.min_samples` labels, or a fit resting on
+less than `learning.min_evidence` weighted evidence, publishes that neutral
 snapshot, and the log line says which of the two it was.
 
 ### The label is per document, not per block
