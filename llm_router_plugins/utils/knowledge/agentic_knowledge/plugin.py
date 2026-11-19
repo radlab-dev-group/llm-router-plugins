@@ -220,7 +220,12 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._pending_feedback: "OrderedDict[str, Tuple[Tuple[str, ...], str]]" = (
             OrderedDict()
         )
-        self._feedback_pushed_at = 0.0
+        #: When the last push actually reached the engine; ``None`` is "never".
+        #: It cannot be ``0.0``: the origin of ``time.monotonic`` is
+        #: unspecified, and on a freshly booted runner the clock reads less
+        #: than the interval, so a zero sentinel would hold the first verdict
+        #: of every boot back until the clock climbs past it.
+        self._feedback_pushed_at: Optional[float] = None
         self._feedback_flush_lock = threading.Lock()
         self._feedback_thread: Optional[threading.Thread] = None
         self._budget_warnings: Dict[str, float] = {}
@@ -874,7 +879,10 @@ class AgenticKnowledgePlugin(PluginInterface):
         interval = int(
             getattr(self._config, "feedback_push_interval_seconds", 0) or 0
         )
-        if time.monotonic() - self._feedback_pushed_at < interval:
+        if (
+            self._feedback_pushed_at is not None
+            and time.monotonic() - self._feedback_pushed_at < interval
+        ):
             return
         if not self._feedback_flush_lock.acquire(blocking=False):
             return

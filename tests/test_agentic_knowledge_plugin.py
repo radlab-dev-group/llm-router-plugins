@@ -1365,6 +1365,37 @@ def test_the_push_is_rate_limited_to_the_policy_interval():
     assert len(store.quality_pushes) == first
 
 
+def test_the_first_push_is_not_gated_by_the_clocks_origin(monkeypatch):
+    """A process whose monotonic clock starts below the interval still pushes.
+
+    ``time.monotonic`` has no fixed origin: on a freshly booted runner it is
+    the uptime, and a long interval outgrows it.  A "never pushed" sentinel of
+    ``0.0`` then reads as "pushed a moment ago", and the first verdict of every
+    boot is held back until the clock climbs above the interval — which, on a
+    runner that lives only a few minutes, never happens before the job ends.
+    """
+    import time
+
+    import llm_router_plugins.utils.knowledge.agentic_knowledge.plugin as plugin_module
+
+    real = time.monotonic
+    origin = real()
+
+    def clock_at_boot():
+        # Ninety seconds of uptime, far below the interval the test asks for.
+        return 90.0 + (real() - origin)
+
+    monkeypatch.setattr(plugin_module.time, "monotonic", clock_at_boot)
+    config = knowledge_config(feedback_push_interval_seconds=3600)
+    store = FakeStore(hits=(store_hit("recipe", score=0.9),))
+    plugin = make_plugin(config, store=store)
+    _two_turns_that_credit(plugin)
+    assert store.quality_pushes, (
+        "the first push of a freshly booted process was gated away by the "
+        "clock's origin"
+    )
+
+
 def test_the_request_path_does_not_wait_on_the_push():
     """The push is a background thread: a request that settles a verdict returns."""
     config = knowledge_config()
