@@ -752,18 +752,27 @@ def test_one_request_spends_one_budget_across_all_its_sources():
     transport timeout once per source.  The plugin starts the budget before the
     loop and hands every search the same deadline, which is what makes
     ``read_timeout_seconds`` the number a request waits.
+
+    The deadline is pinned between the moments on either side of the request
+    rather than against the clock left over when the request returns: how much
+    of the budget a runner happens to have spent is a property of the machine,
+    and a shared CI runner spends seconds there for reasons no code can fix.
     """
     import time
 
     config = knowledge_config()
     store = FakeStore()
     plugin = make_plugin(config, store=store)
+    started = time.monotonic()
     plugin.apply(main_payload(mode="implement"))
+    returned = time.monotonic()
     deadlines = store.deadlines
     assert deadlines, "the read path must search at least one source"
     assert len({round(d, 3) for d in deadlines}) == 1
-    headroom = deadlines[0] - time.monotonic()
-    assert 0 < headroom <= config.read_timeout_seconds
+    # The one deadline is the budget counted from somewhere inside this
+    # request: not from an earlier request's start, and not one call per source.
+    assert started + config.read_timeout_seconds <= deadlines[0]
+    assert deadlines[0] <= returned + config.read_timeout_seconds
 
 
 def test_the_budget_a_request_waits_is_at_least_one_call():
