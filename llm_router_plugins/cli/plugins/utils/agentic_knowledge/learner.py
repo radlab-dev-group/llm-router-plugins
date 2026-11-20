@@ -34,6 +34,8 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
     SourceBandit,
     load_snapshot,
     publish_snapshot,
+    rollback_snapshot,
+    snapshot_history,
     train_ranker,
 )
 
@@ -136,6 +138,9 @@ class Learner:
                 self._client,
                 snapshot,
                 key_prefix=self._key_prefix,
+                history_size=int(
+                    getattr(self._learning, "snapshot_history_size", 8)
+                ),
             )
         report["model_id"] = snapshot.model_id
         report["published"] = published
@@ -355,7 +360,146 @@ def build_parser() -> argparse.ArgumentParser:
             "judgements it has folded and what reward it expects — and exit."
         ),
     )
+    parser.add_argument(
+        "--history",
+        action="store_true",
+        help=(
+            "Print the snapshots this scope has published and retired, newest "
+            "first, with the evidence each was fitted on, and exit."
+        ),
+    )
+    parser.add_argument(
+        "--rollback",
+        default=None,
+        metavar="MODEL_ID",
+        help=(
+            "Put a retired snapshot back in force instead of fitting. The id "
+            "comes from --history; the model it replaces goes into the "
+            "history, so a rollback is itself reversible."
+        ),
+    )
     return parser
+
+
+def _scope_view(
+    config: AgenticKnowledgeConfig,
+    client: Any,
+    learner: Learner,
+    args: Any,
+    logger: Any,
+) -> int:
+    """
+    Show a scope's published history, or move one snapshot back into force.
+
+    A scope is required for a rollback and taken from the one scope the policy
+    has state for when there is only one: an operator who typed `--rollback`
+    without a `--scope` on a single-scope deployment means that scope, and an
+    operator on a multi-scope deployment is stopped with the list instead of
+    having a guess made for them.
+    """
+    prefix = config.key_prefix
+    scopes = _known_scopes(client, prefix)
+    scope = args.scope or ""
+    if args.rollback:
+        if not scope:
+            if len(scopes) == 1:
+                scope = scopes[0]
+            else:
+                logger.error(
+                    "--rollback needs --scope; histories exist for: %s",
+                    ", ".join(scopes) or "none",
+                )
+                return 1
+        moved = rollback_snapshot(
+            client,
+            scope,
+            args.rollback,
+            key_prefix=prefix,
+            history_size=int(config.learning.snapshot_history_size),
+        )
+        if not moved:
+            logger.error(
+                "scope %s has no retired snapshot %s; see --history --scope %s",
+                scope,
+                args.rollback,
+                scope,
+            )
+            return 1
+        print(
+            json.dumps(
+                {"scope": scope, "rolled_back_to": args.rollback}, sort_keys=True
+            )
+        )
+        return 0
+    if not scope:
+        print(
+            json.dumps(
+                {
+                    scope: [
+                        _row_summary(row)
+                        for row in snapshot_history(client, scope, key_prefix=prefix)
+                    ]
+                    for scope in scopes
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    print(
+        json.dumps(
+            {
+                "scope": scope,
+                "live": _row_summary(_live_row(client, prefix, scope)),
+                "history": [
+                    _row_summary(row)
+                    for row in snapshot_history(client, scope, key_prefix=prefix)
+                ],
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _known_scopes(client: Any, key_prefix: str) -> List[str]:
+    """Scopes with a live model or a history, read without a SCAN."""
+    scopes: List[str] = []
+    try:
+        # A scan is the honest way; a client without one reports no scopes,
+        # which sends the operator to pass --scope rather than to a wrong one.
+        for key in client.scan_iter(match="%s:model:*" % key_prefix, count=512):
+            name = str(key)
+            if ":model_history:" in name:
+                continue
+            scopes.append(name.split(":model:", 1)[1])
+    except Exception:
+        return []
+    return sorted(set(scopes))
+
+
+def _live_row(client: Any, key_prefix: str, scope: str) -> Dict[str, Any]:
+    """The live snapshot of a scope as a row, or an empty one."""
+    try:
+        raw = client.get("%s:model:%s" % (key_prefix, scope))
+        if not raw:
+            return {}
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", "replace")
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _row_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+    """The few numbers an operator reads before choosing a snapshot."""
+    return {
+        "model_id": str(row.get("model_id") or ""),
+        "trained_at": float(row.get("trained_at") or 0.0),
+        "labelled": int(row.get("labelled") or 0),
+        "holdout_auc": float(row.get("holdout_auc") or 0.0),
+        "neutral": not bool(row.get("w")),
+    }
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -397,6 +541,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger=logger,
         rng=random.Random(args.seed),
     )
+    # Rollback and history are reads and one copy of a key; neither fits
+    # anything, and neither should drain the stream it would then have to
+    # pretend it did not consume.
+    if args.history or args.rollback:
+        return _scope_view(config, client, learner, args, logger)
     last_id = None
     if args.reset_cursor:
         learner.save_cursor("0-0")

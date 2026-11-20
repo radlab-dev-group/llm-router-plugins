@@ -1073,12 +1073,23 @@ Next to the rest of the plugin state, under `learning.key_prefix` (the policy's 
 | `{prefix}:rep:{doc}` | one document's posterior (`a`, `b`, `e`, `t`), TTL of four half-lives |
 | `{prefix}:arms` | the per-`(mode, kind)` source posteriors |
 | `{prefix}:model:{scope}` | one scope's published snapshot: weights, the Laplace diagonal, `model_id`, `trained_at`, `samples`, `holdout_auc` |
+| `{prefix}:model_history:{scope}` | the snapshots that fit retired, newest first, capped at `learning.snapshot_history_size` |
 
 A document's state is written on every verdict and read on every ranking; a snapshot is written by the learner and
 read with one `GET` per scope per `model_ttl_seconds`.  A Redis that is not configured keeps all of it in process
 memory — the same degradation the generation cache already accepts — and a Redis that answers with an error is
 caught by every one of these reads, which then serve the in-memory state they kept writing.  The learner itself
 needs Redis: without it there is no stream to drain, and it says so instead of fitting on nothing.
+
+A publish retires the snapshot it replaces into the history, newest first, capped at
+`learning.snapshot_history_size` (8 by default; 0 keeps only the live key).  A rollback is a copy from that
+history to the live key with the live model retired in its place, so rolling back is itself reversible, and an id
+that is not in the history is refused: a rollback to a model nobody fitted is a fresh publish wearing a disguise.
+
+```bash
+llm-router-agentic-kb-learner --history --scope webapp     # the live model and what it could go back to
+llm-router-agentic-kb-learner --rollback webapp:1763347200:1412:0.710 --scope webapp
+```
 
 ### Switching it on
 

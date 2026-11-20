@@ -185,6 +185,10 @@ class LearningConfig:
         Share of requests served by a sampled rather than a mean snapshot.
     model_ttl_seconds : float
         How long a worker holds a snapshot before reading it again.
+    snapshot_history_size : int
+        How many published snapshots a scope keeps after the live one, for the
+        rollback of a fit that turned out to be worse.  Zero keeps only the
+        live one, which is what the layer did before this existed.
     stream_key, key_prefix : str
         Where the training log and the state live.
     """
@@ -208,6 +212,7 @@ class LearningConfig:
     explore_coeff: float = 0.25
     explore_rate: float = 0.1
     model_ttl_seconds: float = 60.0
+    snapshot_history_size: int = 8
     stream_key: str = "agentic_kb:training"
     key_prefix: str = "agentic-kb"
 
@@ -239,6 +244,8 @@ class LearningConfig:
             raise ValueError("learning.explore_coeff/explore_rate out of range")
         if self.model_ttl_seconds <= 0.0:
             raise ValueError("learning.model_ttl_seconds must be positive")
+        if self.snapshot_history_size < 0:
+            raise ValueError("learning.snapshot_history_size must not be negative")
         if not self.stream_key.strip() or not self.key_prefix.strip():
             raise ValueError("learning.stream_key/key_prefix must not be empty")
 
@@ -966,19 +973,9 @@ def train_ranker(
     return snapshot, report
 
 
-def publish_snapshot(
-    client: Any,
-    snapshot: ModelSnapshot,
-    key_prefix: str = "agentic-kb",
-) -> bool:
-    """
-    Write one snapshot to Redis.  Returns whether it is there.
-
-    Fail-open in the only sense that matters for a write: a Redis that will not
-    take it leaves the previous snapshot serving, and the caller keeps the
-    layer static rather than partial.
-    """
-    payload = {
+def _snapshot_payload(snapshot: ModelSnapshot) -> Dict[str, Any]:
+    """The wire form of a snapshot, for the live key and the history alike."""
+    return {
         "schema": 1,
         "scope": snapshot.scope,
         "model_id": snapshot.model_id,
@@ -991,12 +988,206 @@ def publish_snapshot(
         "arms": snapshot.arms,
         **snapshot.ranker.to_dict(),
     }
+
+
+def publish_snapshot(
+    client: Any,
+    snapshot: ModelSnapshot,
+    key_prefix: str = "agentic-kb",
+    history_size: int = 8,
+) -> bool:
+    """
+    Write one snapshot to Redis, keeping the ones it replaces for rollback.
+
+    Returns whether the live key is there.  Fail-open in the only sense that
+    matters for a write: a Redis that will not take it leaves the previous
+    snapshot serving, and the caller keeps the layer static rather than
+    partial.  The previous live snapshot is pushed into a per-scope history,
+    capped at *history_size* and oldest-first, so the answer to "roll back the
+    fit that started mis-ranking things" is a read and a copy, not a
+    retraining that may take a week to accumulate the labels again.  A
+    history push that fails does not fail the publish: the live model is the
+    thing the layer reads, and the history is what an operator reaches for
+    later.
+    """
+    payload = _snapshot_payload(snapshot)
+    body = json.dumps(payload, sort_keys=True)
     key = f"{key_prefix}:model:{snapshot.scope}"
+    # What the live key carries is retired *before* the new model overwrites
+    # it, because a write path that reads after it writes is a write path that
+    # never sees what it replaced.  The read is one GET on a path that is
+    # already writing a key, and a read that fails retires nothing, which is
+    # the same degradation the live write itself accepts.
+    retiring: Optional[Dict[str, Any]] = None
     try:
-        client.set(key, json.dumps(payload, sort_keys=True))
-        return True
+        current = client.get(key)
+    except Exception:
+        current = None
+    if current:
+        if isinstance(current, bytes):
+            current = current.decode("utf-8", "replace")
+        try:
+            parsed = json.loads(current)
+        except (TypeError, ValueError):
+            parsed = None
+        if (
+            isinstance(parsed, dict)
+            and str(parsed.get("model_id") or "") != str(snapshot.model_id)
+        ):
+            retiring = parsed
+    try:
+        client.set(key, body)
     except Exception:
         return False
+    if retiring is not None:
+        _push_to_history(client, snapshot.scope, retiring, key_prefix, history_size)
+    return True
+
+
+def _history_key(key_prefix: str, scope: str) -> str:
+    """Where one scope's retired snapshots live, newest first."""
+    return f"{key_prefix}:model_history:{scope}"
+
+
+def _push_to_history(
+    client: Any, scope: str, row: Dict[str, Any], key_prefix: str, history_size: int
+) -> None:
+    """
+    Keep the last *history_size* snapshots of a scope, newest first.
+
+    Stored as one JSON array under one key rather than as a Redis list, so a
+    deployment whose client has no list commands keeps a history instead of
+    losing the publish to a command it does not have: the size of the array is
+    a handful of weight vectors, and the portability is worth more than the
+    one command would have saved.  Trimming drops the tail, which is the
+    oldest.  A snapshot that is already at the head is not filed twice: a fit
+    published twice must not eat two of the eight slots.
+    """
+    if history_size <= 0 or not isinstance(row, dict) or not row.get("model_id"):
+        return
+    try:
+        key = _history_key(key_prefix, scope)
+        rows = _read_history_rows(client, key)
+        # The same id never sits in the history twice: a publish that retires
+        # a model that is already filed — the worker ran twice with the same
+        # fit — must not spend a slot on a rollback to where the operator
+        # already stands.
+        model_id = str(row.get("model_id"))
+        rows = [item for item in rows if str(item.get("model_id") or "") != model_id]
+        rows.insert(0, row)
+        del rows[history_size:]
+        client.set(key, json.dumps(rows, sort_keys=True))
+    except Exception:
+        # The history is for the operator's later, not the request's now: a
+        # failure here is a missing rollback, not a failed publish.
+        return
+
+
+def _read_history_rows(client: Any, key: str) -> List[Dict[str, Any]]:
+    """The history array of a key, tolerating a missing or corrupt one."""
+    try:
+        raw = client.get(key)
+    except Exception:
+        return []
+    if not raw:
+        return []
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    try:
+        rows = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict) and row.get("model_id")]
+
+
+def snapshot_history(
+    client: Any, scope: str, key_prefix: str = "agentic-kb"
+) -> List[Dict[str, Any]]:
+    """
+    One scope's retired snapshots, newest first, as published.
+
+    A row this build cannot read is dropped rather than returned, for the same
+    reason :func:`load_snapshot` refuses one: half a weight vector reorders a
+    block in a way nobody can explain.  The live snapshot is not part of the
+    history while it is live; it enters the history when the next one replaces
+    it, which is what keeps "what is serving" and "what I could go back to"
+    two questions with two answers.
+    """
+    rows = _read_history_rows(client, _history_key(key_prefix, scope))
+    keep: List[Dict[str, Any]] = []
+    for row in rows:
+        features = tuple(str(name) for name in row.get("features") or ())
+        if features and features != FEATURE_NAMES:
+            continue
+        keep.append(row)
+    return keep
+
+
+def rollback_snapshot(
+    client: Any,
+    scope: str,
+    model_id: str,
+    key_prefix: str = "agentic-kb",
+    history_size: int = 8,
+) -> bool:
+    """
+    Put one of a scope's retired snapshots back in force.
+
+    The rollback is a copy from the history to the live key with the current
+    live key pushed into the history first, so a rollback is itself reversible:
+    the operator who rolls back the wrong rollback gets back exactly what they
+    had.  The rolled-back id leaves the history, because a history that still
+    names the model that is live offers a rollback to where the operator
+    already stands.  An id that is not in the history is refused: a rollback
+    to a model nobody fitted is a fresh publish wearing a disguise, and the
+    difference matters the day someone asks what was serving in March.
+    """
+    history = snapshot_history(client, scope, key_prefix)
+    wanted = next(
+        (row for row in history if str(row.get("model_id")) == str(model_id)), None
+    )
+    if wanted is None:
+        return False
+    live_key = f"{key_prefix}:model:{scope}"
+    try:
+        current = client.get(live_key)
+    except Exception:
+        return False
+    current_row: Optional[Dict[str, Any]] = None
+    if current:
+        if isinstance(current, bytes):
+            current = current.decode("utf-8", "replace")
+        try:
+            parsed = json.loads(current)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict) and parsed.get("model_id"):
+            current_row = parsed
+    try:
+        remaining = [
+            row
+            for row in history
+            if str(row.get("model_id")) != str(model_id)
+        ]
+        if current_row is not None:
+            remaining = [
+                row
+                for row in remaining
+                if str(row.get("model_id"))
+                != str(current_row.get("model_id"))
+            ]
+            remaining.insert(0, current_row)
+            del remaining[history_size:]
+        client.set(
+            _history_key(key_prefix, scope),
+            json.dumps(remaining, sort_keys=True),
+        )
+        client.set(live_key, json.dumps(wanted, sort_keys=True))
+    except Exception:
+        return False
+    return True
 
 
 def load_snapshot(

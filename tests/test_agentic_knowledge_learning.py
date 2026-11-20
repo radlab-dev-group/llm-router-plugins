@@ -31,6 +31,8 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
     SourceBandit,
     load_snapshot,
     publish_snapshot,
+    rollback_snapshot,
+    snapshot_history,
     train_ranker,
     _credit_kind,
     _split,
@@ -479,6 +481,219 @@ def test_snapshot_with_a_corrupt_body_reads_as_no_snapshot():
     loaded = load_snapshot(client, "repo", config=LearningConfig())
     assert loaded is not None
     assert loaded.neutral is True
+
+
+# ------------------------------------------------------------- history -----
+def test_publishing_keeps_the_snapshots_it_replaced():
+    """A fit that turns out worse is rolled back, not retrained from scratch.
+
+    The second publish retires the first into the history, newest first.  The
+    live key says what is serving; the head of the history says what was
+    serving before, and that is the two questions the rollback needs.
+    """
+    client = FakeRedis()
+    config = LearningConfig(enabled=True, min_samples=10)
+    first = train_ranker(
+        corpus(40, signal=True, seed=21), "repo", config=config, rng=random.Random(21)
+    )[0]
+    second = train_ranker(
+        corpus(60, signal=True, seed=22), "repo", config=config, rng=random.Random(22)
+    )[0]
+    publish_snapshot(client, first, key_prefix=config.key_prefix)
+    publish_snapshot(client, second, key_prefix=config.key_prefix)
+
+    assert load_snapshot(client, "repo", config=config).model_id == second.model_id
+    history = snapshot_history(client, "repo", key_prefix=config.key_prefix)
+    assert [row["model_id"] for row in history] == [first.model_id]
+    # A third publish retires the second behind the first, and the cap has not
+    # been reached, so both are still there in the order they retired.
+    third = train_ranker(
+        corpus(80, signal=True, seed=23), "repo", config=config, rng=random.Random(23)
+    )[0]
+    publish_snapshot(client, third, key_prefix=config.key_prefix)
+    history = snapshot_history(client, "repo", key_prefix=config.key_prefix)
+    assert [row["model_id"] for row in history] == [second.model_id, first.model_id]
+
+
+def test_the_history_is_capped_at_the_size_the_policy_names():
+    client = FakeRedis()
+    config = LearningConfig(enabled=True, min_samples=10, snapshot_history_size=2)
+    ids = []
+    for seed in (31, 32, 33, 34, 35):
+        snapshot = train_ranker(
+            corpus(30, signal=True, seed=seed),
+            "repo",
+            config=config,
+            rng=random.Random(seed),
+            # A distinct second per fit, so the ids are distinct: the model
+            # id carries the second it was fitted, and a test that cannot
+            # tell its fits apart is testing the id, not the history.
+            now=float(seed),
+        )[0]
+        publish_snapshot(
+            client, snapshot, key_prefix=config.key_prefix, history_size=2
+        )
+        ids.append(snapshot.model_id)
+    history = snapshot_history(client, "repo", key_prefix=config.key_prefix)
+    # The two newest retired fits, in the order they retired: the last fit
+    # retired the one before it, which retired the one before that, and the
+    # cap kept exactly the two the policy asked for.
+    assert len(history) == 2
+    assert history[0]["model_id"] == ids[3]
+    assert history[1]["model_id"] == ids[2]
+    assert ids[0] not in [row["model_id"] for row in history]
+    assert ids[1] not in [row["model_id"] for row in history]
+
+
+def test_republishing_the_same_fit_does_not_eat_two_slots():
+    """A fit published twice files its predecessor once, not twice.
+
+    The first publish retires the empty live key into the history as the
+    snapshot it is making live: a deployment whose first fit is already the
+    one to roll back to must be able to reach it later.  The second publish
+    finds the same model in the live key and the history, and files nothing:
+    a history that names a model twice spends the cap on a rollback to where
+    the operator already stands.
+    """
+    client = FakeRedis()
+    config = LearningConfig(enabled=True, min_samples=10)
+    snapshot = train_ranker(
+        corpus(40, signal=True, seed=41), "repo", config=config, rng=random.Random(41)
+    )[0]
+    publish_snapshot(client, snapshot, key_prefix=config.key_prefix, history_size=4)
+    # The first publish retires the empty live key: nothing was serving, so
+    # nothing goes into the history yet.
+    assert snapshot_history(client, "repo", key_prefix=config.key_prefix) == []
+    # The second publish finds the same model in the live key and retires
+    # nothing: a history that names the live model is a rollback to where the
+    # operator already stands.
+    publish_snapshot(client, snapshot, key_prefix=config.key_prefix, history_size=4)
+    assert snapshot_history(client, "repo", key_prefix=config.key_prefix) == []
+    # A different fit retires this one, exactly once.
+    other = train_ranker(
+        corpus(60, signal=True, seed=42), "repo", config=config, rng=random.Random(42)
+    )[0]
+    publish_snapshot(client, other, key_prefix=config.key_prefix, history_size=4)
+    assert [
+        row["model_id"]
+        for row in snapshot_history(client, "repo", key_prefix=config.key_prefix)
+    ] == [snapshot.model_id]
+
+
+def test_history_size_zero_is_the_layer_before_history_existed():
+    client = FakeRedis()
+    config = LearningConfig(enabled=True, min_samples=10)
+    publish_snapshot(
+        client,
+        train_ranker(
+            corpus(40, signal=True, seed=51), "repo", config=config, rng=random.Random(51)
+        )[0],
+        key_prefix=config.key_prefix,
+        history_size=0,
+    )
+    publish_snapshot(
+        client,
+        train_ranker(
+            corpus(50, signal=True, seed=52), "repo", config=config, rng=random.Random(52)
+        )[0],
+        key_prefix=config.key_prefix,
+        history_size=0,
+    )
+    assert snapshot_history(client, "repo", key_prefix=config.key_prefix) == []
+
+
+def test_a_rollback_puts_the_asked_snapshot_back_in_force():
+    client = FakeRedis()
+    config = LearningConfig(enabled=True, min_samples=10)
+    first = train_ranker(
+        corpus(40, signal=True, seed=61), "repo", config=config, rng=random.Random(61)
+    )[0]
+    second = train_ranker(
+        corpus(60, signal=True, seed=62), "repo", config=config, rng=random.Random(62)
+    )[0]
+    publish_snapshot(client, first, key_prefix=config.key_prefix)
+    publish_snapshot(client, second, key_prefix=config.key_prefix)
+
+    assert rollback_snapshot(
+        client, "repo", first.model_id, key_prefix=config.key_prefix
+    )
+    restored = load_snapshot(client, "repo", config=config)
+    assert restored.model_id == first.model_id
+    # And the rollback is itself reversible: the model that was displaced goes
+    # into the history, so the operator who rolled back the wrong thing can
+    # undo it without a retrain.
+    history = snapshot_history(client, "repo", key_prefix=config.key_prefix)
+    assert [row["model_id"] for row in history] == [second.model_id]
+
+
+def test_a_rollback_refuses_a_model_that_was_never_published():
+    client = FakeRedis()
+    config = LearningConfig(enabled=True, min_samples=10)
+    publish_snapshot(
+        client,
+        train_ranker(
+            corpus(40, signal=True, seed=71), "repo", config=config, rng=random.Random(71)
+        )[0],
+        key_prefix=config.key_prefix,
+    )
+    assert (
+        rollback_snapshot(
+            client, "repo", "repo:0:0:0.000", key_prefix=config.key_prefix
+        )
+        is False
+    )
+    # Nothing moved: a refused rollback is a no-op, not a half-applied one.
+    assert load_snapshot(client, "repo", config=config) is not None
+
+
+def test_a_history_row_this_build_cannot_read_is_dropped_not_served():
+    client = FakeRedis()
+    config = LearningConfig(enabled=True, min_samples=10)
+    snapshot = train_ranker(
+        corpus(40, signal=True, seed=81), "repo", config=config, rng=random.Random(81)
+    )[0]
+    publish_snapshot(client, snapshot, key_prefix=config.key_prefix)
+    publish_snapshot(
+        client,
+        train_ranker(
+            corpus(60, signal=True, seed=82), "repo", config=config, rng=random.Random(82)
+        )[0],
+        key_prefix=config.key_prefix,
+    )
+    key = "agentic-kb:model_history:repo"
+    rows = json.loads(client.values[key])
+    rows.append({"model_id": "repo:foreign", "features": ["bias", "invented"]})
+    client.values[key] = json.dumps(rows)
+    kept = snapshot_history(client, "repo", key_prefix=config.key_prefix)
+    # The foreign row is refused like a read would refuse it, and what is
+    # kept is the first fit, which the second retired.
+    assert [row["model_id"] for row in kept] == [snapshot.model_id]
+    assert all(row["model_id"] != "repo:foreign" for row in kept)
+
+
+def test_a_corrupt_history_reads_as_empty_and_costs_nothing():
+    client = FakeRedis()
+    client.values["agentic-kb:model_history:repo"] = "{not json"
+    assert snapshot_history(client, "repo", key_prefix="agentic-kb") == []
+    assert rollback_snapshot(client, "repo", "anything") is False
+
+
+def test_a_client_that_fails_to_take_the_history_still_publishes():
+    """The history is the operator's later; a live model is the layer's now."""
+
+    class _NoRoomForHistory(FakeRedis):
+        def get(self, key):
+            if ":model_history:" in key:
+                raise RuntimeError("boom")
+            return super().get(key)
+
+    client = _NoRoomForHistory()
+    config = LearningConfig(enabled=True, min_samples=10)
+    snapshot = train_ranker(
+        corpus(40, signal=True, seed=91), "repo", config=config, rng=random.Random(91)
+    )[0]
+    assert publish_snapshot(client, snapshot, key_prefix=config.key_prefix) is True
+    assert load_snapshot(client, "repo", config=config).model_id == snapshot.model_id
 
 
 # ------------------------------------------------------------- policy -------
