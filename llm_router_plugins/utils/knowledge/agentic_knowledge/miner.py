@@ -110,6 +110,11 @@ class MiningResult:
     tried : Tuple[str, ...]
         One-line summaries of what this turn already attempted, for the
         "do not repeat this" section of the injection.
+    failing_command : str
+        Command line of the failure this turn has not closed, when it names one.
+        A recipe declares the command that made it green; the two agreeing is
+        the strongest evidence that a recipe is about *this* failure rather
+        than about text that merely resembles it.
     """
 
     events: Tuple[KnowledgeEvent, ...] = ()
@@ -117,6 +122,7 @@ class MiningResult:
     signature_hash: str = ""
     signature: str = ""
     tried: Tuple[str, ...] = ()
+    failing_command: str = ""
     #: Why nothing (or less than expected) was written, counted per turn.
     #: ``no_failure`` — a turn with commands but no test failure to key an
     #: episode on; ``no_patch`` — a failure the turn never changed anything for;
@@ -276,6 +282,7 @@ class EpisodeMiner:
             signature_hash=loop.signature_hash,
             signature=loop.signature,
             tried=tried,
+            failing_command=_last_failing_command(failures),
             diagnostics=self._diagnostics(turn, failures, events, covered_by_recipe),
         )
 
@@ -956,6 +963,23 @@ class EpisodeMiner:
             arguments.get(evidence.call_id) or arguments.get(evidence.event_id) or ""
         )
         return _command_line(raw)
+
+
+def _last_failing_command(failures: List["_Failure"]) -> str:
+    """
+    The command of the failure this turn has not closed.
+
+    The *last* failure, not the first: a turn that fixed one test and then
+    broke another is stuck on the second, and the recipe worth ranking first
+    is the one about the command now going red.  A turn whose failures are all
+    verified has nothing left to be stuck on and says so with an empty string.
+    """
+    for failure in reversed(list(failures or [])):
+        if failure.verified():
+            continue
+        if failure.command:
+            return str(failure.command)[:200]
+    return ""
 
 
 def _output_texts(turn: AgentTurn) -> Dict[str, str]:

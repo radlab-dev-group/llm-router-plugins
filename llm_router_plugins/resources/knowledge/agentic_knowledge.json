@@ -343,5 +343,23 @@
     "context_max_chars": 700,
     "context_ttl_seconds": 86400
   },
-  "collection_layout": "single"
+  "collection_layout": "single",
+  "learning": {
+    "enabled": false,
+    "mult_min": 0.3,
+    "mult_max": 1.5,
+    "prior_alpha": 2.0,
+    "prior_beta": 2.0,
+    "half_life_seconds": 2592000.0,
+    "min_observations": 3,
+    "l2": 32.0,
+    "weight_clip": 3.0,
+    "newton_steps": 4,
+    "min_samples": 200,
+    "min_holdout_auc": 0.6,
+    "explore_coeff": 0.25,
+    "explore_rate": 0.1,
+    "model_ttl_seconds": 60.0,
+    "stream_key": "agentic_kb:training"
+  }
 }

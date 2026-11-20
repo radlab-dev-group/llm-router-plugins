@@ -59,6 +59,9 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, ClassVar, Dict, Mapping, Optional, Tuple
 
+from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+    LearningConfig,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.scope import (
     SCOPE_STRATEGIES,
 )
@@ -133,6 +136,9 @@ AGENTIC_KNOWLEDGE_ENV_PREFIX = "LLM_ROUTER_KNOWLEDGE_AGENTIC_"
 #: fail open into a silently knowledge-less proxy.
 _DEFAULT_SSE_PREFIX = ""
 _DEFAULT_STREAM_KEY = "agentic_kb:events"
+#: Where the learned path writes what it saw: one Redis stream, next to the
+#: indexing stream, bounded by ``write.max_stream_len`` the same way.
+_DEFAULT_LEARNING_STREAM_KEY = "agentic_kb:training"
 _DEFAULT_KEY_PREFIX = "agentic-kb"
 
 
@@ -663,6 +669,17 @@ class AgenticKnowledgeConfig:
     #: How long a session's digest survives; a session, not a generation.
     doc_context_ttl_seconds: int = _DEFAULT_DOC_CONTEXT_TTL_SECONDS
 
+    #: The learned path of the knowledge layer: document reputations, the
+    #: per-scope ranking model and the source bandit.  Off by default — every
+    #: multiplier is 1.0 and the layer behaves exactly as before — and on only
+    #: by an operator's decision, from the policy JSON or
+    #: ``LLM_ROUTER_KNOWLEDGE_AGENTIC_LEARNING_ENABLED``.  The training log
+    #: writes either way: labels are what a model is fitted on later, and they
+    #: cannot be recovered after the fact.
+    learning: LearningConfig = field(default_factory=LearningConfig)
+    #: Env-only shadow of ``learning.enabled``, applied after the environment
+    #: has been read; ``None`` when the variable is not set.
+    learning_enabled: Optional[bool] = None
     escalation_enabled: bool = False
     loop_threshold: int = _DEFAULT_LOOP_THRESHOLD
     strong_recipe_score: float = _DEFAULT_STRONG_RECIPE_SCORE
@@ -765,6 +782,7 @@ class AgenticKnowledgeConfig:
         archive = _section(write, "archive")
         docs = _section(data, "docs")
         escalation = _section(data, "escalation")
+        learning = _section(data, "learning")
         scope = _section(data, "scope")
         claude = _section(data, "claude_code")
 
@@ -926,6 +944,14 @@ class AgenticKnowledgeConfig:
                 escalation.get("strong_recipe_scores"),
                 "escalation.strong_recipe_scores",
             ),
+            learning=LearningConfig.from_dict(
+                learning,
+                key_prefix=str(data.get("key_prefix", _DEFAULT_KEY_PREFIX)),
+                stream_key=str(
+                    _section(data, "write").get("learning_stream_key")
+                    or _DEFAULT_LEARNING_STREAM_KEY
+                ),
+            ),
             claude_code_mode_map=_mode_map(claude.get("mode_map", {})),
             modes=_modes(data.get("modes", {})),
         )
@@ -957,6 +983,7 @@ class AgenticKnowledgeConfig:
             ("READ_ENABLED", "read_enabled", _boolean),
             ("WRITE_ENABLED", "write_enabled", _boolean),
             ("ESCALATION_ENABLED", "escalation_enabled", _boolean),
+            ("LEARNING_ENABLED", "learning_enabled", _boolean),
             ("ARCHIVE_ENABLED", "archive_enabled", _boolean),
             ("TASK_SOLUTIONS_ENABLED", "task_solutions_enabled", _boolean),
             ("TOOL_RECIPES_ENABLED", "tool_recipes_enabled", _boolean),
@@ -1047,6 +1074,14 @@ class AgenticKnowledgeConfig:
             self.strong_recipe_scores = _score_map(
                 _parse_json_map(raw_scores, label), label
             )
+        if self.learning_enabled is not None:
+            # The variable is a switch, not a policy: it moves the ``enabled``
+            # flag of the section and says nothing about its bounds, which the
+            # section itself still owns.
+            self.learning = replace(
+                self.learning, enabled=bool(self.learning_enabled)
+            )
+            self.learning_enabled = None
 
         # A request path may not wait forever, whatever the operator set, and
         # the two numbers mean different things: the budget is what a request
@@ -1501,6 +1536,7 @@ _POLICY_KEYS = frozenset(
         "claude_code",
         "write",
         "escalation",
+        "learning",
         "docs",
     }
 )

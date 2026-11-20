@@ -1,0 +1,430 @@
+"""
+The learner: what the indexing worker does with what the proxy has judged.
+
+The proxy cannot fit a model and answer the agent at the same time, so it logs
+one record per injected document — its features and, one turn later, its
+verdict — to a Redis stream and moves on.  This process drains that stream,
+fits a scope's ranking model on the labels it has gathered and publishes the
+fit as a versioned snapshot the request path reads back with a one-key GET.
+
+Nothing here trains on the request path, and nothing here changes the policy:
+a fit that cannot separate held-out judgements better than the floor publishes
+a neutral snapshot, which reads as ``1.0`` everywhere and behaves exactly like
+the layer does today.  The policy's thresholds are the operator's to change;
+this process only says, with the numbers, what they would earn if changed.
+"""
+
+import argparse
+import json
+import logging
+import pathlib
+import random
+import sys
+
+from typing import Any, Dict, List, Optional, Union
+
+from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+    AgenticKnowledgeConfig,
+)
+from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+    FeedbackLog,
+    FeedbackSample,
+    LabelStore,
+    LearningConfig,
+    SourceBandit,
+    load_snapshot,
+    publish_snapshot,
+    train_ranker,
+)
+
+__all__ = ["Learner", "main"]
+
+
+def _load_config(path: Optional[str], logger: Any) -> AgenticKnowledgeConfig:
+    """The policy the deployment ships with; the learning section drives us."""
+    config = AgenticKnowledgeConfig.from_file(
+        pathlib.Path(path) if path else None
+    )
+    config.override_from_env(logger)
+    config.validate()
+    return config
+
+
+class Learner:
+    """Fit one scope's model from the settled records the proxy has logged."""
+
+    def __init__(
+        self,
+        config: Union[AgenticKnowledgeConfig, LearningConfig],
+        client: Optional[Any] = None,
+        logger: Optional[logging.Logger] = None,
+        rng: Optional[random.Random] = None,
+    ) -> None:
+        """Bind the store; read nothing yet."""
+        self._config = config
+        # A bare learning section is accepted too: the CLI is the only caller
+        # that builds one, and a test that wants to fit a scope should not have
+        # to manufacture the rest of the policy to do it.
+        self._learning = (
+            config if isinstance(config, LearningConfig) else config.learning
+        )
+        self._key_prefix = str(getattr(config, "key_prefix", "agentic-kb"))
+        self._stream_key = self._learning.stream_key
+        self._client = client
+        self._logger = logger
+        self._rng = rng or random.Random()
+        self._log = FeedbackLog(
+            client=client,
+            stream_key=self._stream_key,
+            logger=logger,
+        )
+        # The corpus a scope is fitted on: the accumulation of its settled
+        # judgements, deduplicated, outliving the stream's MAXLEN.  The learner
+        # fits on this, not on the batch it happened to drain.
+        self._labels = LabelStore(
+            client=client,
+            key_prefix=self._key_prefix,
+            ttl_seconds=self._corpus_ttl_seconds(),
+            logger=logger,
+        )
+        self._cursor_key = "%s:learner:cursor" % self._key_prefix
+        # The bandit is written by the request path, not here: this process
+        # only reads what it has learned, so that a published snapshot can
+        # say what a character of each source was worth when the fit shipped.
+        self._bandit = SourceBandit(
+            client=client, config=self._learning, rng=self._rng
+        )
+
+    def _corpus_ttl_seconds(self) -> float:
+        """How long a settled label stays in the corpus before it ages out."""
+        half_life = float(getattr(self._learning, "half_life_seconds", 0.0) or 0.0)
+        return half_life * 4.0
+
+    def _learning_section(self) -> LearningConfig:
+        """The learning section of what this learner was built with."""
+        return self._learning
+
+    # -------------------------------------------------------------- api -----
+    def fit_scope(
+        self,
+        scope: str,
+        samples: List[FeedbackSample],
+        now: float = 0.0,
+        holdout_fraction: float = 0.2,
+        arms: Optional[Dict[str, Dict[str, float]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Fit one scope and decide whether the fit is worth publishing.
+
+        Returns the report the log line is built from: how much the scope had
+        judged, what the fit separated on the holdout, and whether the snapshot
+        was published or refused — with the reason, so "the worker did nothing"
+        and "the worker refused to publish" are two different sentences.
+        """
+        snapshot, report = train_ranker(
+            samples,
+            scope,
+            config=self._learning_section(),
+            holdout_fraction=holdout_fraction,
+            rng=self._rng,
+            now=now,
+            arms=self._bandit.arms() if arms is None else arms,
+        )
+        published = False
+        if self._client is not None:
+            published = publish_snapshot(
+                self._client,
+                snapshot,
+                key_prefix=self._key_prefix,
+            )
+        report["model_id"] = snapshot.model_id
+        report["published"] = published
+        report["arms"] = self._bandit.summary()
+        return report
+
+    def arm_summary(self) -> Dict[str, Dict[str, Any]]:
+        """
+        What the source bandit knows: judgements folded and reward expected.
+
+        The arm state belongs to the request path, which folds every settled
+        document into it; this process only reads it, so an operator can ask
+        the same question the snapshot answers — what was a character of each
+        source worth — without reaching into a live counter.
+        """
+        return self._bandit.summary()
+
+    def read_cursor(self) -> str:
+        """Where the last pass stopped in the training stream; ``0-0`` at first."""
+        if self._client is None:
+            return "0-0"
+        try:
+            raw = self._client.get(self._cursor_key)
+        except Exception:
+            return "0-0"
+        if not raw:
+            return "0-0"
+        return raw.decode() if isinstance(raw, bytes) else str(raw)
+
+    def save_cursor(self, last_id: str) -> None:
+        """Remember where this pass stopped, so the next one starts there."""
+        if self._client is None or not last_id or last_id == "0-0":
+            return
+        try:
+            self._client.set(self._cursor_key, last_id)
+        except Exception:
+            # A cursor that will not persist means the next pass re-reads what
+            # this one read.  Labels are deduplicated by key, so the corpus is
+            # the same; only the work is repeated, which is not a corruption.
+            pass
+
+    def drain_and_fit(
+        self,
+        count: int = 500,
+        last_id: Optional[str] = None,
+        holdout_fraction: float = 0.2,
+        now: float = 0.0,
+        max_records: int = 20000,
+        corpus_limit: int = 10000,
+    ) -> Dict[str, Any]:
+        """
+        One pass: resume where the last pass stopped, fold what is new into
+        every scope's corpus, fit on that corpus, publish, save the cursor.
+
+        The fit is on the corpus and not on the batch.  The stream is a queue
+        and a queue is trimmed, so a model fitted on the newest batch would be
+        fitted on whatever happened to survive ``MAXLEN`` this hour, and a
+        scope with ten thousand labels would be modelled from the last few
+        hundred.  The batch decides *which* scopes are worth refitting; the
+        corpus decides what the fit says.
+
+        Returns ``{"last_id": ..., "scanned": n, "merged": n, "scopes": {...}}``.
+        """
+        cursor = last_id if last_id is not None else self.read_cursor()
+        drained: List[FeedbackSample] = []
+        seen = cursor
+        while not drained or seen != cursor:
+            budget = max(1, int(max_records)) - len(drained)
+            if budget <= 0:
+                break
+            seen, rows = self._log.drain(count=min(int(count), budget), last_id=seen)
+            drained.extend(rows)
+            # Without Redis the log answers from a local tail, which is the
+            # same handful every time; one read of it is the whole of it.
+            if self._client is None or len(rows) < min(int(count), budget):
+                break
+
+        merged = self._labels.merge(drained)
+        touched = sorted({s.scope for s in drained if s.scope and s.label})
+        scopes: Dict[str, Dict[str, Any]] = {}
+        for scope in touched:
+            corpus = self._labels.load(scope, limit=corpus_limit)
+            scopes[scope] = self.fit_scope(
+                scope,
+                corpus,
+                now=now,
+                holdout_fraction=holdout_fraction,
+            )
+        self.save_cursor(seen)
+
+        if self._logger is not None:
+            self._logger.info(
+                "learner: drained=%d merged=%d cursor=%s scopes=%d",
+                len(drained),
+                merged,
+                seen,
+                len(scopes),
+            )
+            for scope, report in scopes.items():
+                verdict = (
+                    "accepted" if report.get("accepted") else report.get("refused")
+                )
+                self._logger.info(
+                    "learner: scope=%s corpus=%d labelled=%d holdout_auc=%.3f "
+                    "model_id=%s %s published=%s",
+                    scope,
+                    report.get("samples", 0),
+                    report.get("labelled", 0),
+                    float(report.get("holdout_auc", 0.0)),
+                    report.get("model_id", ""),
+                    verdict or "neutral",
+                    report.get("published", False),
+                )
+        return {
+            "last_id": seen,
+            "scanned": len(drained),
+            "merged": merged,
+            "scopes": scopes,
+        }
+
+
+def _build_client(config: AgenticKnowledgeConfig) -> Optional[Any]:
+    """A Redis client for the worker; ``None`` when Redis is not configured."""
+    if not config.redis.configured:
+        return None
+    try:
+        import redis  # noqa: PLC0415 - optional dependency
+
+        return redis.Redis(**config.redis.client_kwargs())
+    except Exception:
+        return None
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Create the command-line parser."""
+    parser = argparse.ArgumentParser(
+        prog="llm-router-agentic-kb-learner",
+        description=(
+            "Fit the agentic knowledge layer's per-scope ranking models from "
+            "the settled feedback the proxy has logged."
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to a knowledge policy JSON; defaults to the bundled policy.",
+    )
+    parser.add_argument(
+        "--scope",
+        default=None,
+        help="Fit one scope instead of every scope in the batch.",
+    )
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=500,
+        help="Records to read per pass; defaults to 500.",
+    )
+    parser.add_argument(
+        "--holdout",
+        type=float,
+        default=0.2,
+        help="Share of the labels held out of the fit; defaults to 0.2.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Seed of the split; the fit is reproducible from it.",
+    )
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="Print one JSON report line per scope and exit.",
+    )
+    parser.add_argument(
+        "--log-level",
+        default=None,
+        help="Logging level; defaults to INFO.",
+    )
+    parser.add_argument(
+        "--max-records",
+        type=int,
+        default=20000,
+        help=(
+            "Stop after reading this many stream entries in one pass; "
+            "defaults to 20000."
+        ),
+    )
+    parser.add_argument(
+        "--window",
+        type=int,
+        default=10000,
+        help=(
+            "Maximum corpus size per scope; the oldest labels are "
+            "dropped; defaults to 10000."
+        ),
+    )
+    parser.add_argument(
+        "--reset-cursor",
+        action="store_true",
+        help="Start at the head of the stream instead of the last saved cursor.",
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help=(
+            "Print the weight vector of the current snapshot for "
+            "each touched scope and exit."
+        ),
+    )
+    parser.add_argument(
+        "--arms",
+        action="store_true",
+        help=(
+            "Print the bandit's view of each (mode, source) arm — how many "
+            "judgements it has folded and what reward it expects — and exit."
+        ),
+    )
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """
+    Run one pass of the learner.
+
+    Parameters
+    ----------
+    argv : List[str], optional
+        Command-line arguments; ``sys.argv`` when omitted.
+
+    Returns
+    -------
+    int
+        Process exit code: ``0`` when the pass ran, ``1`` when it could not.
+    """
+    args = build_parser().parse_args(argv)
+    level = getattr(
+        logging, str(args.log_level or "INFO").upper(), logging.INFO
+    )
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    logger = logging.getLogger("agentic-kb-learner")
+
+    config = _load_config(args.config, logger)
+    client = _build_client(config)
+    if client is None:
+        logger.error(
+            "the learner needs Redis to read the training stream; configure "
+            "LLM_ROUTER_KNOWLEDGE_AGENTIC_REDIS_HOST (and friends)"
+        )
+        return 1
+
+    learner = Learner(
+        config=config,
+        client=client,
+        logger=logger,
+        rng=random.Random(args.seed),
+    )
+    last_id = None
+    if args.reset_cursor:
+        learner.save_cursor("0-0")
+        last_id = "0-0"
+    result = learner.drain_and_fit(
+        count=max(int(args.count), 1),
+        last_id=last_id,
+        holdout_fraction=float(args.holdout),
+        max_records=max(int(args.max_records), 1),
+        corpus_limit=max(int(args.window), 1),
+    )
+    self_prefix = config.key_prefix
+    if args.arms:
+        print(json.dumps({"arms": learner.arm_summary()}, sort_keys=True))
+        return 0
+    if args.show:
+        for scope, report in (result.get("scopes") or {}).items():
+            snapshot = load_snapshot(client, scope, key_prefix=self_prefix)
+            if snapshot is not None:
+                print(json.dumps({"scope": scope, "weights": list(snapshot.weights)}))
+    if args.report:
+        print(json.dumps(result, sort_keys=True))
+    if args.scope is not None:
+        scopes = result.get("scopes") or {}
+        if args.scope not in scopes:
+            logger.warning("scope %s had no records in the batch", args.scope)
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - entry point
+    sys.exit(main())
