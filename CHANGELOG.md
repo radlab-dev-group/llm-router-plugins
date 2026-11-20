@@ -85,7 +85,73 @@ release tagged as `v<version>`.
 - **The learner command bounds its own work.** `--max-records` caps what one pass reads,
   `--window` bounds the corpus per scope, `--reset-cursor` starts at the head of the stream,
   and `--show` prints the weight vector of every touched scope.
+- **A disabled learner is absent, not a vote of one.** With `learning.enabled: false` the read
+  path no longer asks the learner for a multiplier at all: a `1.0` from a disabled learner
+  would have silently overwritten the static feedback counter's `0.3 … 1.5`, so "learning off"
+  would still have been steering. The switch is checked first, and a disabled policy is
+  treated as absent — no ranking vote, no snapshot read, no `model_id` in the annotation next
+  to `enabled: false`. The collection is not off with it: exposures keep landing in the
+  training stream, because a label can only attach to an exposure that was written down while
+  it happened.
+- **The replay measures what the learned path adds.** The counterfactual replay of
+  `knowledge/agentic_knowledge/evaluation.py` gains a fourth variant, `read_learned`, beside
+  `no_kb`, `read` and `read_escalate`: it walks the sessions in order with a real
+  `LearningPolicy` in memory — one per scope, because the holdout split is by session — and
+  the anti-leak rule stays a rule about time, the model a request may see having been fitted
+  on labels already earned when that request was scored. The report gains
+  `model_uplift_vs_read` — the difference of the two hit rates with a bootstrap interval
+  resampled by session (200 draws, fixed seed), because the turns of one session are not
+  independent evidence; one session reports a point and no interval, and says so — and
+  `char_efficiency`, `turns_saved` per `injected_chars_per_turn`, the number the layer is
+  actually paid for, because knowledge costs tokens. A per-scope appendix records how often
+  the fit ran and which gate refused it, so "the model never fitted" and "the model fitted
+  and was refused" stay two different answers.
+- **A published fit keeps what it replaced, and can go back.** A publish now retires the
+  snapshot it displaces into `{key_prefix}:model_history:{scope}`, newest first, deduplicated
+  by `model_id`, capped at `learning.snapshot_history_size` (8; 0 keeps only the live key),
+  and `llm-router-agentic-kb-learner --history` prints the model in force and what a rollback
+  could reach, with each row's own holdout AUC and sample count. `--rollback <model_id>`
+  copies one of them back to the live key and retires what it displaces, so a rollback is
+  itself reversible; an id that is not in the history is refused, because a rollback to a
+  model nobody fitted is a fresh publish wearing a disguise.
+- **The scoreboard reads the learned state of a scope.** `llm-router-agentic-kb-stats
+  --learning` prints, per scope: the model in force and the evidence it was fitted on, the
+  history a rollback could reach, the label corpus it rests on, the bandit's value per
+  `(mode, kind)`, and the self-reinforcement monitors of the training log — the share of
+  documents with more than 50 exposures and the heaviest of them, the trend the plan's
+  "does it grow monotonically" is about. The scoreboard rows are unchanged; `--json` gains a
+  `learning` block for a dashboard to consume.
+- **The policy's thresholds can be searched on a replayed dataset.** `llm-router-agentic-kb-tune`
+  walks the Cartesian product of the values the operator names — `min_similarity`,
+  `strong_recipe_score`, `loop_threshold`, and a factor on each source's shipped weight —
+  replays every point, and reports the one maximizing `recipe_hit_rate − λ ·
+  injected_chars_per_turn` under the constraint `escalation_precision ≥ --precision-floor`
+  (a missing floor is 1.0: only escalate when it is the loop). The report is JSON and
+  markdown with the winner and the deltas against the shipped policy on the same sessions, so
+  a pull request can quote it; a point below the floor is reported with the reason and not
+  selected. It writes nothing to the policy: the file is the operator's to change, and a
+  tune that edits the policy it measured against has already answered its own question.
+- **The annotation names the multiplier of each candidate.** The read's `learning` block gains
+  a `candidates` map, one entry per injected document: the multiplier it got and the three
+  factors that made it — the document reputation, the per-scope model (with its exploration
+  flag) and the source bandit's value-per-character — so "why was this recipe first" is
+  answerable from the response itself, not from a log nobody kept.
+- **How the router learns, end to end.** `agentic_routing/README_LEARNING.md` writes down
+  every mechanism that adapts behaviour over time or consumes labelled data: the frozen
+  index, the calibration loop and its grid, the session memory, and the knowledge learned
+  path — features field by field, labels and how traffic becomes a target, the Redis layout,
+  the publishing gates, the `read_learned` replay and its uplift interval, the response
+  annotation, the threshold grid and its objective, and what is never learned.
+
 ### Fixed
+- **The ranker's feedback is the deployment's, not one process'.** `all_feedback()` answered
+  from process memory, so every worker ranked the same recipe by the votes *its* requests had
+  cast, and a restart zeroed the whole reputation the static counter had been built to keep
+  shared. The shared hashes are now read in one `SCAN` pass over the feedback namespace with a
+  pipeline of `HGETALL`s, trusted for 5 s so a keyspace walk is paid at most once per worker
+  per generation, and a shared read that fails falls back to the local verdicts rather than to
+  an empty answer — the local ones are re-read on every call, because without a shared store
+  they are all there is. `metrics.feedback.source` says which of the two answered.
 - **The first verdict of a freshly booted process is no longer held back.** The rate-limit
   of the feedback push compared `time.monotonic()` against a "never pushed" sentinel of
   `0.0`, but the clock has no fixed origin: on a machine whose uptime is below the interval
