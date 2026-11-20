@@ -737,6 +737,14 @@ class ReplayEngine:
         )
         if decision.action == ACTION_ESCALATE:
             variants[VARIANT_ESCALATE].escalations += 1
+            # Whether the escalation was the right call is a question only the
+            # ground truth answers, and the replay is the one place the ground
+            # truth is: an escalation on a turn that was not a loop is the
+            # false positive the precision floor exists to keep bounded, and
+            # it is what a threshold the tune moves can break without the
+            # replay noticing.
+            if raw.get("is_loop"):
+                variants[VARIANT_ESCALATE].escalations_on_true_loop += 1
 
 
 @dataclass
@@ -758,6 +766,9 @@ class _VariantTally:
     turns_saved: int = 0
     injected_chars: int = 0
     escalations: int = 0
+    #: Of the escalations the variant made, the ones the ground truth marks as
+    #: loops: the numerator of the precision floor a tune is asked to keep.
+    escalations_on_true_loop: int = 0
     missed_saves: int = 0
     #: Characters of retrieved content, before the standing documentation
     #: map the block may also carry; the fixed and the earned halves of the
@@ -782,6 +793,15 @@ class _VariantTally:
             "turns_potentially_saved": self.turns_saved,
             "missed_saves": self.missed_saves,
             "escalations": self.escalations,
+            # None when the variant never escalated: precision with no
+            # escalations is a constraint that is met by doing nothing, and
+            # reporting it as 1.0 would let a variant that escalates on
+            # nothing read as one that escalates perfectly.
+            "escalation_precision": (
+                _ratio(self.escalations_on_true_loop, self.escalations)
+                if self.escalations
+                else None
+            ),
             # The block a request is shown: retrieved content and, where the
             # mode reads documentation, the standing map the block carries.
             # The two are measured apart, because the map is a fixed cost the
