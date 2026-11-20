@@ -16,6 +16,7 @@ from agentic_knowledge_support import knowledge_config
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.evaluation import (
     VARIANT_ESCALATE,
+    VARIANT_LEARNED,
     VARIANT_NONE,
     VARIANT_READ,
     evaluate,
@@ -59,7 +60,10 @@ def test_no_kb_variant_reads_nothing():
     assert none["injected_chars_per_turn"] == 0.0
     assert none["escalations"] == 0
     assert none["turns_potentially_saved"] == 0
-    # The no-knowledge baseline misses the saves the read variant catches.
+    # The no-knowledge baseline counts every turn and misses the saves the
+    # read variant catches: one save per turn that had a document to find,
+    # and none of them were on screen, because nothing was on screen.
+    assert none["turns"] == report["turns"]
     assert (
         none["missed_saves"]
         == report["variants"][VARIANT_READ]["turns_potentially_saved"]
@@ -202,6 +206,154 @@ def test_a_replay_with_documentation_counts_the_map_separately():
 
 
 # ------------------------------------------------------------------ helpers -
+def _learned_sessions(sessions=8, turns=6, hits_every=2, scope="oneproj"):
+    """
+    A corpus the learned path can actually learn from.
+
+    Eight sessions of a repository that keeps hitting the same two failures,
+    half of its turns loops, half of those loops ended by a document the block
+    was shown.  The shipped dataset is a handful of turns and is right to
+    refuse a fit on it; this one is the size at which the gates are supposed
+    to start saying yes, and it is here so the variant can be tested on the
+    claim it exists to make rather than on its own absence.
+    """
+    built = []
+    for session_index in range(sessions):
+        session_turns = []
+        for index in range(turns):
+            loop = (index % hits_every) != 0
+            entry = {
+                "id": f"s{session_index}-t{index}",
+                "mode": "debug",
+                "text": f"failure {index} in module {session_index} cache get key error",
+                "failure": (
+                    f"FAILED tests/test_m{index % 3}.py::test_get - KeyError: 'session'"
+                ),
+                "patch": (
+                    f"*** Begin Patch\n*** Update File: src/m{index % 3}.py\n@@\n"
+                    "-    return data[key]\n+    return data.get(key)\n*** End Patch"
+                ),
+                "test_command": f"pytest tests/test_m{index % 3}.py",
+                "test_passed": True,
+                "is_loop": loop,
+            }
+            if loop and index >= 1:
+                entry["saved_by"] = f"s{session_index}-t0"
+            session_turns.append(entry)
+        built.append({"id": f"s{session_index}", "scope": scope, "turns": session_turns})
+    return built
+
+
+def test_the_learned_variant_is_measured_over_the_same_turns_as_read():
+    report = report_with()
+    learned = report["variants"][VARIANT_LEARNED]
+    assert learned["turns"] == report["variants"][VARIANT_READ]["turns"]
+    # The learned variant is not allowed to save the difference by being
+    # cheaper to run: it is the same read, the same sessions, a model on top.
+    assert (
+        learned["injected_chars_per_turn"]
+        == report["variants"][VARIANT_READ]["injected_chars_per_turn"]
+    )
+
+
+def test_the_learned_variant_reports_the_fitting_and_the_votes():
+    report = report_with()
+    learning = report["learning"]
+    for metric in (
+        "scopes",
+        "fits",
+        "accepted",
+        "refusals",
+        "holdout_auc_mean",
+        "explore_share",
+        "mult_p95",
+    ):
+        assert metric in learning
+    # On five turns nothing can be fitted, and the report says which gate
+    # refused rather than leaving the block empty: "no model" and "no model,
+    # because too few labels" are different answers to an operator.
+    assert learning["fits"] >= 1
+    assert learning["accepted"] == 0
+    assert learning["refusals"].get("too_few_labels") >= 1
+    assert learning["model_ids"] == []
+    # Every multiplier the learner spent is inside the range the policy names.
+    assert 0.3 <= learning["mult_min"] <= learning["mult_max"] <= 1.5
+
+
+def test_the_learned_variant_never_sees_the_label_of_the_turn_it_ranks():
+    """The anti-leak rule of the replay, applied to the model rather than the store.
+
+    The per-turn record carries the corpus the request was ranked with and
+    what the turn itself added afterwards.  A running sum of the additions
+    must equal the corpus the next request saw — one record of drift, and the
+    model has quietly learned from the turn it was supposed to predict.
+    """
+    report = evaluate(knowledge_config(), _learned_sessions())
+    running: dict = {}
+    for detail in report["turn_details"]:
+        learned = detail["learned"]
+        scope = learned["scope"]
+        assert learned["samples"] == running.get(scope, 0), (
+            f"{detail['turn']} was ranked with {learned['samples']} records and "
+            f"the earlier turns of {scope} had produced only {running.get(scope, 0)}"
+        )
+        assert learned["labelled"] <= learned["samples"]
+        running[scope] = running.get(scope, 0) + learned["added"]
+
+
+def test_the_learned_variant_fits_and_votes_once_the_corpus_earns_it():
+    report = evaluate(knowledge_config(), _learned_sessions())
+    learning = report["learning"]
+    assert learning["accepted"] >= 1, learning["refusals"]
+    assert learning["model_ids"], "no model was ever named"
+    assert learning["holdout_auc_mean"] >= 0.6
+    # The model in force on a turn is reported from that turn, so the answer
+    # to "which model ranked this" survives the run.
+    served = [
+        detail for detail in report["turn_details"] if detail["learned"]["model_id"]
+    ]
+    assert served, "no turn reported the model that served it"
+    # A model that votes everywhere and never differs from 1.0 is a model the
+    # variant did not consult; the spread is what says it did.
+    assert learning["mult_min"] < 1.0 < learning["mult_max"]
+    assert 0.0 <= learning["explore_share"] <= 1.0
+
+
+def test_model_uplift_is_a_point_estimate_with_an_interval():
+    report = report_with()
+    uplift = report["variants"][VARIANT_LEARNED]["model_uplift_vs_read"]
+    assert uplift["sessions"] == report["sessions"]
+    assert uplift["bootstrap"] >= 100
+    assert uplift["ci_low"] <= uplift["point"] <= uplift["ci_high"]
+
+
+def test_model_uplift_refuses_an_interval_a_single_session_cannot_give():
+    sessions = load_sessions(DATASET)
+    single = [session for session in sessions if session.get("id") == "export-fix"]
+    report = evaluate(knowledge_config(), single)
+    uplift = report["variants"][VARIANT_LEARNED]["model_uplift_vs_read"]
+    assert uplift["sessions"] == 1
+    assert uplift["ci_low"] is None
+    assert uplift["ci_high"] is None
+    assert "note" in uplift
+
+
+def test_char_efficiency_is_reported_for_the_reading_variants():
+    report = report_with()
+    read = report["variants"][VARIANT_READ]
+    assert read["char_efficiency"] > 0.0
+    # The same number read the other way: what one save cost, in characters.
+    assert read["chars_per_turn_saved"] > 0.0
+    assert report["variants"][VARIANT_NONE]["char_efficiency"] == 0.0
+
+
+def test_the_learned_variant_does_not_change_the_other_variants():
+    with_learned = report_with()
+    plain = report_with()
+    for variant in (VARIANT_NONE, VARIANT_READ, VARIANT_ESCALATE):
+        assert with_learned["variants"][variant] == plain["variants"][variant]
+
+
 def _session_turns(report):
     """Group the per-turn detail back into its session, in order."""
     grouped = {}
