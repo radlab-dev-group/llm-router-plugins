@@ -288,8 +288,12 @@ class ContextAssembler:
     #: The learned multiplier of the layer, when the deployment runs one.  It
     #: answers ``multiplier_for(features, document_name, scope)`` and is asked
     #: only for candidates the ranking actually reaches; ``None`` — or a policy
-    #: that is switched off — leaves every multiplier ``1.0`` and the vote is
-    #: the one this file computed before the learner existed.
+    #: that is switched off — leaves every multiplier ``0.0``, and a ``0.0``
+    #: means "the learner has no say": the vote is then the one this file
+    #: computed before the learner existed, static counters and all.  A
+    #: switched-off policy must not answer ``1.0``, because ``1.0`` is a vote,
+    #: and a vote of exactly one is how a disabled layer would still silence
+    #: the counters it used to read.
     learning: Optional[Any] = None
     #: Repository the block is assembled for; the key the model snapshot lives
     #: under.  Empty means no learner can be consulted, which is the same as
@@ -499,9 +503,12 @@ class ContextAssembler:
             mode=mode,
         )
         # The learner's reputation and the counter below are two readings of
-        # the same evidence, so only one of them ever weighs a vote: with a
-        # learner attached the counters stop multiplying, which is what keeps
-        # the influence of feedback inside the range the policy names.
+        # the same evidence, so only one of them ever weighs a vote: with an
+        # enabled learner the counters stop multiplying, which is what keeps
+        # the influence of feedback inside the range the policy names.  A
+        # learner that answers ``0.0`` — switched off, or failed to read —
+        # has no say at all, and the counters weigh the vote as they did
+        # before the learner existed.
         feedback_mult = (
             1.0 if learned > 0.0 else self._feedback_multiplier(hit.document_name)
         )
@@ -645,13 +652,18 @@ class ContextAssembler:
         """
         Ask the learner what this candidate is worth, and remember what it asked.
 
-        Returns ``0.0`` when there is nothing to ask — no learner, no scope, a
-        learner switched off, or a learner that raised — and the caller then
-        weighs the candidate exactly as it did before the learner existed.  The
-        features are recorded whether or not the answer moved anything, because
-        an injection whose exposure was never logged cannot be credited or
-        blamed a turn later, and the log is the one part of this that cannot be
-        reconstructed afterwards.
+        Returns ``0.0`` when the learner has no say — no learner, no scope, a
+        policy switched off, or a learner that raised — and the caller then
+        weighs the candidate exactly as it did before the learner existed,
+        static counters included.  ``0.0`` means "not the learner's vote",
+        never "a vote of one", and that distinction is what keeps a disabled
+        deployment from silently substituting a multiplier of exactly one for
+        the counters it used to read.  The features are recorded whatever the
+        answer was, including from a switched-off policy: an injection whose
+        exposure was never logged cannot be credited or blamed a turn later,
+        and the log is the one part of this that cannot be reconstructed
+        afterwards — collecting while learning is off is how the first corpus
+        comes to exist at all.
         """
         learner = self.learning
         if learner is None or not self.scope or not hit.document_name:
@@ -666,6 +678,9 @@ class ContextAssembler:
             mode=mode,
             document_name=hit.document_name,
         )
+        self.candidate_features[hit.document_name] = features
+        if not getattr(learner, "enabled", True):
+            return 0.0
         try:
             multiplier, _ = learner.multiplier_for(
                 features, document_name=hit.document_name, scope=self.scope
@@ -674,7 +689,6 @@ class ContextAssembler:
             return 0.0
         if not multiplier or multiplier <= 0.0:
             return 0.0
-        self.candidate_features[hit.document_name] = features
         return float(multiplier)
 
     def _features(

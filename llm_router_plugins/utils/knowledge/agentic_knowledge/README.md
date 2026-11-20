@@ -992,14 +992,22 @@ document nobody has judged, the range a verdict may move a vote through, the con
 shared file earn, and the weight of a source in a mode.  Those numbers can be *estimated* instead, and the
 `learning` section of the policy does the estimating without ever touching a request.
 
-**Off by default, and "off" is not "empty".**  With `learning.enabled: false` — the shipped default — every
-multiplier is `1.0` and the layer behaves exactly as it did before this section existed.  What is *not* off is the
-training log: every injection is written to the `learning.stream_key` stream with its features, and every settled
-verdict is written with its label, whether or not anything will ever read them.  A model can be fitted in an
-afternoon once the records exist; the records only exist if they were written while the traffic was happening, and
-that is the part that cannot be recovered afterwards.  Collecting with learning off is therefore the recommended
-first step: it costs one bounded stream write per settled turn, changes no ranking, and is the corpus the next
-phase trains on.
+**Off by default, and "off" means off.**  With `learning.enabled: false` — the shipped default — the learner has no
+vote at all: it is not consulted for a ranking, its snapshot is not read, and the layer ranks exactly as it did
+before this section existed, **static feedback counters included**.  That last part is the whole point of the
+switch.  A disabled learner that answered with a multiplier of `1.0` would still be steering, because the vote it
+replaces already carries the counter multiplier of `0.3 … 1.5`; so the read path checks the switch first and a
+disabled policy is treated as absent, not as neutral.  A snapshot that happens to be sitting in Redis while
+learning is off changes nothing either — `annotation()` reports `enabled: false` and no `model_id` next to it.
+
+What is deliberately *not* off is the collection.  Every injection is written to the `learning.stream_key` stream
+with its features, and every settled verdict is written with its label, whether or not anything will ever read
+them.  A model can be fitted in an afternoon once the records exist; the records only exist if they were written
+while the traffic was happening, and that is the part that cannot be recovered afterwards.  Collecting with
+learning off is therefore the recommended first step: it costs one bounded stream write per settled turn, changes
+no ranking — not the counters, not the order — and is the corpus the next phase trains on.  The collection has no
+switch of its own on purpose: `learning.stream_key` must name a stream, and the only way to stop writing it is to
+stop running the plugin.
 
 ### What is learned, and where
 

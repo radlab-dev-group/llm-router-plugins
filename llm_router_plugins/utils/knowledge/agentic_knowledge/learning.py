@@ -1537,10 +1537,19 @@ class LearningPolicy:
         """
         The multiplier and the reasons for it.
 
-        Returns ``(1.0, {"reason": "disabled"})`` in every case where the layer
-        should behave as it does today, and the composition otherwise.  The
-        second value exists for the annotation: "why was this recipe first" has
-        to be answerable from the response, not from a log nobody kept.
+        Returns ``(1.0, {"reason": "disabled"})`` on a switched-off policy and
+        the composition otherwise.  The second value exists for the annotation:
+        "why was this recipe first" has to be answerable from the response, not
+        from a log nobody kept.
+
+        ``1.0`` here means "nothing of mine moved this", which is right for a
+        caller that multiplies nothing else.  It is **not** what the read path
+        relies on: the assembler does not ask this method at all while the
+        switch is off, because the vote it is replacing already carries the
+        static counter multiplier, and a disabled learner must leave that
+        counter in place rather than overwrite it with a one.  Anything that
+        consults a policy directly has to make the same difference — read
+        :attr:`enabled` first, and treat a disabled policy as absent.
         """
         cfg = self._config
         if not cfg.enabled:

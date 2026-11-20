@@ -716,6 +716,71 @@ def test_feedback_downvotes_sink_a_recipe():
     assert untouched == 1.0
 
 
+def test_a_disabled_learner_leaves_the_counters_in_charge():
+    """"Off" is not "1.0": a switched-off learner must not outvote the counters.
+
+    The vote a learner replaces already carries the static multiplier of the
+    feedback counters, so a disabled policy that answered `1.0` would still be
+    steering — a downvoted recipe would recover its full score because a policy
+    that is meant to be absent said so.  The read path therefore checks the
+    switch and treats a disabled policy as no learner at all, while still
+    recording the features: the exposure log of a disabled deployment is the
+    corpus the first model is fitted on.
+    """
+    class DisabledLearner:
+        enabled = False
+
+        def multiplier_for(self, features, document_name="", scope=""):
+            raise AssertionError("a disabled learner must never be consulted")
+
+    feedback = {
+        "recipe:20260101:bad": {"upvotes": 0, "downvotes": 4},
+        "recipe:20260101:good": {"upvotes": 3, "downvotes": 0},
+    }
+    from agentic_knowledge_support import StoreHit
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+        build_document_text,
+    )
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.sse import (
+        STATUS_OK,
+        SearchResult,
+    )
+
+    def named(document_name):
+        body = build_document_text("recipe", "a verified fix", date=datetime.date.today())
+        found = StoreHit(
+            collection="agentic_kb_webapp",
+            document_name=document_name,
+            text=body,
+            score=0.8,
+            score_normalized=0.8,
+        )
+        return SearchResult(STATUS_OK, hits=(found,))
+
+    results = [(named("recipe:20260101:bad"), ("recipe",)),
+               (named("recipe:20260101:good"), ("recipe",))]
+    policy = knowledge_config().modes["debug"]
+
+    silent = ContextAssembler().assemble(results, policy)
+    counters = ContextAssembler(feedback=feedback).assemble(results, policy)
+    learner = ContextAssembler(
+        feedback=feedback, learning=DisabledLearner(), scope="repo"
+    )
+    off = learner.assemble(results, policy)
+
+    # Not vacuous: the counters do move the votes, and the order follows.
+    assert [hit.weight for hit in counters.hits] != [
+        hit.weight for hit in silent.hits
+    ]
+    # And a disabled learner moves nothing at all, on the way back to the
+    # counters — not to a flat 1.0.
+    assert [hit.weight for hit in off.hits] == [hit.weight for hit in counters.hits]
+    assert set(learner.candidate_features) == {
+        "recipe:20260101:bad",
+        "recipe:20260101:good",
+    }
+
+
 def test_the_reranker_scale_is_trusted_when_normalized():
     """A normalized cross-encoder score is used as is, not sigmoid-squashed."""
     config = knowledge_config()
