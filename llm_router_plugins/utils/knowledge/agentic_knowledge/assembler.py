@@ -180,6 +180,15 @@ class KnowledgeHit:
         search, ``reranker`` under a cross-encoder, ``cosine`` for a
         vector-only run — so a threshold read against the score knows
         what the number means.  ``""`` when the answer did not state it.
+    learning : Dict[str, Any]
+        What the learner said about this one candidate, when it said anything:
+        the multiplier it applied, the reasons for it, the model it read, and
+        whether the read was an exploration.  ``{}`` when the learner had no
+        say, which is the common case — no learner, no scope, or a policy
+        switched off — and the only reason a field exists at all on a hit
+        that never asked one.  The response must answer "why was this recipe
+        first" per candidate, not per request, so the reasons travel with the
+        candidate rather than living in a log nobody kept.
     """
 
     category: str = ""
@@ -197,6 +206,7 @@ class KnowledgeHit:
     signature_hash: str = ""
     test_command: str = ""
     score_scale: str = ""
+    learning: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -288,8 +298,12 @@ class ContextAssembler:
     #: The learned multiplier of the layer, when the deployment runs one.  It
     #: answers ``multiplier_for(features, document_name, scope)`` and is asked
     #: only for candidates the ranking actually reaches; ``None`` — or a policy
-    #: that is switched off — leaves every multiplier ``1.0`` and the vote is
-    #: the one this file computed before the learner existed.
+    #: that is switched off — leaves every multiplier ``0.0``, and a ``0.0``
+    #: means "the learner has no say": the vote is then the one this file
+    #: computed before the learner existed, static counters and all.  A
+    #: switched-off policy must not answer ``1.0``, because ``1.0`` is a vote,
+    #: and a vote of exactly one is how a disabled layer would still silence
+    #: the counters it used to read.
     learning: Optional[Any] = None
     #: Repository the block is assembled for; the key the model snapshot lives
     #: under.  Empty means no learner can be consulted, which is the same as
@@ -488,7 +502,7 @@ class ContextAssembler:
                 except OverflowError:
                     base = 0.0 if base < 0 else 1.0
         weight = weights.get(kind, min(weights.values()) if weights else 1.0)
-        learned = self._learning_multiplier(
+        learned, learning_detail = self._learning_multiplier(
             hit=hit,
             meta=meta,
             kind=kind,
@@ -499,9 +513,12 @@ class ContextAssembler:
             mode=mode,
         )
         # The learner's reputation and the counter below are two readings of
-        # the same evidence, so only one of them ever weighs a vote: with a
-        # learner attached the counters stop multiplying, which is what keeps
-        # the influence of feedback inside the range the policy names.
+        # the same evidence, so only one of them ever weighs a vote: with an
+        # enabled learner the counters stop multiplying, which is what keeps
+        # the influence of feedback inside the range the policy names.  A
+        # learner that answers ``0.0`` — switched off, or failed to read —
+        # has no say at all, and the counters weigh the vote as they did
+        # before the learner existed.
         feedback_mult = (
             1.0 if learned > 0.0 else self._feedback_multiplier(hit.document_name)
         )
@@ -525,6 +542,7 @@ class ContextAssembler:
                 signature_hash=meta.signature_hash,
                 test_command=meta.test_command,
                 score_scale=scale,
+                learning=dict(learning_detail or {}),
             ),
             meta=meta,
             vote=vote,
@@ -641,21 +659,30 @@ class ContextAssembler:
         rank: int,
         body: str,
         mode: str = "",
-    ) -> float:
+    ) -> Tuple[float, Dict[str, Any]]:
         """
         Ask the learner what this candidate is worth, and remember what it asked.
 
-        Returns ``0.0`` when there is nothing to ask — no learner, no scope, a
-        learner switched off, or a learner that raised — and the caller then
-        weighs the candidate exactly as it did before the learner existed.  The
-        features are recorded whether or not the answer moved anything, because
-        an injection whose exposure was never logged cannot be credited or
-        blamed a turn later, and the log is the one part of this that cannot be
-        reconstructed afterwards.
+        Returns ``(0.0, {})`` when the learner has no say — no learner, no
+        scope, a policy switched off, or a learner that raised — and the
+        caller then weighs the candidate exactly as it did before the learner
+        existed, static counters included.  ``0.0`` means "not the learner's
+        vote", never "a vote of one", and that distinction is what keeps a
+        disabled deployment from silently substituting a multiplier of exactly
+        one for the counters it used to read.  The second value is the
+        learner's own account of the number — the reasons, the model it read,
+        the exploration flag — which the candidate carries on
+        :attr:`KnowledgeHit.learning` so the response can answer why this one
+        ranked where it did.  The features are recorded whatever the answer
+        was, including from a switched-off policy: an injection whose exposure
+        was never logged cannot be credited or blamed a turn later, and the
+        log is the one part of this that cannot be reconstructed afterwards —
+        collecting while learning is off is how the first corpus comes to
+        exist at all.
         """
         learner = self.learning
         if learner is None or not self.scope or not hit.document_name:
-            return 0.0
+            return 0.0, {}
         features = self._features(
             meta=meta,
             kind=kind,
@@ -666,16 +693,18 @@ class ContextAssembler:
             mode=mode,
             document_name=hit.document_name,
         )
+        self.candidate_features[hit.document_name] = features
+        if not getattr(learner, "enabled", True):
+            return 0.0, {}
         try:
-            multiplier, _ = learner.multiplier_for(
+            multiplier, detail = learner.multiplier_for(
                 features, document_name=hit.document_name, scope=self.scope
             )
         except Exception:  # a learner is never a reason to fail a read
-            return 0.0
+            return 0.0, {}
         if not multiplier or multiplier <= 0.0:
-            return 0.0
-        self.candidate_features[hit.document_name] = features
-        return float(multiplier)
+            return 0.0, dict(detail or {})
+        return float(multiplier), dict(detail or {})
 
     def _features(
         self,

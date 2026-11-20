@@ -16,13 +16,19 @@ from agentic_knowledge_support import knowledge_config
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
 )
-from llm_router_plugins.cli.plugins.utils.agentic_knowledge.learner import Learner
+from llm_router_plugins.cli.plugins.utils.agentic_knowledge.learner import (
+    Learner,
+    _scope_view,
+)
 from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
     LabelStore,
     CandidateFeatures,
     FeedbackSample,
     LearningConfig as LearningConfig,
     LearningPolicy,
+    publish_snapshot,
+    rollback_snapshot,
+    snapshot_history,
     train_ranker,
 )
 
@@ -351,3 +357,151 @@ class TestLearnerCursor:
         assert report.get("samples", 0) >= 300
         # Only the 150 positive labels + the 1 new = 151 are labelled.
         assert report.get("labelled", 0) >= 151
+
+
+# ------------------------------------------------------ history and rollback --
+def _two_snapshots(client, config, seeds=(11, 12), counts=(30, 50)):
+    """Two accepted fits of one scope, the second replacing the first."""
+    built = []
+    for seed, count in zip(seeds, counts):
+        snapshot = train_ranker(
+            _corpus(count, seed),
+            "repo",
+            config=config,
+            rng=random.Random(seed),
+            now=float(seed),
+        )
+        publish_snapshot(client, snapshot[0], key_prefix=config.key_prefix)
+        built.append(snapshot[0])
+    return built
+
+
+def _corpus(count, seed):
+    """A labelled corpus with enough of a signal to pass the gates."""
+    rows = []
+    rng = random.Random(seed)
+    for index in range(count):
+        matched = rng.random() < 0.5
+        rows.append(
+            FeedbackSample(
+                scope="repo",
+                session_id=f"s{index % 4}",
+                generation=f"g{index}",
+                document_name=f"recipe:20260101:{index:05d}",
+                features=CandidateFeatures(
+                    kind="recipe",
+                    mode="debug",
+                    score=rng.random(),
+                    score_scale="cosine",
+                    signature_match=matched,
+                    rank=index % 5,
+                ),
+                label=1.0 if matched else -1.0,
+            )
+        )
+    return rows
+
+
+def test_history_view_reports_the_live_and_the_retired():
+    client = FakeRedis()
+    config = learning_config(enabled=True)
+    first, second = _two_snapshots(client, config)
+    namespace = AgenticKnowledgeConfig(key_prefix="agentic-kb")
+    namespace.learning = config
+
+    import argparse
+
+    args = argparse.Namespace(
+        history=True, rollback=None, scope="repo", config=namespace
+    )
+    learner = Learner(config=namespace, client=client)
+
+    import io as _io
+    from contextlib import redirect_stdout
+
+    buffer = _io.StringIO()
+    with redirect_stdout(buffer):
+        assert _scope_view(namespace, client, learner, args, None) == 0
+    view = json.loads(buffer.getvalue())
+    assert view["live"]["model_id"] == second.model_id
+    assert [row["model_id"] for row in view["history"]] == [first.model_id]
+
+
+def test_rollback_view_moves_a_retired_snapshot_back_in_force():
+    client = FakeRedis()
+    config = learning_config(enabled=True)
+    first, second = _two_snapshots(client, config)
+    namespace = AgenticKnowledgeConfig(key_prefix="agentic-kb")
+    namespace.learning = config
+
+    import argparse
+
+    args = argparse.Namespace(
+        history=False, rollback=first.model_id, scope="repo", config=namespace
+    )
+    learner = Learner(config=namespace, client=client)
+
+    import io as _io
+    from contextlib import redirect_stdout
+
+    buffer = _io.StringIO()
+    with redirect_stdout(buffer):
+        assert _scope_view(namespace, client, learner, args, None) == 0
+    assert json.loads(buffer.getvalue())["rolled_back_to"] == first.model_id
+    # The live key carries the asked model, and the displaced one is retired
+    # in its place, so the rollback is itself reversible.
+    assert (
+        json.loads(client.get("agentic-kb:model:repo"))["model_id"] == first.model_id
+    )
+    assert [row["model_id"] for row in snapshot_history(client, "repo")] == [
+        second.model_id
+    ]
+
+
+def test_rollback_view_refuses_a_scope_it_does_not_carry():
+    client = FakeRedis()
+    config = learning_config(enabled=True)
+    _two_snapshots(client, config)
+    namespace = AgenticKnowledgeConfig(key_prefix="agentic-kb")
+    namespace.learning = config
+
+    import argparse
+    import logging
+
+    args = argparse.Namespace(
+        history=False, rollback="nope:0:0:0.000", scope="repo", config=namespace
+    )
+    learner = Learner(config=namespace, client=client)
+    logger = logging.getLogger("rollback-test")
+    import io as _io
+    from contextlib import redirect_stdout
+
+    with redirect_stdout(_io.StringIO()):
+        assert _scope_view(namespace, client, learner, args, logger) == 1
+    # Nothing moved: the live key is the second fit still.
+    assert (
+        json.loads(client.get("agentic-kb:model:repo"))["model_id"]
+        == "repo:12:50:1.000"
+    )
+
+
+def test_rollback_without_a_scope_on_one_scope_is_the_only_scope():
+    client = FakeRedis()
+    config = learning_config(enabled=True)
+    first, second = _two_snapshots(client, config)
+    namespace = AgenticKnowledgeConfig(key_prefix="agentic-kb")
+    namespace.learning = config
+
+    # The history view needs a scan; the fake has no SCAN, which is the
+    # "no scopes known" case and sends the operator to pass --scope.
+    import argparse
+    import logging
+    import io as _io
+    from contextlib import redirect_stdout
+
+    args = argparse.Namespace(
+        history=False, rollback=first.model_id, scope=None, config=namespace
+    )
+    learner = Learner(config=namespace, client=client)
+    with redirect_stdout(_io.StringIO()):
+        assert _scope_view(namespace, client, learner, args, logging.getLogger()) == 1

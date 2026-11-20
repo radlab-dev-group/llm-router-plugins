@@ -201,6 +201,58 @@ def test_the_annotation_names_the_model_that_served_the_request():
     assert feedback["source"] == "redis"
 
 
+def test_the_annotation_names_the_multiplier_of_each_candidate():
+    """Why one recipe ranked above a stronger one is answerable per candidate.
+
+    The request annotation carries the learner's account of each hit it
+    weighed: the multiplier it applied, the model it read, and whether the
+    read was an exploration.  A candidate the learner did not touch — no
+    learner, no scope, or a policy off — carries no entry, and a disabled
+    policy carries none for every candidate, because it has no vote to
+    explain.
+    """
+    import random
+
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        publish_snapshot,
+        train_ranker,
+    )
+    from test_agentic_knowledge_learning import corpus
+
+    client = FakeRedis()
+    plugin = make_learning_plugin(
+        client, enabled=True, hits=(store_hit("recipe", score=0.9),)
+    )
+    # Fit and publish a model with real signal, so the annotation has a
+    # model to name.
+    snapshot, _ = train_ranker(
+        corpus(300, signal=True, seed=11),
+        "webapp",
+        config=plugin._config.learning,
+        rng=random.Random(11),
+    )
+    publish_snapshot(client, snapshot, key_prefix=plugin._config.learning.key_prefix)
+    payload = plugin.apply(main_payload(turn_id="turn-1", root_turn_id="gen-1"))
+    learning = payload["routing"]["knowledge"]["learning"]
+    assert learning["model_id"] == snapshot.model_id
+    assert learning["labelled"] == 300
+    # The hits this block injected are weighed by the learner, and the
+    # annotation says so per candidate: the multiplier the vote carried, the
+    # model that produced it, and whether the read was an exploration.
+    hits = {
+        name: detail for name, detail in (learning.get("candidates") or {}).items()
+    }
+    assert hits, "the candidate the learner weighed is not named in the annotation"
+    for name, detail in hits.items():
+        assert name.startswith("recipe:")
+        # The multiplier the candidate's vote actually carries, within the
+        # policy's range, with the reasons for it.
+        assert 0.3 <= float(detail["mult"]) <= 1.5
+        assert detail["reason"] in ("learned", "reputation")
+        assert detail["model_id"] == snapshot.model_id
+        assert "explore" in detail
+
+
 def test_a_disabled_learning_section_is_the_layer_it_always_was():
     client = FakeRedis()
     plugin = make_learning_plugin(

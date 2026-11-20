@@ -888,6 +888,7 @@ llm-router-agentic-kb-stats --scope webapp                       # today, one re
 llm-router-agentic-kb-stats --scope webapp --days 7              # a week, oldest day first
 llm-router-agentic-kb-stats --path /repo/webapp --json           # scope derived as the proxy derives it
 llm-router-agentic-kb-stats --scope webapp --scope other         # several repositories in one pass
+llm-router-agentic-kb-stats --scope webapp --learning            # + the learned state of the scope
 ```
 
 Reads the scoreboard the proxy wrote and prints the counters and the rates
@@ -911,6 +912,9 @@ llm-router-agentic-kb-learner --max-records 50000      # cap one pass's work
 llm-router-agentic-kb-learner --window 20000           # keep the last 20k labels per scope
 llm-router-agentic-kb-learner --reset-cursor           # ignore the saved cursor, start at the head
 llm-router-agentic-kb-learner --show                   # print each touched scope's weight vector
+llm-router-agentic-kb-learner --arms                   # the bandit's value per (mode, source kind)
+llm-router-agentic-kb-learner --history --scope webapp # the live model and what a rollback could reach
+llm-router-agentic-kb-learner --rollback webapp:1763347200:1412:0.710 --scope webapp
 ```
 
 The offline half of [Learning (opt-in)](#learning-opt-in): it reads the training stream, fits
@@ -924,6 +928,30 @@ are two different sentences an operator can tell apart.  It needs Redis and noth
 engine, no embedder, no reranker, and it can run on a machine that cannot reach either.  It is
 not a daemon: a pass is a pass, which is what makes `cron` the natural supervisor, and a scope
 is only worth refitting when enough labels have changed to move the fit.
+
+`--history` prints the snapshot in force and the ones the last publishes retired, newest first, with
+each row's `model_id`, holdout AUC and sample count.  `--rollback` copies one of them back to the
+live key and retires what it displaces, so a rollback is itself reversible; an id that is not in that
+history is refused, because a rollback to a model nobody fitted is a fresh publish wearing a
+disguise.
+
+### Tuning command
+
+```bash
+llm-router-agentic-kb-tune --dataset eval.json --lambda 0.001 --precision-floor 0.8
+llm-router-agentic-kb-tune --dataset eval.json \
+  --min-similarity 0.25 0.35 0.45 --strong-recipe-score 0.5 0.6 0.7 \
+  --loop-threshold 2 3 4 --weight-factor 0.8 1.0 1.2 \
+  --weight-category recipe --per-category-factors --output tune-report/
+```
+
+The search over the policy's own numbers: it replays every point of the grid the operator names and
+reports the point maximizing `recipe_hit_rate - lambda * injected_chars_per_turn` under the
+constraint `escalation_precision >= --precision-floor`, with the deltas against the shipped policy
+on the same sessions.  It writes a JSON report and a markdown justification, and **never** the
+policy: the file is the operator's to change, and a tune that edited the policy it measured has
+already answered its own question.  A point below the precision floor is reported with the reason
+and not selected.
 
 ---
 
@@ -992,14 +1020,22 @@ document nobody has judged, the range a verdict may move a vote through, the con
 shared file earn, and the weight of a source in a mode.  Those numbers can be *estimated* instead, and the
 `learning` section of the policy does the estimating without ever touching a request.
 
-**Off by default, and "off" is not "empty".**  With `learning.enabled: false` — the shipped default — every
-multiplier is `1.0` and the layer behaves exactly as it did before this section existed.  What is *not* off is the
-training log: every injection is written to the `learning.stream_key` stream with its features, and every settled
-verdict is written with its label, whether or not anything will ever read them.  A model can be fitted in an
-afternoon once the records exist; the records only exist if they were written while the traffic was happening, and
-that is the part that cannot be recovered afterwards.  Collecting with learning off is therefore the recommended
-first step: it costs one bounded stream write per settled turn, changes no ranking, and is the corpus the next
-phase trains on.
+**Off by default, and "off" means off.**  With `learning.enabled: false` — the shipped default — the learner has no
+vote at all: it is not consulted for a ranking, its snapshot is not read, and the layer ranks exactly as it did
+before this section existed, **static feedback counters included**.  That last part is the whole point of the
+switch.  A disabled learner that answered with a multiplier of `1.0` would still be steering, because the vote it
+replaces already carries the counter multiplier of `0.3 … 1.5`; so the read path checks the switch first and a
+disabled policy is treated as absent, not as neutral.  A snapshot that happens to be sitting in Redis while
+learning is off changes nothing either — `annotation()` reports `enabled: false` and no `model_id` next to it.
+
+What is deliberately *not* off is the collection.  Every injection is written to the `learning.stream_key` stream
+with its features, and every settled verdict is written with its label, whether or not anything will ever read
+them.  A model can be fitted in an afternoon once the records exist; the records only exist if they were written
+while the traffic was happening, and that is the part that cannot be recovered afterwards.  Collecting with
+learning off is therefore the recommended first step: it costs one bounded stream write per settled turn, changes
+no ranking — not the counters, not the order — and is the corpus the next phase trains on.  The collection has no
+switch of its own on purpose: `learning.stream_key` must name a stream, and the only way to stop writing it is to
+stop running the plugin.
 
 ### What is learned, and where
 
@@ -1065,12 +1101,23 @@ Next to the rest of the plugin state, under `learning.key_prefix` (the policy's 
 | `{prefix}:rep:{doc}` | one document's posterior (`a`, `b`, `e`, `t`), TTL of four half-lives |
 | `{prefix}:arms` | the per-`(mode, kind)` source posteriors |
 | `{prefix}:model:{scope}` | one scope's published snapshot: weights, the Laplace diagonal, `model_id`, `trained_at`, `samples`, `holdout_auc` |
+| `{prefix}:model_history:{scope}` | the snapshots that fit retired, newest first, capped at `learning.snapshot_history_size` |
 
 A document's state is written on every verdict and read on every ranking; a snapshot is written by the learner and
 read with one `GET` per scope per `model_ttl_seconds`.  A Redis that is not configured keeps all of it in process
 memory — the same degradation the generation cache already accepts — and a Redis that answers with an error is
 caught by every one of these reads, which then serve the in-memory state they kept writing.  The learner itself
 needs Redis: without it there is no stream to drain, and it says so instead of fitting on nothing.
+
+A publish retires the snapshot it replaces into the history, newest first, capped at
+`learning.snapshot_history_size` (8 by default; 0 keeps only the live key).  A rollback is a copy from that
+history to the live key with the live model retired in its place, so rolling back is itself reversible, and an id
+that is not in the history is refused: a rollback to a model nobody fitted is a fresh publish wearing a disguise.
+
+```bash
+llm-router-agentic-kb-learner --history --scope webapp     # the live model and what it could go back to
+llm-router-agentic-kb-learner --rollback webapp:1763347200:1412:0.710 --scope webapp
+```
 
 ### Switching it on
 
