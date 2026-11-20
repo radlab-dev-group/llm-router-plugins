@@ -86,6 +86,13 @@ release tagged as `v<version>`.
   `--window` bounds the corpus per scope, `--reset-cursor` starts at the head of the stream,
   and `--show` prints the weight vector of every touched scope.
 ### Fixed
+- **The first verdict of a freshly booted process is no longer held back.** The rate-limit
+  of the feedback push compared `time.monotonic()` against a "never pushed" sentinel of
+  `0.0`, but the clock has no fixed origin: on a machine whose uptime is below the interval
+  — a runner, a container, a proxy restarted in the first hour — the sentinel reads as
+  "pushed a moment ago", and every settled verdict of that boot was gated away silently.
+  "Never" is `None` now, and the interval counts from the push that actually reached the
+  engine.
 - **A timeout the operator set is the timeout the layer uses.** Both `read.sse_timeout_seconds`
   (`…_SSE_API_TIMEOUT`) and `read.timeout_seconds` (`…_READ_TIMEOUT_SECONDS`) were clamped to a
   hard 10 s, silently: a deployment that set `40` waited 10 and read the failure as a broken

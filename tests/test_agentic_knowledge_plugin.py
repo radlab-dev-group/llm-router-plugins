@@ -752,18 +752,27 @@ def test_one_request_spends_one_budget_across_all_its_sources():
     transport timeout once per source.  The plugin starts the budget before the
     loop and hands every search the same deadline, which is what makes
     ``read_timeout_seconds`` the number a request waits.
+
+    The deadline is pinned between the moments on either side of the request
+    rather than against the clock left over when the request returns: how much
+    of the budget a runner happens to have spent is a property of the machine,
+    and a shared CI runner spends seconds there for reasons no code can fix.
     """
     import time
 
     config = knowledge_config()
     store = FakeStore()
     plugin = make_plugin(config, store=store)
+    started = time.monotonic()
     plugin.apply(main_payload(mode="implement"))
+    returned = time.monotonic()
     deadlines = store.deadlines
     assert deadlines, "the read path must search at least one source"
     assert len({round(d, 3) for d in deadlines}) == 1
-    headroom = deadlines[0] - time.monotonic()
-    assert 0 < headroom <= config.read_timeout_seconds
+    # The one deadline is the budget counted from somewhere inside this
+    # request: not from an earlier request's start, and not one call per source.
+    assert started + config.read_timeout_seconds <= deadlines[0]
+    assert deadlines[0] <= returned + config.read_timeout_seconds
 
 
 def test_the_budget_a_request_waits_is_at_least_one_call():
@@ -1363,6 +1372,37 @@ def test_the_push_is_rate_limited_to_the_policy_interval():
     # The next settled verdict of the same generation does not push again.
     _two_turns_that_credit(plugin)
     assert len(store.quality_pushes) == first
+
+
+def test_the_first_push_is_not_gated_by_the_clocks_origin(monkeypatch):
+    """A process whose monotonic clock starts below the interval still pushes.
+
+    ``time.monotonic`` has no fixed origin: on a freshly booted runner it is
+    the uptime, and a long interval outgrows it.  A "never pushed" sentinel of
+    ``0.0`` then reads as "pushed a moment ago", and the first verdict of every
+    boot is held back until the clock climbs above the interval — which, on a
+    runner that lives only a few minutes, never happens before the job ends.
+    """
+    import time
+
+    import llm_router_plugins.utils.knowledge.agentic_knowledge.plugin as plugin_module
+
+    real = time.monotonic
+    origin = real()
+
+    def clock_at_boot():
+        # Ninety seconds of uptime, far below the interval the test asks for.
+        return 90.0 + (real() - origin)
+
+    monkeypatch.setattr(plugin_module.time, "monotonic", clock_at_boot)
+    config = knowledge_config(feedback_push_interval_seconds=3600)
+    store = FakeStore(hits=(store_hit("recipe", score=0.9),))
+    plugin = make_plugin(config, store=store)
+    _two_turns_that_credit(plugin)
+    assert store.quality_pushes, (
+        "the first push of a freshly booted process was gated away by the "
+        "clock's origin"
+    )
 
 
 def test_the_request_path_does_not_wait_on_the_push():
