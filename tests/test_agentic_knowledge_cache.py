@@ -340,6 +340,118 @@ def test_feedback_tracker_reads_redis_when_local_is_empty():
     }
 
 
+def test_all_feedback_reads_the_shared_store_not_the_process_memory():
+    """The ranker must see the workers' verdicts together, not one process'."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
+        FeedbackTracker,
+    )
+
+    class _ScanClient(_FakeHashClient):
+        def __init__(self):
+            super().__init__()
+            self.scans = []
+
+        def scan_iter(self, match=None, count=None):
+            self.scans.append((match, count))
+            import fnmatch
+
+            for key in sorted(self.hashes):
+                if match is None or fnmatch.fnmatchcase(key, match):
+                    yield key
+
+    client = _ScanClient()
+    # The verdicts of the other workers, counted while this process slept.
+    client.hashes["agentic-kb:fb:recipe:20260101:theirs"] = {
+        "upvotes": "7",
+        "downvotes": "2",
+    }
+    tracker = FeedbackTracker(client=client, key_prefix="agentic-kb")
+    tracker.record_feedback("recipe:20260101:mine", success=True)
+    # The shared store has the other workers' name, not this one's yet; the
+    # answer must carry both, and the read must have been a SCAN of the
+    # feedback namespace, not a per-document guess.
+    all_feedback = tracker.all_feedback()
+    assert all_feedback["recipe:20260101:theirs"] == {
+        "upvotes": 7,
+        "downvotes": 2,
+    }
+    assert all_feedback["recipe:20260101:mine"] == {"upvotes": 1, "downvotes": 0}
+    assert client.scans and client.scans[0][0] == "agentic-kb:fb:*"
+
+
+def test_all_feedback_trusts_a_shared_read_for_the_ttl():
+    """One keyspace walk per generation, not one per request of it."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
+        FeedbackTracker,
+    )
+
+    class _ScanClient(_FakeHashClient):
+        def __init__(self):
+            super().__init__()
+            self.scans = 0
+
+        def scan_iter(self, match=None, count=None):
+            self.scans += 1
+            import fnmatch
+
+            for key in sorted(self.hashes):
+                if match is None or fnmatch.fnmatchcase(key, match):
+                    yield key
+
+    client = _ScanClient()
+    client.hashes["agentic-kb:fb:recipe:20260101:shared"] = {
+        "upvotes": "3",
+        "downvotes": "1",
+    }
+    tracker = FeedbackTracker(client=client, key_prefix="agentic-kb")
+    tracker.all_feedback()
+    tracker.all_feedback()
+    tracker.all_feedback()
+    assert client.scans == 1
+
+
+def test_all_feedback_retries_when_the_shared_store_comes_back():
+    """A failed shared read is not cached; the next request reads again."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
+        FeedbackTracker,
+    )
+
+    class _ScanClient(_FakeHashClient):
+        def __init__(self):
+            super().__init__()
+            self.down = True
+            self.scans = 0
+
+        def scan_iter(self, match=None, count=None):
+            self.scans += 1
+            if self.down:
+                raise RuntimeError("down")
+            import fnmatch
+
+            for key in sorted(self.hashes):
+                if match is None or fnmatch.fnmatchcase(key, match):
+                    yield key
+
+    client = _ScanClient()
+    client.hashes["agentic-kb:fb:recipe:20260101:shared"] = {
+        "upvotes": "4",
+        "downvotes": "0",
+    }
+    tracker = FeedbackTracker(client=client, key_prefix="agentic-kb")
+    tracker.record_feedback("recipe:20260101:mine", success=False)
+    # Redis is down: the local verdict is the answer, and it must not be an
+    # empty one.
+    first = tracker.all_feedback()
+    assert first["recipe:20260101:mine"] == {"upvotes": 0, "downvotes": 1}
+    assert "recipe:20260101:shared" not in first
+    # It is back: the same process now sees the shared total too.
+    client.down = False
+    second = tracker.all_feedback()
+    assert second["recipe:20260101:shared"] == {"upvotes": 4, "downvotes": 0}
+    assert second["recipe:20260101:mine"] == {"upvotes": 0, "downvotes": 1}
+    assert client.scans == 2
+
+
 def test_a_broken_client_fails_open():
     from llm_router_plugins.utils.knowledge.agentic_knowledge.cache import (
         FeedbackTracker,

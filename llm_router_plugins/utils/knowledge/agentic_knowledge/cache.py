@@ -407,6 +407,12 @@ class FeedbackTracker:
         self._key_prefix = key_prefix
         self._local: Dict[str, Dict[str, int]] = {}
         self._collections: Dict[str, str] = {}
+        #: The last shared read, and what it is trusted for; the local verdicts
+        #: are never cached, they are re-read, because they are the only state
+        #: a process without a shared store has.
+        self._all_feedback_at: Optional[float] = None
+        self._all_feedback_cache: Dict[str, Dict[str, int]] = {}
+        self._all_feedback_source: str = ""
         #: Names this process has touched since they were last pushed; a push
         #: that the engine refused keeps them for the next attempt, so the
         #: set is bounded.
@@ -488,6 +494,11 @@ class FeedbackTracker:
             for name in names:
                 self._touched.pop(name, None)
 
+    #: How long the shared verdicts are trusted from one read; the counters
+    #: change a few times a generation, and re-scanning a namespace per
+    #: request would turn a multiplier lookup into a keyspace walk.
+    ALL_FEEDBACK_TTL_SECONDS = 5.0
+
     # ---------------------------------------------------------------- totals -
     def get_feedback(self, doc_name: str) -> Dict[str, int]:
         """
@@ -517,9 +528,88 @@ class FeedbackTracker:
         return {"upvotes": 0, "downvotes": 0}
 
     def all_feedback(self) -> Dict[str, Dict[str, int]]:
-        """The verdicts this process recorded, for the ranker's multiplier."""
+        """
+        Every verdict the deployment has recorded, for the ranker's multiplier.
+
+        The ranker weighs a vote by what the counters have counted *together*,
+        so the answer must be the shared total when there is one: Redis holds
+        the verdicts of every worker on a name, and a process memory alone
+        would let each worker rank the same recipe differently.  The shared
+        hashes are read through a ``SCAN`` of the feedback namespace in one
+        pass, and the answer is trusted for :data:`ALL_FEEDBACK_TTL_SECONDS` —
+        the counters change a few times a generation, and a vote of one
+        request must not pay a keyspace walk when the last request of the same
+        generation already took one.  Without Redis the process memory is all
+        there is, and a shared read that fails falls back to it rather than to
+        an empty answer; the local verdicts are re-read on every call, because
+        they are the only state a process without a shared store has.
+        """
         with self._lock:
-            return {k: dict(v) for k, v in self._local.items()}
+            local = {k: dict(v) for k, v in self._local.items()}
+            now = time.monotonic()
+            if (
+                self._all_feedback_source == "redis"
+                and self._all_feedback_at is not None
+                and now - self._all_feedback_at < self.ALL_FEEDBACK_TTL_SECONDS
+            ):
+                return {
+                    k: dict(v) for k, v in self._all_feedback_cache.items()
+                }
+        client = self._redis_client()
+        if client is not None:
+            try:
+                shared = self._shared_feedback(client)
+            except Exception:
+                # A shared read that fails is treated like a shared store that
+                # is not there.  The failure is not cached, so the next request
+                # of the same generation retries, and a deployment whose Redis
+                # is down is not stuck with an empty answer for a whole TTL.
+                shared = None
+            if shared is not None:
+                with self._lock:
+                    self._all_feedback_at = now
+                    self._all_feedback_cache = {
+                        k: dict(v) for k, v in shared.items()
+                    }
+                    self._all_feedback_source = "redis"
+                return shared
+        return local
+
+    def _shared_feedback(
+        self, client: Any
+    ) -> Optional[Dict[str, Dict[str, int]]]:
+        """
+        The verdicts the workers recorded together, in one pass.
+
+        Returns ``None`` when the namespace cannot be read at all — not when
+        it is merely empty, because an empty namespace with no local verdicts
+        is still an answer, and a failed scan must not be mistaken for one.
+        """
+        pattern = f"{self._key_prefix}:fb:*"
+        keys: List[str] = []
+        for key in client.scan_iter(match=pattern, count=512):
+            keys.append(key)
+        if not keys:
+            return {}
+        out: Dict[str, Dict[str, int]] = {}
+        try:
+            pipe = client.pipeline()
+            for key in keys:
+                pipe.hgetall(key)
+            rows = pipe.execute()
+        except AttributeError:
+            rows = [client.hgetall(key) for key in keys]
+        except Exception:
+            rows = [client.hgetall(key) for key in keys]
+        prefix = f"{self._key_prefix}:fb:"
+        for key, raw in zip(keys, rows):
+            if not raw:
+                continue
+            up = raw.get(b"upvotes") or raw.get("upvotes") or 0
+            down = raw.get(b"downvotes") or raw.get("downvotes") or 0
+            name = key[len(prefix):] if key.startswith(prefix) else key
+            out[name] = {"upvotes": int(up), "downvotes": int(down)}
+        return out
 
     def _redis_client(self) -> Any:
         """A Redis client for the shared counters; ``None`` when there is none."""
