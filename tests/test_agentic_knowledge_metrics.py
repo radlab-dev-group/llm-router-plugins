@@ -252,9 +252,14 @@ def test_the_reader_emits_json_for_a_dashboard(capsys):
     )
     assert code == 0
     emitted = json_module.loads(capsys.readouterr().out)
-    assert emitted[0]["turns"] == 3
+    row = emitted["scoreboard"][0]
+    assert row["turns"] == 3
     # a rate with nothing behind it stays null, not 0
-    assert emitted[0]["adoption_rate"] is None
+    assert row["adoption_rate"] is None
+    # without the flag there is no learned state, and the scoreboard stays a
+    # list of rows rather than a wrapper: a dashboard that predates the
+    # flag reads the same shape it always read.
+    assert "learning" not in emitted
 
 
 def test_a_window_of_days_is_read_oldest_first():
@@ -297,3 +302,260 @@ def _policy() -> str:
     path = pathlib.Path(directory) / "policy.json"
     path.write_text(json.dumps({"collection_prefix": "agentic_kb"}))
     return str(path)
+
+
+# ------------------------------------------------------------- learning ----
+class _LearnedStore:
+    """A client carrying the learned state of one scope, for the view."""
+
+    def __init__(self, prefix="agentic-kb", stream_rows=()):
+        self.kv = {}
+        self.hashes = {}
+        self.stream = list(stream_rows)
+
+    def get(self, key):
+        return self.kv.get(key)
+
+    def set(self, key, value, **_):
+        self.kv[key] = value
+        return True
+
+    def hset(self, key, *args, mapping=None, **_):
+        bucket = self.hashes.setdefault(key, {})
+        if mapping:
+            for name, payload in mapping.items():
+                bucket[name] = payload
+        return 1
+
+    def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
+
+    def hincrby(self, key, field, amount=1):
+        bucket = self.hashes.setdefault(key, {})
+        current = int(bucket.get(field, "0")) + int(amount)
+        bucket[field] = str(current)
+        return current
+
+    def expire(self, key, seconds):
+        return True
+
+    def xrange(self, key, min="-", max="+", count=0):
+        rows = list(self.stream)
+        return rows[:count] if count else rows
+
+
+def _policy_with_learning(**overrides) -> str:
+    """A policy file that carries a learning section, as the proxy ships it."""
+    import tempfile
+
+    learning = {"enabled": True, "min_samples": 4, "snapshot_history_size": 3}
+    learning.update(overrides)
+    directory = tempfile.mkdtemp()
+    path = pathlib.Path(directory) / "policy.json"
+    path.write_text(
+        json.dumps({"collection_prefix": "agentic_kb", "learning": learning})
+    )
+    return str(path)
+
+
+def test_the_learning_view_reports_what_is_serving_and_what_it_rests_on():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        publish_snapshot,
+        train_ranker,
+    )
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        AgenticKnowledgeConfig,
+    )
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge.stats import (
+        learning_view,
+    )
+
+    store = _LearnedStore()
+    config = AgenticKnowledgeConfig.from_file(pathlib.Path(_policy_with_learning()))
+    config.validate()
+    learning = config.learning
+
+    # Two fits of the scope, the second replacing the first, and a corpus the
+    # next fit would stand on.
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        FeedbackSample,
+        CandidateFeatures,
+        LabelStore,
+    )
+
+    samples = []
+    for index in range(12):
+        matched = index % 2 == 0
+        samples.append(
+            FeedbackSample(
+                scope="webapp",
+                session_id=f"s{index % 3}",
+                generation=f"g{index}",
+                document_name=f"recipe:20260101:{index:05d}",
+                features=CandidateFeatures(
+                    kind="recipe",
+                    mode="debug",
+                    score=0.5,
+                    score_scale="cosine",
+                    signature_match=matched,
+                    rank=index % 5,
+                ),
+                label=1.0 if matched else -1.0,
+            )
+        )
+    first, _ = train_ranker(
+        samples, "webapp", config=learning, rng=__import__("random").Random(1), now=100.0
+    )
+    publish_snapshot(store, first, key_prefix="agentic-kb")
+    second, _ = train_ranker(
+        samples, "webapp", config=learning, rng=__import__("random").Random(2), now=200.0
+    )
+    publish_snapshot(store, second, key_prefix="agentic-kb")
+    store_labels = LabelStore(client=store, key_prefix="agentic-kb")
+    store_labels.merge(samples)
+
+    view = learning_view("webapp", config, store)
+    assert view["enabled"] is True
+    # The model in force is the second fit, and it says what it rests on.
+    assert view["model"]["model_id"] == second.model_id
+    assert view["model"]["labelled"] == second.labelled
+    # The first fit is retired, in the history a rollback could reach.
+    assert view["history"]["count"] == 1
+    assert view["history"]["kept"] == 3
+    assert view["history"]["newest"] == [first.model_id]
+    # The corpus the next fit would stand on.
+    assert view["corpus"]["records"] == 12
+    assert view["corpus"]["labelled"] == 12
+
+
+def test_the_learning_view_reads_without_a_redis_as_saying_so():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        AgenticKnowledgeConfig,
+    )
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge.stats import (
+        learning_view,
+    )
+
+    config = AgenticKnowledgeConfig.from_file(
+        pathlib.Path(_policy_with_learning())
+    )
+    config.validate()
+    view = learning_view("webapp", config, None)
+    assert view["enabled"] is True
+    assert "no Redis" in view.get("note", "")
+    assert "model" not in view
+
+
+def test_the_learning_monitors_read_the_shape_of_the_log():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        AgenticKnowledgeConfig,
+    )
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge.stats import (
+        learning_view,
+    )
+
+    rows = []
+    # A document the layer has shown 60 times, and one it has shown twice:
+    # a self-reinforcing layer names the first one, and the monitor says so.
+    for index in range(60):
+        rows.append(
+            (
+                f"{index + 1}-0",
+                {
+                    "d": json.dumps(
+                        {
+                            "scope": "webapp",
+                            "session": f"s{index % 2}",
+                            "gen": f"g{index}",
+                            "doc": "recipe:20260101:heavy",
+                            "kind": "injection",
+                            "label": 0,
+                            "f": {"kind": "recipe", "mode": "debug"},
+                        }
+                    )
+                },
+            )
+        )
+    for index in range(2):
+        rows.append(
+            (
+                f"{100 + index}-0",
+                {
+                    "d": json.dumps(
+                        {
+                            "scope": "webapp",
+                            "session": f"s{index}",
+                            "gen": f"g{index}",
+                            "doc": "recipe:20260101:light",
+                            "kind": "injection",
+                            "label": 0,
+                            "f": {"kind": "recipe", "mode": "debug"},
+                        }
+                    )
+                },
+            )
+        )
+    # A row of another scope: the view is about this layer, not the log.
+    rows.append(
+        (
+            "200-0",
+            {
+                "d": json.dumps(
+                    {
+                        "scope": "other",
+                        "session": "s0",
+                        "gen": "g0",
+                        "doc": "recipe:20260101:elsewhere",
+                        "kind": "injection",
+                        "label": 0,
+                        "f": {"kind": "recipe", "mode": "debug"},
+                    }
+                )
+            },
+        )
+    )
+    store = _LearnedStore(stream_rows=rows)
+    config = AgenticKnowledgeConfig.from_file(
+        pathlib.Path(_policy_with_learning())
+    )
+    config.validate()
+    view = learning_view("webapp", config, store)
+    monitors = view["monitors"]
+    assert monitors["window"] == 62
+    assert monitors["docs"] == 2
+    # Half of the documents the log names are the heavy one.
+    assert monitors["docs_over_50_exposures"] == 0.5
+    assert monitors["heaviest"] == 60
+
+
+def test_the_reader_emits_the_learning_view_with_a_flag(capsys, monkeypatch):
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge.stats import (
+        main,
+    )
+
+    store = _LearnedStore()
+    monkeypatch.setattr(
+        "llm_router_plugins.cli.plugins.utils.agentic_knowledge.stats._redis_client",
+        lambda config: store,
+    )
+    row = _empty_row("webapp", "20261116")
+    reader = RecordingReader({("webapp", "20261116"): row})
+    code = main(
+        [
+            "--scope",
+            "webapp",
+            "--day",
+            "20261116",
+            "--json",
+            "--learning",
+            "--config",
+            _policy_with_learning(),
+        ],
+        metrics=reader,
+    )
+    assert code == 0
+    emitted = json.loads(capsys.readouterr().out)
+    assert "scoreboard" in emitted
+    learning = emitted["learning"][0]
+    assert learning["scope"] == "webapp"
+    assert learning["enabled"] is True

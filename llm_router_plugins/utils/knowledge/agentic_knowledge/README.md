@@ -888,6 +888,7 @@ llm-router-agentic-kb-stats --scope webapp                       # today, one re
 llm-router-agentic-kb-stats --scope webapp --days 7              # a week, oldest day first
 llm-router-agentic-kb-stats --path /repo/webapp --json           # scope derived as the proxy derives it
 llm-router-agentic-kb-stats --scope webapp --scope other         # several repositories in one pass
+llm-router-agentic-kb-stats --scope webapp --learning            # + the learned state of the scope
 ```
 
 Reads the scoreboard the proxy wrote and prints the counters and the rates
