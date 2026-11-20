@@ -1389,8 +1389,20 @@ class AgenticKnowledgePlugin(PluginInterface):
         if self._learning is not None:
             # Why a recipe was first must be answerable from the response, not
             # from a log nobody kept: the model that served this request, its
-            # evidence, and the range its multipliers may move a vote through.
-            knowledge["learning"] = self._learning.annotation(turn.scope)
+            # evidence, the range its multipliers may move a vote through, and
+            # — per candidate — the multiplier and the reasons for it, so a
+            # recipe that ranked above a stronger one can be explained from
+            # the request that served it, without a log nobody kept.
+            learning_view = self._learning.annotation(turn.scope)
+            if context is not None:
+                per_candidate = {
+                    hit.document_name: dict(getattr(hit, "learning", {}) or {})
+                    for hit in context.hits
+                    if hit.document_name and getattr(hit, "learning", None)
+                }
+                if per_candidate:
+                    learning_view["candidates"] = per_candidate
+            knowledge["learning"] = learning_view
             votes = self._feedback_tracker.all_feedback() if (
                 self._feedback_tracker
             ) else {}

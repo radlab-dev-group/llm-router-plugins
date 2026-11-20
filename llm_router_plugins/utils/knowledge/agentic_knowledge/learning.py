@@ -1571,6 +1571,7 @@ class LearningPolicy:
         )
         detail = {
             "reason": "learned" if snapshot is not None else "reputation",
+            "mult": clamped,
             "rep": reputation,
             "model": model,
             "arm": arm,

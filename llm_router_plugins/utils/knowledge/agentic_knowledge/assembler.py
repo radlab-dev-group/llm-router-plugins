@@ -180,6 +180,15 @@ class KnowledgeHit:
         search, ``reranker`` under a cross-encoder, ``cosine`` for a
         vector-only run — so a threshold read against the score knows
         what the number means.  ``""`` when the answer did not state it.
+    learning : Dict[str, Any]
+        What the learner said about this one candidate, when it said anything:
+        the multiplier it applied, the reasons for it, the model it read, and
+        whether the read was an exploration.  ``{}`` when the learner had no
+        say, which is the common case — no learner, no scope, or a policy
+        switched off — and the only reason a field exists at all on a hit
+        that never asked one.  The response must answer "why was this recipe
+        first" per candidate, not per request, so the reasons travel with the
+        candidate rather than living in a log nobody kept.
     """
 
     category: str = ""
@@ -197,6 +206,7 @@ class KnowledgeHit:
     signature_hash: str = ""
     test_command: str = ""
     score_scale: str = ""
+    learning: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -492,7 +502,7 @@ class ContextAssembler:
                 except OverflowError:
                     base = 0.0 if base < 0 else 1.0
         weight = weights.get(kind, min(weights.values()) if weights else 1.0)
-        learned = self._learning_multiplier(
+        learned, learning_detail = self._learning_multiplier(
             hit=hit,
             meta=meta,
             kind=kind,
@@ -532,6 +542,7 @@ class ContextAssembler:
                 signature_hash=meta.signature_hash,
                 test_command=meta.test_command,
                 score_scale=scale,
+                learning=dict(learning_detail or {}),
             ),
             meta=meta,
             vote=vote,
@@ -648,26 +659,30 @@ class ContextAssembler:
         rank: int,
         body: str,
         mode: str = "",
-    ) -> float:
+    ) -> Tuple[float, Dict[str, Any]]:
         """
         Ask the learner what this candidate is worth, and remember what it asked.
 
-        Returns ``0.0`` when the learner has no say — no learner, no scope, a
-        policy switched off, or a learner that raised — and the caller then
-        weighs the candidate exactly as it did before the learner existed,
-        static counters included.  ``0.0`` means "not the learner's vote",
-        never "a vote of one", and that distinction is what keeps a disabled
-        deployment from silently substituting a multiplier of exactly one for
-        the counters it used to read.  The features are recorded whatever the
-        answer was, including from a switched-off policy: an injection whose
-        exposure was never logged cannot be credited or blamed a turn later,
-        and the log is the one part of this that cannot be reconstructed
-        afterwards — collecting while learning is off is how the first corpus
-        comes to exist at all.
+        Returns ``(0.0, {})`` when the learner has no say — no learner, no
+        scope, a policy switched off, or a learner that raised — and the
+        caller then weighs the candidate exactly as it did before the learner
+        existed, static counters included.  ``0.0`` means "not the learner's
+        vote", never "a vote of one", and that distinction is what keeps a
+        disabled deployment from silently substituting a multiplier of exactly
+        one for the counters it used to read.  The second value is the
+        learner's own account of the number — the reasons, the model it read,
+        the exploration flag — which the candidate carries on
+        :attr:`KnowledgeHit.learning` so the response can answer why this one
+        ranked where it did.  The features are recorded whatever the answer
+        was, including from a switched-off policy: an injection whose exposure
+        was never logged cannot be credited or blamed a turn later, and the
+        log is the one part of this that cannot be reconstructed afterwards —
+        collecting while learning is off is how the first corpus comes to
+        exist at all.
         """
         learner = self.learning
         if learner is None or not self.scope or not hit.document_name:
-            return 0.0
+            return 0.0, {}
         features = self._features(
             meta=meta,
             kind=kind,
@@ -680,16 +695,16 @@ class ContextAssembler:
         )
         self.candidate_features[hit.document_name] = features
         if not getattr(learner, "enabled", True):
-            return 0.0
+            return 0.0, {}
         try:
-            multiplier, _ = learner.multiplier_for(
+            multiplier, detail = learner.multiplier_for(
                 features, document_name=hit.document_name, scope=self.scope
             )
         except Exception:  # a learner is never a reason to fail a read
-            return 0.0
+            return 0.0, {}
         if not multiplier or multiplier <= 0.0:
-            return 0.0
-        return float(multiplier)
+            return 0.0, dict(detail or {})
+        return float(multiplier), dict(detail or {})
 
     def _features(
         self,
