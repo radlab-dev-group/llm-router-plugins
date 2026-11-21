@@ -15,6 +15,7 @@ import argparse
 import datetime
 import json
 import logging
+import math
 import pathlib
 import sys
 
@@ -27,6 +28,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.metrics import (
     KnowledgeMetrics,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+    FEATURE_NAMES,
     LabelStore,
     SourceBandit,
     load_snapshot,
@@ -296,17 +298,47 @@ def learning_view(
         ],
     }
 
-    # The corpus the next fit would stand on.
+    # The corpus the next fit would stand on, and the shape of the features
+    # the next fit would see.  A mean and a standard deviation per feature
+    # over the labelled rows is the drift baseline of the corpus: a fit that
+    # used to clear its holdout and now refuses it is usually a fit whose
+    # input distribution moved, and the only way to see that is to keep the
+    # shape of the input next to the shape it had when the model was accepted.
+    # The labelled rows only — an unlabelled exposure is not evidence the fit
+    # will read, and a distribution over it would describe the traffic rather
+    # than the corpus.
     corpus = 0
     labelled = 0
+    feature_stats: Dict[str, Dict[str, float]] = {}
     try:
         store = LabelStore(client=client, key_prefix=prefix)
         rows = store.load(scope)
         corpus = len(rows)
         labelled = sum(1 for row in rows if row.label != 0.0)
+        if labelled:
+            vectors = [
+                row.features.vector() for row in rows if row.label != 0.0
+            ]
+            for index, name in enumerate(FEATURE_NAMES):
+                column = [vector[index] for vector in vectors]
+                mean = sum(column) / len(column)
+                variance = (
+                    sum((value - mean) ** 2 for value in column) / len(column)
+                )
+                feature_stats[name] = {
+                    "mean": round(mean, 6),
+                    "std": round(math.sqrt(variance), 6),
+                }
     except Exception:
         pass
-    view["corpus"] = {"records": corpus, "labelled": labelled}
+    view["corpus"] = {
+        "records": corpus,
+        "labelled": labelled,
+        # ``None``, not ``{}``, when there was nothing to describe: an empty
+        # map reads as "every feature sits at zero", which is a claim about
+        # the corpus rather than the absence of one.
+        "features": feature_stats or None,
+    }
 
     # The arms the bandit has folded, for the value a character of each
     # source earned against the weight the policy still ships.
@@ -335,6 +367,12 @@ def _monitors(client: Any, learning: Any, scope: str) -> Dict[str, Any]:
     learned path is steering.  Both are read from the window the log still
     holds, with the scope filtered out of the answer, because the question is
     "is this layer starting to like its own advice", not "how big is the log".
+
+    The window's explored share travels with them because it says how much of
+    the evidence is a comparison rather than an echo: a vote cast greedily is
+    a vote the policy already serving would have cast anyway, and a log made
+    of nothing else tells a fit what the current model believes, not what is
+    true.
     """
     try:
         tail = client.xrange(learning.stream_key, min="-", max="+", count=2000)
@@ -342,6 +380,7 @@ def _monitors(client: Any, learning: Any, scope: str) -> Dict[str, Any]:
         return {"note": "the training log could not be read"}
     exposures: Dict[str, int] = {}
     rows_seen = 0
+    explored = 0
     for row in tail:
         fields = row[1] if isinstance(row, (list, tuple)) and len(row) > 1 else row
         raw = fields.get("d") if isinstance(fields, dict) else None
@@ -358,6 +397,8 @@ def _monitors(client: Any, learning: Any, scope: str) -> Dict[str, Any]:
         if str(record.get("scope") or "") not in ("", scope):
             continue
         rows_seen += 1
+        if str(record.get("exploration") or "") == "explore":
+            explored += 1
         name = str(record.get("doc") or "")
         if name:
             exposures[name] = exposures.get(name, 0) + 1
@@ -375,6 +416,10 @@ def _monitors(client: Any, learning: Any, scope: str) -> Dict[str, Any]:
         if exposures
         else 0.0,
         "heaviest": max(exposures.values()) if exposures else 0,
+        # The share of the rows the log still holds that the model spent
+        # exploring: a propensity feature, because a corpus that is all
+        # greedy is a corpus a fit cannot use to weight the off-policy part.
+        "explored_share": round(explored / rows_seen, 4) if rows_seen else 0.0,
     }
 
 
@@ -408,11 +453,23 @@ def _print_learning(views: List[Dict[str, Any]]) -> None:
             print(
                 f"  {'':<28} rollback: " + ", ".join(newest)
             )
+        features = corpus.get("features") or {}
+        if features:
+            # A feature the corpus never varies is a feature the fit prunes
+            # before it starts, and a corpus that lost one it used to vary
+            # has lost a dimension the accepted model was fitted on.
+            pruned = sum(1 for row in features.values() if not row.get("std"))
+            varied = len(features) - pruned
+            shape = f"features: {varied}/{len(features)} vary"
+            if pruned:
+                shape += f", {pruned} a fit would prune"
+            print(f"  {'':<28} {shape}")
         if monitors:
             print(
                 f"  {'':<28} log: {monitors.get('docs', 0)} docs, "
                 f"{monitors.get('docs_over_50_exposures', 0):.0%} over 50 "
-                f"exposures (heaviest {monitors.get('heaviest', 0)})"
+                f"exposures (heaviest {monitors.get('heaviest', 0)}), "
+                f"explored {monitors.get('explored_share', 0):.0%}"
             )
 
 

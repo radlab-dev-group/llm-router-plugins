@@ -13,6 +13,8 @@ import json
 import sys
 import pathlib
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.metrics import (
@@ -526,6 +528,219 @@ def test_the_learning_monitors_read_the_shape_of_the_log():
     # Half of the documents the log names are the heavy one.
     assert monitors["docs_over_50_exposures"] == 0.5
     assert monitors["heaviest"] == 60
+
+
+def test_the_log_reports_the_share_of_it_the_layer_spent_exploring():
+    """
+    The explored share is read off the records, not guessed from a config.
+
+    A fit reads what the log holds, and how much of that was a draw rather
+    than a decision is the difference between evidence and an echo: a greedy
+    vote is one the serving policy would have cast anyway.  The number is
+    therefore counted from the ``exploration`` field of the records
+    themselves — a deployment whose ``explore_rate`` says 0.1 and whose log
+    says 0.0 has an exploration term that never fires, and only the log says
+    so.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        AgenticKnowledgeConfig,
+    )
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge.stats import (
+        learning_view,
+    )
+
+    def row(entry_id, explored):
+        return (
+            f"{entry_id}-0",
+            {
+                "d": json.dumps(
+                    {
+                        "scope": "webapp",
+                        "session": "s0",
+                        "generation": f"g{entry_id}",
+                        "doc": f"recipe:20260101:{entry_id:03d}",
+                        "kind": "injection",
+                        "label": 0,
+                        "f": {"kind": "recipe", "mode": "debug"},
+                        "exploration": "explore" if explored else "greedy",
+                    }
+                )
+            },
+        )
+
+    rows = [row(index, index % 4 == 0) for index in range(20)]
+    store = _LearnedStore(stream_rows=rows)
+    config = AgenticKnowledgeConfig.from_file(
+        pathlib.Path(_policy_with_learning())
+    )
+    config.validate()
+    monitors = learning_view("webapp", config, store)["monitors"]
+    # Five of the twenty drew the spread.
+    assert monitors["window"] == 20
+    assert monitors["explored_share"] == 0.25
+
+
+def test_an_old_record_counts_as_greedy_rather_than_as_unknown():
+    """
+    A record written before the exploration field existed is a greedy one.
+
+    The field arrives with a deployment, not with a fit, and a stream keeps
+    what it kept: a reader that treated a missing field as "unknown" would
+    either inflate the explored share with rows that explored nothing or
+    divide by a window it had just silently shrunk.  The default is the
+    behaviour those records were written under.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        AgenticKnowledgeConfig,
+    )
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge.stats import (
+        learning_view,
+    )
+
+    rows = [
+        (
+            f"{index}-0",
+            {
+                "d": json.dumps(
+                    {
+                        "scope": "webapp",
+                        "session": "s0",
+                        "generation": f"g{index}",
+                        "doc": f"recipe:20260101:{index:03d}",
+                        "kind": "injection",
+                        "label": 0,
+                        "f": {"kind": "recipe", "mode": "debug"},
+                    }
+                )
+            },
+        )
+        for index in range(5)
+    ]
+    store = _LearnedStore(stream_rows=rows)
+    config = AgenticKnowledgeConfig.from_file(
+        pathlib.Path(_policy_with_learning())
+    )
+    config.validate()
+    monitors = learning_view("webapp", config, store)["monitors"]
+    assert monitors["window"] == 5
+    assert monitors["explored_share"] == 0.0
+
+
+def test_the_learning_view_keeps_the_shape_of_the_label_corpus():
+    """
+    The view reports the feature distribution the next fit would read.
+
+    A fit that used to clear its holdout and now refuses it is usually a fit
+    whose input moved, and "the input moved" is a claim about a distribution
+    that has to have been written down before it is needed.  Two features of
+    the same corpus are pinned here for that reason: one the rows vary, which
+    carries a non-zero spread, and one they never vary, whose spread is
+    exactly zero — the number that tells an operator the fit will prune it.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        FEATURE_NAMES,
+        CandidateFeatures,
+        FeedbackSample,
+        LabelStore,
+    )
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        AgenticKnowledgeConfig,
+    )
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge.stats import (
+        learning_view,
+    )
+
+    store = _LearnedStore()
+    config = AgenticKnowledgeConfig.from_file(
+        pathlib.Path(_policy_with_learning())
+    )
+    config.validate()
+
+    samples = []
+    for index in range(4):
+        samples.append(
+            FeedbackSample(
+                scope="webapp",
+                session_id=f"s{index}",
+                generation=f"g{index}",
+                document_name=f"recipe:20260101:{index:05d}",
+                features=CandidateFeatures(
+                    kind="recipe",
+                    mode="debug",
+                    # Varies with the row: the score is clamped straight into
+                    # the vector, so what the row says is what the fit reads.
+                    score=index / 4.0,
+                    # Never varies: every row came back on the same scale.
+                    score_scale="cosine",
+                ),
+                label=1.0 if index % 2 == 0 else -1.0,
+            )
+        )
+    LabelStore(client=store, key_prefix="agentic-kb").merge(samples)
+
+    corpus = learning_view("webapp", config, store)["corpus"]
+    features = corpus["features"]
+    assert set(features) == set(FEATURE_NAMES)
+    # score is 0.0, 0.25, 0.5, 0.75: mean 0.375, population standard
+    # deviation 0.27950849...
+    assert features["score"]["mean"] == pytest.approx(0.375)
+    assert features["score"]["std"] == pytest.approx(0.27950849, abs=1e-5)
+    # score_sq moves with it, so its spread is non-zero too.
+    assert features["score_sq"]["std"] > 0.0
+    # The scale never moves, and the view says so with a zero rather than a
+    # gap: zero spread is the number that tells an operator the fit prunes it.
+    assert features["scale_rrf"]["mean"] == 0.0
+    assert features["scale_rrf"]["std"] == 0.0
+    assert features["scale_reranker"]["mean"] == 0.0
+    assert features["scale_reranker"]["std"] == 0.0
+
+
+def test_a_corpus_with_nothing_labelled_reports_no_distribution():
+    """
+    No labelled rows is "nobody measured", not "every feature sits at zero".
+
+    Unlabelled exposures are the majority of a young scope's log, and a
+    distribution over them describes the traffic the layer was shown, not the
+    corpus a fit reads — so the view leaves the field empty rather than
+    printing the shape of the wrong thing.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        CandidateFeatures,
+        FeedbackSample,
+        LabelStore,
+    )
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        AgenticKnowledgeConfig,
+    )
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge.stats import (
+        learning_view,
+    )
+
+    store = _LearnedStore()
+    config = AgenticKnowledgeConfig.from_file(
+        pathlib.Path(_policy_with_learning())
+    )
+    config.validate()
+    LabelStore(client=store, key_prefix="agentic-kb").merge(
+        [
+            FeedbackSample(
+                scope="webapp",
+                session_id="s0",
+                generation="g0",
+                document_name="recipe:20260101:00001",
+                features=CandidateFeatures(kind="recipe", mode="debug"),
+                label=0.0,
+            )
+        ]
+    )
+
+    corpus = learning_view("webapp", config, store)["corpus"]
+    # The store holds no verdicts at all: records, labelled and the
+    # distribution are all zero, and the distribution says "nobody measured"
+    # with a None rather than a shape over an empty thing.
+    assert corpus["records"] == 0
+    assert corpus["labelled"] == 0
+    assert corpus["features"] is None
 
 
 def test_the_reader_emits_the_learning_view_with_a_flag(capsys, monkeypatch):
