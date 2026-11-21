@@ -27,10 +27,12 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+    acquire_pass_lock,
     FeedbackLog,
     FeedbackSample,
     LabelStore,
     LearningConfig,
+    release_pass_lock,
     SourceBandit,
     load_snapshot,
     publish_snapshot,
@@ -378,6 +380,26 @@ def build_parser() -> argparse.ArgumentParser:
             "history, so a rollback is itself reversible."
         ),
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Fit even though another pass holds the learner's lock. The lock "
+            "is what stops two cron minutes, or an impatient operator and a "
+            "still-running pass, from draining the same cursor and publishing "
+            "over each other; forcing it means accepting that the last writer "
+            "decides what a scope serves."
+        ),
+    )
+    parser.add_argument(
+        "--lock-ttl",
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "How long the pass lock outlives a crashed learner; defaults to "
+            "learning.lock_ttl_seconds."
+        ),
+    )
     return parser
 
 
@@ -546,17 +568,50 @@ def main(argv: Optional[List[str]] = None) -> int:
     # pretend it did not consume.
     if args.history or args.rollback:
         return _scope_view(config, client, learner, args, logger)
+    lock_ttl = (
+        float(args.lock_ttl)
+        if args.lock_ttl
+        else float(config.learning.lock_ttl_seconds)
+    )
+    token = acquire_pass_lock(
+        client, key_prefix=config.key_prefix, ttl_seconds=lock_ttl
+    )
+    if not token and args.force:
+        token = acquire_pass_lock(
+            client,
+            key_prefix=config.key_prefix,
+            ttl_seconds=lock_ttl,
+            force=True,
+        )
+        if token:
+            logger.warning(
+                "learner: --force took the pass lock from whatever held it"
+            )
+    if not token:
+        logger.warning(
+            "learner: another pass holds the lock (ttl %ss); nothing fitted "
+            "this pass — wait for it, or pass --force",
+            int(lock_ttl),
+        )
+        return 0
     last_id = None
     if args.reset_cursor:
         learner.save_cursor("0-0")
         last_id = "0-0"
-    result = learner.drain_and_fit(
-        count=max(int(args.count), 1),
-        last_id=last_id,
-        holdout_fraction=float(args.holdout),
-        max_records=max(int(args.max_records), 1),
-        corpus_limit=max(int(args.window), 1),
-    )
+    try:
+        result = learner.drain_and_fit(
+            count=max(int(args.count), 1),
+            last_id=last_id,
+            holdout_fraction=float(args.holdout),
+            max_records=max(int(args.max_records), 1),
+            corpus_limit=max(int(args.window), 1),
+        )
+    finally:
+        if not release_pass_lock(client, config.key_prefix, token):
+            # The lock expiring on its own is a pass that ran longer than its
+            # ttl, which is worth one line: it says the next cron minute may
+            # fit alongside this one's tail.
+            logger.warning("learner: pass lock was no longer ours at release")
     self_prefix = config.key_prefix
     if args.arms:
         print(json.dumps({"arms": learner.arm_summary()}, sort_keys=True))

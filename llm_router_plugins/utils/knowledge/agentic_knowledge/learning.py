@@ -49,6 +49,7 @@ import math
 import random
 import threading
 import time
+import uuid
 
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -65,6 +66,8 @@ __all__ = [
     "FeedbackLog",
     "train_ranker",
     "publish_snapshot",
+    "acquire_pass_lock",
+    "release_pass_lock",
     "load_snapshot",
     "FEATURE_NAMES",
     "SCALE_RRF",
@@ -196,6 +199,11 @@ class LearningConfig:
         How many published snapshots a scope keeps after the live one, for the
         rollback of a fit that turned out to be worse.  Zero keeps only the
         live one, which is what the layer did before this existed.
+    lock_ttl_seconds : float
+        How long a learner pass holds its lock before a crashed one is
+        overridable.  The default is a few hours, which is the longest a pass
+        may run before it is a failure rather than a slow one: a lock that
+        outlives a crash by a week is a learner that looks dead for a week.
     stream_key, key_prefix : str
         Where the training log and the state live.
     """
@@ -220,6 +228,7 @@ class LearningConfig:
     explore_rate: float = 0.1
     model_ttl_seconds: float = 60.0
     snapshot_history_size: int = 8
+    lock_ttl_seconds: float = 14400.0
     stream_key: str = "agentic_kb:training"
     key_prefix: str = "agentic-kb"
 
@@ -253,6 +262,8 @@ class LearningConfig:
             raise ValueError("learning.model_ttl_seconds must be positive")
         if self.snapshot_history_size < 0:
             raise ValueError("learning.snapshot_history_size must not be negative")
+        if self.lock_ttl_seconds <= 0.0:
+            raise ValueError("learning.lock_ttl_seconds must be positive")
         if not self.stream_key.strip() or not self.key_prefix.strip():
             raise ValueError("learning.stream_key/key_prefix must not be empty")
 
@@ -1255,6 +1266,89 @@ def load_snapshot(
             if isinstance(v, dict)
         },
     )
+
+
+def _lock_key(key_prefix: str) -> str:
+    """The key one learner pass holds while it drains, fits and publishes."""
+    return f"{key_prefix}:learner:lock"
+
+
+#: Delete the lock only if it is still ours.  Read-and-delete without this is
+#: a pass deleting the lock another pass took after ours expired, which is the
+#: race the lock exists to close.
+_RELEASE_SCRIPT = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] then "
+    "return redis.call('del', KEYS[1]) else return 0 end"
+)
+
+
+def acquire_pass_lock(
+    client: Any,
+    key_prefix: str = "agentic-kb",
+    ttl_seconds: float = 14400.0,
+    token: str = "",
+    force: bool = False,
+) -> str:
+    """
+    Take the learner's pass lock, or return ``""`` when somebody else holds it.
+
+    The lock exists because a fit is not idempotent against itself: two
+    overlapping passes read the same cursor, both publish, and the last writer
+    decides what a scope serves — with two histories and no record of which
+    fit won.  A cron whose previous run is still fitting, and a second
+    operator who got tired of waiting, are the two ways that happens.
+
+    ``SET key token NX EX ttl`` is the whole protocol.  A store that answers
+    with an error is treated as a store holding the lock, because the safe
+    reading of "I do not know whether another pass is fitting" is "do not fit";
+    the next cron minute asks again.  Without Redis there is nothing to
+    coordinate with, and a lone process is its own lock.
+
+    *force* writes without the exclusive condition: an operator who names it
+    has decided that a pass which will not finish is worth overriding, and
+    that decision is the one thing the lock cannot make on its own.
+    """
+    if client is None:
+        return token or "in-process"
+    token = token or f"{uuid.uuid4().hex}"
+    key = _lock_key(key_prefix)
+    try:
+        if force:
+            return token if client.set(key, token, ex=int(ttl_seconds)) else ""
+        taken = client.set(key, token, nx=True, ex=int(ttl_seconds))
+    except Exception:
+        return ""
+    return token if taken else ""
+
+
+def release_pass_lock(client: Any, key_prefix: str, token: str) -> bool:
+    """
+    Give the lock back, but only if it is still the one we were given.
+
+    A pass that outlived its own TTL must not delete the lock a later pass has
+    since taken: that would put two passes back in the room, which is exactly
+    what the lock was bought to prevent.  The comparison and the delete are one
+    script when the client can run one, and a compare-then-delete when it
+    cannot — the latter leaves a window of one round trip and says so by
+    returning whether the key was actually ours.
+    """
+    if client is None or not token or token == "in-process":
+        return True
+    key = _lock_key(key_prefix)
+    try:
+        return bool(client.eval(_RELEASE_SCRIPT, 1, key, token))
+    except Exception:
+        pass
+    try:
+        current = client.get(key)
+        if isinstance(current, bytes):
+            current = current.decode("utf-8", "replace")
+        if current != token:
+            return False
+        client.delete(key)
+        return True
+    except Exception:
+        return False
 
 
 class SourceBandit:

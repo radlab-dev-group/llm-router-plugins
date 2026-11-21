@@ -67,10 +67,20 @@ class FakeRedis:
         self.calls.append(("get", key))
         return self.values.get(key)
 
-    def set(self, key, value):
-        self.calls.append(("set", key))
+    def set(self, key, value, nx=False, ex=0):
+        # ``ex`` is a wall-clock TTL the fake does not age; the lock tests
+        # assert the value was recorded, and expire it by deleting the key.
+        self.calls.append(("set", key) if not nx else ("setnx", key))
+        if nx and key in self.values:
+            return None
         self.values[key] = value
+        if ex:
+            self.ttls[key] = int(ex)
         return True
+
+    def delete(self, key):
+        self.calls.append(("delete", key))
+        return 1 if self.values.pop(key, None) is not None else 0
 
     def xadd(self, key, fields, maxlen=0):
         self.calls.append(("xadd", key))
@@ -1214,6 +1224,8 @@ def test_the_arms_flag_prints_the_bandit_state():
     summary = learner.arm_summary()
     assert "plan|recipe" in summary
     assert summary["plan|recipe"]["n"] == 1
+
+
 # ------------------------------------------------------- exploration record --
 def test_an_exposure_records_whether_the_ranking_drew_the_spread():
     """The draw belongs to the request, so it is written with the exposure."""
@@ -1368,3 +1380,77 @@ def test_settling_forgives_the_document_its_draw():
     assert "recipe:20260101:a" not in policy._ranked_exploration
 
 
+# ------------------------------------------------------------ pass lock -----
+def test_a_pass_lock_keeps_the_second_pass_out():
+    """Two cron minutes must not drain the same cursor and publish over each other."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        acquire_pass_lock,
+        release_pass_lock,
+    )
+    client = FakeRedis()
+    first = acquire_pass_lock(client, "agentic-kb", ttl_seconds=60.0)
+    second = acquire_pass_lock(client, "agentic-kb", ttl_seconds=60.0)
+    assert first
+    assert second == ""
+    assert release_pass_lock(client, "agentic-kb", first) is True
+    # The slot is free again for the next minute of the cron.
+    assert acquire_pass_lock(client, "agentic-kb", ttl_seconds=60.0)
+
+
+def test_release_returns_the_lock_only_when_it_is_still_ours():
+    """A pass that outlived its ttl must not delete another pass's lock."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        acquire_pass_lock,
+        release_pass_lock,
+    )
+    client = FakeRedis()
+    first = acquire_pass_lock(client, "agentic-kb", ttl_seconds=60.0)
+    # The ttl expired while the first pass was still running, and the next
+    # cron minute took the lock in the meantime.
+    client.values.pop("agentic-kb:learner:lock", None)
+    second = acquire_pass_lock(client, "agentic-kb", ttl_seconds=60.0)
+    assert release_pass_lock(client, "agentic-kb", first) is False
+    assert client.values.get("agentic-kb:learner:lock") == second
+    assert release_pass_lock(client, "agentic-kb", second) is True
+
+
+def test_a_store_that_cannot_answer_is_a_lock_somebody_holds():
+    """The safe reading of 'I do not know' is 'do not fit'."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        acquire_pass_lock,
+        release_pass_lock,
+    )
+    client = BrokenRedis()
+    assert acquire_pass_lock(client, "agentic-kb") == ""
+    # Releasing a token into a broken store fails without a stack trace:
+    # there was nothing to release there, and the pass must finish clean.
+    assert release_pass_lock(client, "agentic-kb", "someone") is False
+
+
+def test_a_pass_without_a_store_is_its_own_lock():
+    """One process with no shared store needs no coordination with itself."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        acquire_pass_lock,
+        release_pass_lock,
+    )
+    token = acquire_pass_lock(None, "agentic-kb")
+    assert token == "in-process"
+    assert release_pass_lock(None, "agentic-kb", token) is True
+
+
+def test_force_is_the_only_key_that_opens_a_held_lock():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        acquire_pass_lock,
+        release_pass_lock,
+    )
+    client = FakeRedis()
+    first = acquire_pass_lock(client, "agentic-kb", ttl_seconds=60.0)
+    # The ordinary ask is still refused while the lock is held.
+    assert acquire_pass_lock(client, "agentic-kb", ttl_seconds=60.0) == ""
+    # A forceful pass takes what is there.
+    forced = acquire_pass_lock(client, "agentic-kb", ttl_seconds=60.0, force=True)
+    assert forced
+    assert forced != first
+    # ...and the one it displaced is no longer able to release what it held.
+    assert release_pass_lock(client, "agentic-kb", first) is False
+    assert release_pass_lock(client, "agentic-kb", forced) is True
