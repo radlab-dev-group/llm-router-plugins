@@ -8,6 +8,7 @@ release tagged as `v<version>`.
 
 | Version | Changelog |
 | ------- | --------- |
+| 0.1.10 | **Added:** the read path asks a better question and answers it with less — keywords mined from the user's sentence, `path_scope_for` scoped by shared module instead of common prefix, `max_results` derived from the mode's source limits, and the debug query built from the line that names the failure; a contested top-5 is re-asked through the cross-encoder before the block is built (`rerank_when_contested`, off by default); the signature bonus is continuous (Jaccard of the failure tokens) and a superseded same-file recipe is damped; lockfile-only patches stop quoting themselves into recipes and a reverted change is mined as `reverted_paths`; `--bootstrap-git` seeds a scope from the fix commits of its own history; the attribution window spans 3 requests with a 0.85-per-turn discount and a verdict is checked against the change itself — `adopted` at ≥40% diff overlap, unattributed below 5%, `reverted` at −1.0; the ranker gains a `pairwise` (RankNet) objective beside `pointwise`, a cross-repository meta-prior for cold scopes (`meta_prior_enabled`, off by default), and a 22-feature candidate (interactions, loop level, `is_human_doc`, `patch_sim_prior`, `query_intent_align`, `error_class_match`) under `SNAPSHOT_SCHEMA` 2; the tune gains `--search bayesian` (seeded TPE on the multi-criteria objective) and `--write-policy`, which writes the chosen point as a reviewable `agentic_knowledge.tuned.json` proposal the layer never loads. **Changed:** snapshots of schema 1 are refused, not read under the wrong names. **Fixed:** the attribution window no longer drops an entry a no-verdict turn was not meant to judge; `_commit_patch` shows the patch in the repository it mines from; `LabelStore` logs a failed write instead of raising; the tune's `--search`/`--evaluations`/`--write-policy` flags exist. |
 | 0.1.9 | **Added:** the knowledge layer accepts a green compiler, linter, type-checker or shell run as a verified fix (`verification_type`), mines two new kinds (`task_solution`, `tool_recipe`), scores injected knowledge so a debunked recipe sinks and a proven one rises, warns before a known dead end, and retries a path-scoped search that came back empty. **Changed:** injected diffs keep their line structure in fenced ```diff blocks (quote ceiling 1800, truncation never opens a fence), the pre-compaction archive reads as a `Previous Conversation Milestones` timeline, the cross-encoder reranker (`rerank_results`) and adaptive model escalation ship enabled by default (`strong_recipe_score` `0.6`), `.plans` is excluded from the documentation scan. **Fixed:** stores archived compaction windows as complete documents to preserve full knowledge state during compaction. |
 | 0.1.8 | **Fixed:** NIP number detection in `NipRule` to support spaces and 3-2-2-3 grouping format (`118 193 42 72`, `118-19-34-272`); restricted `KrsRule` regex to plain 10-digit strings (`\d{10}`), preventing space-separated or malformed NIP numbers from being erroneously classified as KRS in the masking pipeline. **Added:** dedicated test suite in `tests/test_nip_rule.py` for NIP formatting, boundary conditions, markdown markers, and pipeline precedence over KRS. |
 | 0.1.7 | **Added:** exported all built-in rule classes (`KrsRule`, `RegonRule`, `PostalCodeRule`, `NrbRule`, `UrlRule`, `EuVatRule`, etc.) in `fast_masker.rules.__init__`. **Changed:** unified pseudonym formatting across all `FastMasker` rules via `_format_pseudo` helper in `BaseRule`, preventing duplicate outer brackets when custom bracketed formats (e.g. `[TAG_1]`, `{TAG}`) are passed from `anonymizer_fn`. **Fixed:** phone number boundary matching in `PhoneRule` (`(?<!\d)` / `(?!\d)`) allowing detection adjacent to punctuation, quotes, and brackets; expanded Polish phone prefix support (infolines `80x`, mobile `88`, landline area codes `12`-`95`) and support for parenthesized area/country codes in domestic and international rules; corrected EU VAT validation (`is_valid_eu_vat`) to enforce valid EU member state prefixes and structure (including Polish NIP checksum validation for `PL`), eliminating false-positive VAT/NIP matches on concatenated text (e.g. `waluty2026`). |
@@ -26,6 +27,155 @@ release tagged as `v<version>`.
 ## [Unreleased]
 
 ### Added
+- **The read path asks a better question, and answers it with less.** `_extract_keywords`
+  mines the user's own sentence as well as the failure and the command — backticked
+  identifiers, `snake_case` and `CamelCase` tokens included — so a `plan` or `implement`
+  turn whose query was empty before now asks the text index something, and agent verbs
+  stop counting as keywords. `path_scope_for` reads the *module* the paths share instead
+  of their common prefix, so `src/auth/jwt.py` and `tests/auth/test_jwt.py` scope the
+  search to `auth` instead of zeroing the filter; a scope that would filter everything
+  back out is dropped, not applied. `max_results` is derived from the mode's source
+  limits as `max(6, min(limits × 2, 12))` — the old floor of 15 made the engine fetch
+  150 vectors per query and queue for seconds — and the debug query is built from the
+  line that names the failure, not the `Process exited` wrapper or the traceback frames
+  around it.
+- **The store re-asks a contested result before the block is built.** A `debug` request
+  whose top hits sit within `rerank_contested_gap` of each other (default `0.05`) is
+  answered by a second pass over the top five with the cross-encoder, under the same
+  deadline the first search ran under: the cost is paid only when the engine was not
+  confident, and a rerank that cannot finish in time is the first pass's answer, not a
+  timeout. `rerank_when_contested`, `rerank_contested_gap` and `rerank_top_k`
+  (`…_RERANK_WHEN_CONTESTED`, `…_RERANK_CONTESTED_GAP`, `…_RERANK_TOP_K`) keep it off by
+  default until a deployment's CPU can spare it.
+- **The assembler ranks by resemblance, not by coincidence.** The signature bonus is
+  continuous: a failure apart by one variable name from the document's earns a share of
+  the full bonus in proportion to the Jaccard of their tokens instead of nothing. A
+  recipe that is superseded — an older document for the same file whose failure the
+  newer, better-attested document also names — is damped by half a vote, so a block
+  does not carry two fixes for one file when one of them is what the agent stopped
+  doing. A single, highly relevant recipe may spend up to 3000 characters instead of the
+  shared quote ceiling, because a fix that is cut off is a fix that is not applied. The
+  block opens with `> [!IMPORTANT]` and its dead ends under
+  `## Known dead ends (DO NOT ATTEMPT)`, which the models that repeat abandoned
+  approaches are least likely to ignore.
+- **The miner writes less noise, and reads an undo as a verdict.** Patches that change
+  nothing but lockfiles or build output no longer quote themselves into a recipe; a
+  `git checkout --` / `git restore` / `git revert` of a file the turn just changed is
+  mined as `reverted_paths`, the explicit negative signal that the advice was applied
+  and rejected; `turn_added_lines` hands the credit assignment the side of the adoption
+  comparison that cannot be recomputed later.
+- **A repository can bootstrap its knowledge base from its own history.**
+  `llm-router-agentic-kb-learner --bootstrap-git REPO_ROOT` (with `--bootstrap-limit`
+  and `--bootstrap-since`) reads the commit subjects that say a change repaired
+  something — `fix`, `bugfix`, `hotfix`, `repair`, `correct`, `revert` — and publishes
+  one recipe per file each touched, with the commit's patch quoted and the subject as
+  the signature, through the same publisher the proxy uses, so re-running a bootstrap
+  is a no-op. A cold deployment on its first project has no meta-prior to start from and
+  no labels of its own yet; the fix commits it already made are the closest thing to
+  either, and a commit that only bumped a lockfile is a dependency, not a fix, and is
+  skipped. A repository without a git history is nothing, not an error.
+- **The verdict is attributed across the turns it actually spans, and checked against
+  what the agent did.** A request's documents are kept in a window of
+  `_ATTRIBUTION_HORIZON` (3) requests instead of the one turn the layer used to claim,
+  so an agent that is shown a fix, edits on the next turn and runs the test that proves
+  it on the one after is credited: the verdict walks the window from the newest request
+  to the oldest, each injection judged at its own delay, discounted by
+  `_ATTRIBUTION_DISCOUNT` (0.85) per turn of it, and a turn that proves nothing keeps
+  the window it was given — a no-verdict is not a verdict of zero, and the entries wait
+  for one. A document is credited once per verdict, at the nearest injection that
+  showed it: three consecutive showings and one green test are one piece of evidence,
+  not three, because counting the same evidence three times is the self-reinforcement
+  the monitors exist to catch. **The label is now checked against the change itself.**
+  A document that shares a file with a resolved turn is credited `1.0` as `adopted` when
+  the turn repeated at least 40% of the lines the document's diff adds — shown, adopted,
+  green is the only causal chain the layer can observe; it is logged as an exposure with
+  no label when it repeated less than 5% of them — same file, none of the change, the
+  turn had its own reason to be there, and a credit it did not cause is not a credit.
+  A document about a file the agent reverted is labelled `-1.0` as `reverted`, whatever
+  else the turn shows: applied and then undone is the strongest negative available
+  without waiting for the failure to come back.
+- **The ranker fits the ranking, not just the labels.** `learning.loss` gains
+  `pairwise` beside the original `pointwise`: the objective is then the
+  log-likelihood of the order, one comparison at a time — the probability that the
+  document a request credited should have stood above the one it blamed — built only
+  from pairs of opposite judgements of the *same* request, capped at 20000 and taken in
+  a deterministic order so the same corpus fits to the same weights. The Newton step is
+  RankNet's, over the difference of the two feature vectors, with the same ridge prior
+  and the same backtracking as the pointwise fit. A corpus whose verdicts never
+  contradict a request has an order to learn and nothing to learn it from, and the fit
+  falls back to pointwise — and the report names which of the two actually ran, because
+  "pairwise was asked" and "pairwise fitted" are two different answers.
+- **A cold repository starts from what the others learned.** `compute_meta_prior`
+  takes the mean of the weight vectors the scopes this pass *accepted* — a fit the gate
+  refused carries the neutral vector, and a neutral vector is not a repository's
+  opinion, it is the absence of one — and refuses to write it at all below
+  `meta_prior_min_scopes` (3) accepted scopes, because one repository's weights are
+  that repository's accidents and a prior of accidents is worse than the policy. The
+  learner reads the prior once per pass (`meta_prior_enabled`, off by default), fits
+  every touched scope from it as a MAP prior, and rewrites it from what this pass
+  accepted; a pass that accepted nothing leaves the prior alone, because a pass that
+  saw no evidence is not a reason to forget the evidence an earlier pass saw. The prior
+  lives at `{prefix}:meta_prior` under the same schema the snapshots use, and a prior of
+  another schema or the wrong length is read as no prior.
+- **The candidate carries the state the document sits in.** `CandidateFeatures` grows
+  from 15 to 22 features, at the end of the vector so the order of the first fifteen
+  is unchanged: `score_x_path` and `sig_x_cmd` (the interactions the plan named),
+  `agent_loop_level` (saturating at eight — the first try wants the general and the
+  third wants the specific, the verified, the about-this-failure), `is_human_doc`
+  (documentation is prose about how the repository does things; a recipe is a record of
+  what happened, and a corpus that varies only one of the two cannot identify the
+  weight of the other), `patch_sim_prior` (how much of the document's diff the turn's
+  own change repeats — the label the credit assignment reads, as the feature the model
+  reads it with), `query_intent_align` (a fix in debug, a procedure in implement, a
+  page in plan — whether the match is the kind of document the turn is looking for,
+  which text matching cannot see) and `error_class_match` (the class of the exception,
+  `KeyError` not the message, matched case-folded; both halves of the pair must name
+  the class). `SNAPSHOT_SCHEMA` is now 2, and a snapshot of another schema is refused,
+  not read under the wrong names.
+- **The tune searches the space instead of walking it.** `--search bayesian` replaces
+  the grid with a TPE walk on a `--evaluations` budget (default 40): the first eight
+  measurements are uniform, each one after that is proposed by the ratio of the
+  Parzen-window density of the measurements that earned most to the density of the
+  rest, half the candidates drawn from each, and a proposal that repeats a measured
+  point is resampled and then given up on in favour of a uniform draw. The search
+  ranks on the multi-criteria objective the plan named —
+  `hit + 0.3·recall − λ·chars − 1.5·max(0, floor − precision)` — because a point that
+  cannot keep the precision floor pays a penalty that grows without bound as it misses
+  it, and a very high hit rate cannot buy its way under a constraint the number
+  contains. The walk is deterministic under `--seed`: the same dataset, budget and seed
+  propose the same points in the same order, which is the only reason a report saying
+  "the search found this" can be checked by anyone but the machine that found it.
+  `--write-policy` writes the chosen point next to the report as
+  `agentic_knowledge.tuned.json`, a proposal with the numbers it claims so the merge
+  into the real policy is a diff against the evidence: the layer never reads the file,
+  and a tool that edits the policy it measured against has answered its own question.
+- **The feature table the fit can move is named in the report.** A corpus that varies
+  none of a feature's values cannot identify its weight, and the report of a fit now
+  says which features it could move — the varied ones inside the learnable set — so a
+  scope that "learned nothing" can be read as "the corpus held no variation to learn
+  from" rather than as a failure of the fit.
+
+### Fixed
+- **The attribution window no longer loses a verdict a turn early.** `_settle_feedback`
+  popped the whole window on every request, so a turn that neither proved nor
+  disproved what the previous one showed dropped the previous entry before the next
+  verdict could read it: the multi-turn credit the window exists for never arrived.
+  The entries are now walked, and only the ones the verdict of this turn read leave;
+  the rest stay, capped at the horizon by the arrival that keeps writing them.
+- **`_commit_patch` runs in the repository it shows the patch of.** The `git show`
+  that quotes a bootstrap commit's change to a file was run from the process's working
+  directory, so on a machine where the layer's own checkout is a different repository
+  it resolved the commit — or the path — against the wrong history. The repository the
+  bootstrap was asked on is the repository the patch is shown from.
+- **`LabelStore` reports a failed write instead of raising.** The store's `merge`
+  caught a Redis failure and called a `_warn` helper it did not define, so the first
+  write failure of a pass turned the pass into an exception rather than into a logged
+  warning and a local copy of the corpus.
+- **The tune's `--search`, `--evaluations` and `--write-policy` flags exist.** `main`
+  read all three from the parser, and `build_parser` defined none of them, so the
+  Bayesian search could only be reached by calling `tune()` directly; a run with
+  `--search bayesian` on the command line failed with an unrecognized argument.
+
 - **The knowledge layer can learn from its own traffic (`learning`, opt-in).** The layer has
   always voted on what it injected — a verified fix credits the block, a returning failure
   blames it — but every number that turns those votes into a ranking was chosen by hand.  They
@@ -202,7 +352,6 @@ release tagged as `v<version>`.
   this command and the tool did not enforce until now.  A run with no holdout named says so
   in the report instead of printing a column of zeros.
 
-### Fixed
 - **A learner's reputation now keeps the clock its owner keeps.** `LearningPolicy` built
   its `DocReputation` without the injected clock, so a replay that counts its turns and a
   test that freezes time both decayed reputation against the wall clock instead: a
@@ -292,6 +441,13 @@ release tagged as `v<version>`.
   query, so a stack trace retrieves the recipe mined from the same stack trace by literal token again.
 
 ### Changed
+- **The snapshot schema is 2.** Snapshots carry the 22-feature order, and
+  `load_snapshot` refuses a snapshot of schema 1 instead of reading fifteen weights
+  under the first fifteen of twenty-two names: the order of the weights is the schema,
+  and a misread is worse than a refusal, because a refusal is served by the policy
+  until the model is republished and a misread is served by a model nobody can
+  explain. The learner republishes on the first pass after an upgrade.
+
 - **`agentic_knowledge` reads the escalation threshold on the scale the recipe was scored on.**
   `escalation.strong_recipe_scores` states a bound per retrieval scale (`cosine`, `rrf`,
   `reranker`, or `""` for a hit whose scale the engine did not state); `escalation.strong_recipe_score`

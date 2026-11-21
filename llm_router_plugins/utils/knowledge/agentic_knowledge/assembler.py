@@ -336,6 +336,18 @@ class ContextAssembler:
     #: Command this turn ran and lost with, when it names one; the learner's
     #: strongest "this recipe is about that failure" feature.
     failing_command: str = ""
+    #: The lines this turn changed, read out of its patches: the side of the
+    #: adoption comparison the credit assignment wants, kept here so the
+    #: feature is computed once per candidate, not per verdict.  ``()`` when
+    #: the turn carried no patch, and then the adoption feature is zero,
+    #: which is the true statement: nothing was changed, so nothing was
+    #: adopted.
+    turn_patch_lines: Tuple[str, ...] = ()
+    #: Times the same failure has come back this session; ``0`` is a turn on
+    #: its first try and ``2`` and up is the loop.  A document worth reading
+    #: changes with it: the first try wants the general and the third wants
+    #: the specific, the verified, the about-this-failure.
+    loop_count: int = 0
     #: Character budget the mode spends the block on; the denominator of the
     #: cost feature, because a document's worth is per character it occupies.
     #: ``0`` means "not charged", and the cost feature reads as zero rather
@@ -887,14 +899,22 @@ class ContextAssembler:
         stats = (self.feedback or {}).get(document_name, {}) or {}
         up = int(stats.get("upvotes", 0) or 0)
         down = int(stats.get("downvotes", 0) or 0)
+        signature_match = bool(
+            self.signature_hash and meta.signature_hash == self.signature_hash
+        )
+        # The words of the two failures, when the hash is silent: a failure
+        # apart by one variable name is not the same document, but it is the
+        # same bug, and the Jaccard of their tokens says how close.
+        similarity = 0.0
+        if not signature_match and self.signature and meta.signature:
+            similarity = _signature_similarity(self.signature, meta.signature)
+        doc_class = _exception_class(meta.signature)
         return CandidateFeatures(
             kind=kind,
             mode=mode,
             score=float(base),
             score_scale=scale,
-            signature_match=bool(
-                self.signature_hash and meta.signature_hash == self.signature_hash
-            ),
+            signature_match=signature_match,
             path_match=shared,
             path_stem_match=min(stems, 4),
             command_match=self._command_matches(meta),
@@ -910,6 +930,12 @@ class ContextAssembler:
             rank=rank,
             size_chars=len(body or ""),
             budget_chars=self.budget_chars,
+            signature_similarity=similarity,
+            patch_sim=_adoption(body, self.turn_patch_lines),
+            intent_align=_intent_aligned(kind, mode),
+            error_class=_exception_class(self.signature),
+            doc_error_class=doc_class,
+            loop_count=self.loop_count,
         )
 
     def _command_matches(self, meta: DocumentMeta) -> bool:
@@ -1152,6 +1178,83 @@ def _documentation_pointer(hit: KnowledgeHit, doc_files: Sequence[str]) -> str:
         if _documents_path(path, paths):
             return f" → {path}"
     return ""
+
+
+_ERROR_CLASS = re.compile(
+    r"\b([A-Z][A-Za-z0-9_]*(?:Error|Exception|Failure|Timeout|Warning))\b"
+)
+
+
+def _exception_class(signature: str) -> str:
+    """
+    The class of the exception a failure names, ``""`` when it names none.
+
+    The class is the part of a failure that is stable from one occurrence to
+    the next: the message changes with the input, the class does not.  A
+    document written from ``KeyError: 'alg'`` and a turn stuck on
+    ``KeyError: 'session_id'`` are two failures of one kind, and the kind is
+    what a recipe is most likely to be filed under after the signature.
+    """
+    match = _ERROR_CLASS.search(str(signature or ""))
+    return match.group(1) if match else ""
+
+
+#: The kinds of document each mode is asking for: the engine matches on text,
+#: and text matching cannot see whether the match is the kind of document the
+#: turn wants.  A debug turn is looking for a fix, a plan for a procedure or
+#: a page, an implement for either; a review is looking for a page.
+_INTENT: Dict[str, Tuple[str, ...]] = {
+    "debug": (KIND_RECIPE, KIND_TOOL_RECIPE),
+    "test": (KIND_RECIPE, KIND_TOOL_RECIPE),
+    "plan": (KIND_PLAYBOOK, KIND_DOC, KIND_TASK_SOLUTION),
+    "implement": (KIND_RECIPE, KIND_PLAYBOOK, KIND_DOC, KIND_TASK_SOLUTION),
+    "git_review": (KIND_DOC,),
+    "review": (KIND_DOC,),
+}
+
+
+def _intent_aligned(kind: str, mode: str) -> bool:
+    """Whether *kind* is what *mode* is asking the knowledge base for."""
+    wanted = _INTENT.get(str(mode))
+    if wanted is None:
+        # A mode the table does not know is not a mode the table can judge;
+        # the honest answer is "not a misalignment", and that is the feature
+        # reading as false rather than as true.
+        return False
+    return str(kind) in wanted
+
+
+def _adoption(body: str, turn_lines: Sequence[str]) -> float:
+    """
+    How much of the document's change the turn's own change repeats.
+
+    The comparison is on the lines a fix adds — the ``+`` lines of the
+    document's diff — against the lines the turn changed, whatever the turn's
+    tool spelled them.  A turn that applied the fix the document describes
+    repeats most of those lines; a turn that edited the same file for another
+    reason repeats almost none.  The denominator is the document's lines,
+    because the question is "did the turn do what this document says", and a
+    document with no added lines has nothing to be adopted.
+
+    ``0.0`` when either side is empty, which is the true statement in both
+    cases: a document that adds nothing is not a fix to adopt, and a turn
+    that changed nothing adopted nothing.
+    """
+    document_lines = _added_lines(body)
+    if not document_lines or not turn_lines:
+        return 0.0
+    changed = {str(line) for line in turn_lines}
+    overlap = sum(1 for line in document_lines if line in changed)
+    return overlap / float(len(document_lines))
+
+
+def _added_lines(text: str) -> set:
+    """The lines a patch adds, minus their ``+``, deduplicated."""
+    return {
+        line[1:].strip()
+        for line in str(text or "").splitlines()
+        if line.startswith("+") and not line.startswith("+++") and line[1:].strip()
+    }
 
 
 def _signature_similarity(signature: str, other: str) -> float:

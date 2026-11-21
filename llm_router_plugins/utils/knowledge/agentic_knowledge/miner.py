@@ -1183,6 +1183,38 @@ _REVERT_COMMAND = re.compile(
 )
 
 
+def turn_added_lines(turn: AgentTurn) -> Tuple[str, ...]:
+    """
+    The lines this turn's patches add, in order, deduplicated.
+
+    The credit assignment asks one question of a document: did the turn do
+    what the document says?  The doing is here — the lines the agent put into
+    the code — and the document's side is the lines its own diff adds.  The
+    two sets meeting is adoption; their not meeting, on a document that named
+    the file the turn edited, is a document that was read and ignored.
+
+    Every patch of the turn counts, verified or not: the verdict is read from
+    what the agent actually changed, and a patch whose test never went green is
+    still a change the agent chose to make.
+    """
+    arguments = _call_arguments(turn)
+    lines: List[str] = []
+    seen = set()
+    for item in turn.evidence:
+        if item.kind != EVIDENCE_PATCH:
+            continue
+        raw = arguments.get(item.call_id) or arguments.get(item.event_id) or ""
+        for body in patch_envelopes(raw) or [raw]:
+            for line in str(body).splitlines():
+                if not line.startswith("+") or line.startswith("+++"):
+                    continue
+                text = line[1:].strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    lines.append(text)
+    return tuple(lines)
+
+
 def _is_noise_patch(body: str) -> bool:
     """Whether a patch body changes nothing but bookkeeping files."""
     paths = _patched_paths(body)
@@ -1489,5 +1521,224 @@ def _is_nontrivial_tool_command(cmd: str) -> bool:
     ):
         return len(c.split()) > 1
     if "-" in c and len(c.split()) > 1:
+        return True
+    return False
+
+# ------------------------------------------------------------------ bootstrap --
+#: A commit subject that says a change is a repair, not a feature.  A
+#: bootstrap that mines every commit mines the feature work too, and a corpus
+#: of feature diffs teaches the ranker that adding code is what a fix is,
+#: which is the opposite of what a fix is.
+_FIX_SUBJECT = re.compile(
+    r"""^(?i:
+        (?:fix(?:es|ed)?|bugfix|hotfix|repair|correct(?:s|ed)?)\b
+        |\bfix(?:es)?\s+for\b
+        |\bbug\s*:?
+        |\b(?:patch|update)\s+(?:for\s+)?(?:bug|error|issue)\b
+        |\brevert\b
+    )""",
+    re.VERBOSE,
+)
+
+#: The most characters of a commit's patch quoted into a bootstrapped recipe.
+#: The miner quotes 4000 of a turn's diff; a commit's is usually shorter and
+#: sometimes a merge of several, and the ceiling is the same one the reader's
+#: budget was tuned against.
+_BOOTSTRAP_PATCH_CHARS = 4000
+
+
+def mine_commit_fixes(
+    repo_root: str,
+    scope: str,
+    limit: int = 50,
+    since: Optional[str] = None,
+) -> List[KnowledgeEvent]:
+    """
+    The recipes a repository already earned, mined from its own history.
+
+    A cold deployment on its first project has neither a cross-repository
+    prior — there are no other repositories to learn from — nor settled
+    judgements of its own, because the proxy has not served the project a
+    week.  The history the project already has is its own answer: a commit
+    that fixes a named failure is a verified episode of exactly the shape the
+    miner writes, and a knowledge base seeded from it is not empty on day one.
+
+    The mining is deliberately narrow.  A commit is a repair only when its
+    subject says so, and only the files it touches and the patch it carries
+    become a recipe — the commit's body is the author's opinion of the fix,
+    and a document that quotes it is quoting an opinion, not a fix.  A commit
+    that changes nothing but a lockfile is a dependency bump, and a recipe
+    whose diff is a wall of hashes is not a recipe.
+
+    ``git`` must be on the path and *repo_root* must hold a repository;
+    anything else returns an empty list, because a bootstrap that raises is a
+    CLI that cannot start on a machine without the history it is bootstrapping
+    from, and the layer's first rule is that a missing history is nothing, not
+    an error.
+    """
+    if not repo_root or not re.match(r"^\w[\w.\-]*$", scope):
+        return []
+    command = [
+        "git",
+        "log",
+        "--pretty=format:%H%x00%at%x00%s",
+        "-n",
+        str(max(1, int(limit))),
+        "--name-only",
+        "--no-merges",
+    ]
+    if since:
+        command = command[:2] + ["--since", str(since)] + command[2:]
+    try:
+        import subprocess
+
+        completed = subprocess.run(
+            command,
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+    except Exception:
+        return []
+
+    events: List[KnowledgeEvent] = []
+    commit = None
+    for line in (completed.stdout or "").splitlines():
+        if not line.strip():
+            continue
+        line = line.strip()
+        if "\x00" in line:
+            if commit is not None:
+                events.extend(_commit_events(commit, scope, repo_root))
+            hash_, stamp, subject = line.split("\x00", 2)
+            if not _FIX_SUBJECT.search(subject or ""):
+                commit = None
+                continue
+            try:
+                created = float(stamp)
+            except (TypeError, ValueError):
+                created = _now()
+            commit = {
+                "hash": hash_.strip(),
+                "created_at": created,
+                "subject": (subject or "")[:200],
+                "paths": [],
+            }
+        elif commit is not None:
+            commit["paths"].append(line)
+    if commit is not None:
+        events.extend(_commit_events(commit, scope, repo_root))
+    return events
+
+
+def _commit_events(
+    commit: Dict[str, Any], scope: str, repo_root: str = ""
+) -> List[KnowledgeEvent]:
+    """The bootstrapped recipes of one fix commit, one per file it fixed."""
+    paths = tuple(
+        str(path)
+        for path in commit.get("paths") or ()
+        if str(path).strip() and not _is_noise_path(str(path))
+    )
+    if not paths:
+        # A fix commit whose changes are all lockfiles is a dependency bump,
+        # and a recipe is not the document of a dependency bump.
+        return []
+    subject = str(commit.get("subject") or "")
+    signature = signature_of(subject)
+    stamp = float(commit.get("created_at") or 0.0)
+    date = (
+        datetime.datetime.fromtimestamp(stamp, tz=datetime.timezone.utc).date()
+        if stamp
+        else _today()
+    )
+    events: List[KnowledgeEvent] = []
+    for path in paths[:8]:
+        patch = _commit_patch(str(commit.get("hash") or ""), path, repo_root)
+        if not patch:
+            patch = "(the commit's change to this file)"
+        body = "\n".join(
+            part
+            for part in (
+                f"Failure: {subject}",
+                f"Fixed in {date.isoformat()} by commit {str(commit.get('hash') or '')[:12]}",
+                "",
+                "Change that fixed it:",
+                patch[:_BOOTSTRAP_PATCH_CHARS],
+            )
+            if part is not None
+        )
+        digest = fingerprint(
+            "bootstrap", scope, str(commit.get("hash") or ""), path
+        )
+        text = build_document_text(
+            KIND_RECIPE,
+            body,
+            date=date,
+            signature=signature.signature if signature else "",
+            signature_hash=signature.signature_hash if signature else "",
+            paths=(path,),
+            thread_id="",
+            agent="git",
+            mode="debug",
+            test_command="",
+            phase="implement",
+            verification_type="",
+        )
+        events.append(
+            KnowledgeEvent(
+                kind=KIND_RECIPE,
+                fingerprint=digest,
+                scope=scope,
+                agent="git",
+                mode="debug",
+                model="",
+                thread_id="",
+                generation=str(commit.get("hash") or ""),
+                created_at=stamp or _now(),
+                signature=signature.signature if signature else "",
+                signature_hash=signature.signature_hash if signature else "",
+                text=text,
+                metadata={
+                    "paths": [path],
+                    "thread_id": "",
+                    "mode": "debug",
+                    "agent": "git",
+                    "phase": "implement",
+                    "bootstrap": True,
+                },
+            )
+        )
+    return events
+
+
+def _commit_patch(commit_hash: str, path: str, repo_root: str = "") -> str:
+    """The patch of one file in one commit; ``""`` when git will not show it."""
+    if not commit_hash or not path:
+        return ""
+    try:
+        import subprocess
+
+        completed = subprocess.run(
+            ["git", "show", "--format=", "-U3", commit_hash, "--", path],
+            cwd=str(repo_root) or None,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    except Exception:
+        return ""
+    return str(completed.stdout or "").strip()
+
+
+def _is_noise_path(path: str) -> bool:
+    """Whether a changed file is bookkeeping rather than code."""
+    name = str(path).rsplit("/", 1)[-1].lower()
+    if name in _NOISE_FILENAMES or name.endswith(_NOISE_SUFFIXES):
+        return True
+    if name.endswith((".pyc", ".pyo")):
         return True
     return False

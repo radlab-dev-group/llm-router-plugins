@@ -44,8 +44,17 @@ class FakeRedis:
         self.ttls = {}
         self.calls = []
 
-    def hset(self, key, field, value):
+    def hset(self, key, field=None, value=None, mapping=None):
+        # Redis spells the same command two ways; the label store uses the
+        # mapping form and the tests below use the field form.
+        if mapping is None and isinstance(field, dict):
+            field, mapping = None, field
         self.calls.append(("hset", key, field))
+        if mapping is not None:
+            self.hashes.setdefault(key, {}).update(
+                {str(name): str(item) for name, item in mapping.items()}
+            )
+            return len(mapping)
         self.hashes.setdefault(key, {})[field] = str(value)
         return 1
 
@@ -81,7 +90,18 @@ class FakeRedis:
         return stream[-1][0]
 
     def xrange(self, key, min="-", max="+", count=0):
+        # Redis starts the range at its lower bound; the drain resumes by id,
+        # so a range that starts at an id holds one record past it, and the
+        # reader skips the one it stopped at.  A range that starts before the
+        # first record is the whole stream.
         rows = list(self.streams.get(key, []))
+        if min not in ("-", "0-0"):
+            for index, (entry_id, _) in enumerate(rows):
+                if str(entry_id) == str(min):
+                    rows = rows[index:]
+                    break
+            else:
+                rows = []
         return rows[:count] if count else rows
 
 
@@ -196,7 +216,7 @@ def test_the_env_switch_off_overrides_the_section():
 
 
 
-class FakeRedis:
+class LabelFakeRedis:
     """Minimal Redis API for tests without a server."""
 
     def __init__(self):
@@ -225,7 +245,7 @@ class TestLabelStoreDedup:
 
     def test_duplicate_session_generation_doc_is_one_record(self):
         """One record per (session, generation, document), however often seen."""
-        store = LabelStore(client=FakeRedis())
+        store = LabelStore(client=LabelFakeRedis())
         feat = CandidateFeatures(score=0.9)
         s1 = FeedbackSample(
             scope="repo", session_id="s1", generation="g1",
@@ -247,7 +267,7 @@ class TestLabelStoreDedup:
 
     def test_verdict_overwrites_unlabelled_exposure(self):
         """A later judgement replaces the unlabelled exposure."""
-        store = LabelStore(client=FakeRedis())
+        store = LabelStore(client=LabelFakeRedis())
         feat = CandidateFeatures(score=0.9)
         exposure = FeedbackSample(
             scope="repo", session_id="s1", generation="g1",
@@ -266,7 +286,7 @@ class TestLabelStoreDedup:
 
     def test_new_generation_is_a_new_record(self):
         """Same session, same doc, different generation: two records."""
-        store = LabelStore(client=FakeRedis())
+        store = LabelStore(client=LabelFakeRedis())
         feat = CandidateFeatures(score=0.9)
         s1 = FeedbackSample(
             scope="repo", session_id="s1", generation="g1",
@@ -281,7 +301,7 @@ class TestLabelStoreDedup:
         assert len(store.load("repo")) == 1  # g2 is unlabelled, only g1 stored
 
     def test_different_scopes_are_separate_corpora(self):
-        store = LabelStore(client=FakeRedis())
+        store = LabelStore(client=LabelFakeRedis())
         feat = CandidateFeatures(score=0.9)
         s1 = FeedbackSample(
             scope="repo1", session_id="s1", generation="g1",
@@ -505,3 +525,241 @@ def test_rollback_without_a_scope_on_one_scope_is_the_only_scope():
     learner = Learner(config=namespace, client=client)
     with redirect_stdout(_io.StringIO()):
         assert _scope_view(namespace, client, learner, args, logging.getLogger()) == 1
+
+
+# ------------------------------------------------------ the meta prior ------
+def test_a_pass_with_three_accepted_scopes_writes_the_meta_prior():
+    """The prior is the mean of what the repositories that taught something agree on.
+
+    A cold repository is not a blank one: the features that made a verified
+    fix useful somewhere made it useful here too, and the fit starts from the
+    mean of the accepted models instead of from zero.  The prior is written
+    only when enough scopes have accepted, because one repository's weights
+    are that repository's accidents, and a prior of accidents is worse than
+    the policy.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        meta_prior_key,
+        save_meta_prior,
+    )
+
+    store = FakeRedis()
+    cfg = LearningConfig(
+        min_samples=8,
+        min_observations=2,
+        min_evidence=8.0,
+        explore_rate=0.0,
+        half_life_seconds=0.0,
+        meta_prior_enabled=True,
+        meta_prior_min_scopes=3,
+    )
+    learner = Learner(config=cfg, client=store)
+    feat = CandidateFeatures(score=0.9, exposure=1, budget_chars=100)
+
+    def seed_scope(scope, bias):
+        # Enough labelled, separating samples for the fit to accept.
+        for i in range(60):
+            label = 1.0 if (i % 2 == 0) == (bias > 0) else -1.0
+            sample = FeedbackSample(
+                scope=scope,
+                session_id=f"{scope}-s{i}",
+                generation=f"{scope}-g{i}",
+                document_name=f"{scope}-doc{i}",
+                features=CandidateFeatures(
+                    score=0.9 if (i % 2 == 0) else 0.1,
+                    exposure=1,
+                    budget_chars=100,
+                ),
+                label=label,
+                at=float(i),
+            )
+            store.xadd("agentic_kb:training", {"d": json.dumps(sample.to_json(), sort_keys=True)})
+
+    seed_scope("alpha", 1)
+    seed_scope("beta", 1)
+    seed_scope("gamma", 1)
+    result = learner.drain_and_fit(count=500, max_records=2000)
+    prior = store.values.get(meta_prior_key("agentic-kb"))
+    assert prior is not None, "three accepted scopes wrote no prior"
+    written = json.loads(prior)
+    assert written["schema"] == 2
+    assert len(written["w"]) == 22
+    assert set(written["scopes"]) == {"alpha", "beta", "gamma"}
+    # And the prior is not a fiction: it is the mean of the accepted models.
+    models = [
+        json.loads(store.values[f"agentic-kb:model:{scope}"])
+        for scope in ("alpha", "beta", "gamma")
+    ]
+    for index in range(22):
+        mean = sum(model["w"][index] for model in models) / 3.0
+        assert written["w"][index] == pytest.approx(round(mean, 6), abs=1e-5)
+
+
+def test_a_pass_that_accepted_fewer_than_the_minimum_leaves_the_prior_alone():
+    """A prior is a statement about what the repositories have taught.
+
+    A pass that accepted two scopes has not taught what three would, and
+    rewriting the prior from two is forgetting the evidence an earlier pass
+    saw: the last prior that was worth writing still is.  The pass leaves it
+    alone and says nothing, because there is nothing to say.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        meta_prior_key,
+        save_meta_prior,
+    )
+
+    store = FakeRedis()
+    cfg = LearningConfig(
+        min_samples=8,
+        min_observations=2,
+        min_evidence=8.0,
+        explore_rate=0.0,
+        half_life_seconds=0.0,
+        meta_prior_enabled=True,
+        meta_prior_min_scopes=3,
+    )
+    learner = Learner(config=cfg, client=store)
+    # An earlier pass wrote a prior; this one accepted only two scopes.
+    assert save_meta_prior(
+        store, [0.5] * 22, key_prefix="agentic-kb", scopes=("old", "older", "oldest")
+    )
+    for scope in ("alpha", "beta"):
+        for i in range(60):
+            sample = FeedbackSample(
+                scope=scope,
+                session_id=f"{scope}-s{i}",
+                generation=f"{scope}-g{i}",
+                document_name=f"{scope}-doc{i}",
+                features=CandidateFeatures(
+                    score=0.9 if (i % 2 == 0) else 0.1,
+                    exposure=1,
+                    budget_chars=100,
+                ),
+                label=1.0 if (i % 2 == 0) else -1.0,
+                at=float(i),
+            )
+            store.xadd("agentic_kb:training", {"d": json.dumps(sample.to_json(), sort_keys=True)})
+    learner.drain_and_fit(count=500, max_records=2000)
+    written = json.loads(store.values[meta_prior_key("agentic-kb")])
+    # The prior is the one the earlier pass wrote, not a mean of two.
+    assert written["scopes"] == ["old", "older", "oldest"]
+    assert all(value == 0.5 for value in written["w"])
+
+
+def test_the_meta_prior_is_off_by_default_and_the_pass_says_so():
+    """A deployment without the switch fits from zero and writes no prior."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        meta_prior_key,
+    )
+
+    store = FakeRedis()
+    cfg = LearningConfig(
+        min_samples=8,
+        min_observations=2,
+        min_evidence=8.0,
+        explore_rate=0.0,
+        half_life_seconds=0.0,
+    )
+    learner = Learner(config=cfg, client=store)
+    assert learner._read_meta_prior() is None
+    for i in range(60):
+        sample = FeedbackSample(
+            scope="repo",
+            session_id=f"s{i}",
+            generation=f"g{i}",
+            document_name=f"doc{i}",
+            features=CandidateFeatures(
+                score=0.9 if (i % 2 == 0) else 0.1,
+                exposure=1,
+                budget_chars=100,
+            ),
+            label=1.0 if (i % 2 == 0) else -1.0,
+            at=float(i),
+        )
+        store.xadd("agentic_kb:training", {"d": json.dumps(sample.to_json(), sort_keys=True)})
+    learner.drain_and_fit(count=500, max_records=2000)
+    assert meta_prior_key("agentic-kb") not in store.values
+
+
+# ------------------------------------------------------ the git bootstrap ---
+def test_the_bootstrap_git_flag_mines_fix_commits_and_publishes(tmp_path):
+    """The cold start a meta-prior cannot answer: the repository's own history.
+
+    A first project has no other projects to learn from and no labels of its
+    own yet, and the fix commits it already made are the closest thing to
+    either.  The flag reads the subjects that say a change repaired something,
+    mines one recipe per file each touched, and publishes them through the
+    same publisher the proxy uses — so re-running the bootstrap on a
+    repository it already seeded is a no-op, not a doubling of the corpus.
+    """
+    import argparse
+    import logging
+    import shlex
+    import subprocess
+    import io as _io
+    from contextlib import redirect_stdout
+
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge.learner import (
+        _bootstrap_git,
+    )
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        AgenticKnowledgeConfig,
+    )
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(command):
+        subprocess.run(
+            shlex.split(command), cwd=str(repo), capture_output=True, check=True
+        )
+
+    git("git init -q")
+    git("git config user.email test@example.com")
+    git("git config user.name Test")
+    (repo / "src").mkdir()
+    (repo / "src" / "a.py").write_text("value = 1\n")
+    git("git add src/a.py")
+    git("git commit -q -m 'add a'")
+    (repo / "src" / "a.py").write_text("value = 2\n")
+    git("git add src/a.py")
+    git("git commit -q -m 'fix: the crash in a.py'")
+
+    config = AgenticKnowledgeConfig(key_prefix="agentic-kb")
+    args = argparse.Namespace(
+        bootstrap_git=str(repo),
+        bootstrap_limit=50,
+        bootstrap_since=None,
+        scope="webapp",
+    )
+    with redirect_stdout(_io.StringIO()) as out:
+        code = _bootstrap_git(config, args, logging.getLogger())
+    assert code == 0
+    report = json.loads(out.getvalue().strip().splitlines()[-1])
+    assert report["found"] == 1
+    # The publisher is the proxy's, and a bootstrap without a reachable store
+    # reports what it mined and where it could not publish it, not a crash.
+    assert report["scope"] == "webapp"
+
+
+def test_the_bootstrap_git_flag_needs_a_scope(tmp_path):
+    """A bootstrap writes documents, and a document without a repository is a recipe about nowhere."""
+    import argparse
+    import logging
+    import io as _io
+    from contextlib import redirect_stdout
+
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge.learner import (
+        _bootstrap_git,
+    )
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
+        AgenticKnowledgeConfig,
+    )
+
+    config = AgenticKnowledgeConfig(key_prefix="agentic-kb")
+    args = argparse.Namespace(
+        bootstrap_git=str(tmp_path), bootstrap_limit=50, bootstrap_since=None, scope=""
+    )
+    with redirect_stdout(_io.StringIO()):
+        code = _bootstrap_git(config, args, logging.getLogger())
+    assert code == 1

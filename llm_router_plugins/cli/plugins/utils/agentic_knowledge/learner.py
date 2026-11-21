@@ -21,18 +21,21 @@ import pathlib
 import random
 import sys
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
     acquire_pass_lock,
+    compute_meta_prior,
     FeedbackLog,
     FeedbackSample,
     LabelStore,
     LearningConfig,
+    load_meta_prior,
     release_pass_lock,
+    save_meta_prior,
     SourceBandit,
     load_snapshot,
     publish_snapshot,
@@ -116,6 +119,7 @@ class Learner:
         now: float = 0.0,
         holdout_fraction: float = 0.2,
         arms: Optional[Dict[str, Dict[str, float]]] = None,
+        prior_weights: Optional[Sequence[float]] = None,
     ) -> Dict[str, Any]:
         """
         Fit one scope and decide whether the fit is worth publishing.
@@ -133,6 +137,7 @@ class Learner:
             rng=self._rng,
             now=now,
             arms=self._bandit.arms() if arms is None else arms,
+            prior_weights=prior_weights,
         )
         published = False
         if self._client is not None:
@@ -159,6 +164,57 @@ class Learner:
         source worth — without reaching into a live counter.
         """
         return self._bandit.summary()
+
+    def _read_meta_prior(self) -> Optional[List[float]]:
+        """The cross-repository prior, when the deployment keeps one."""
+        if not bool(getattr(self._learning, "meta_prior_enabled", False)):
+            return None
+        return load_meta_prior(
+            self._client,
+            key_prefix=self._key_prefix,
+            config=self._learning,
+        )
+
+    def _last_snapshot(self, scope: str) -> Optional[Any]:
+        """The model now serving one scope; the prior is built from these."""
+        if self._client is None:
+            return None
+        try:
+            return load_snapshot(
+                self._client,
+                scope,
+                key_prefix=self._key_prefix,
+                config=self._learning,
+            )
+        except Exception:
+            return None
+
+    def _refresh_meta_prior(self, accepted: List[Any]) -> None:
+        """
+        Rewrite the prior from what this pass accepted, if there is enough.
+
+        A pass that accepted nothing leaves the prior alone: the last prior
+        that was worth writing still is, and a pass that saw no evidence is
+        not a reason to forget the evidence an earlier pass saw.  The same
+        rule covers a pass that accepted fewer scopes than the minimum —
+        a prior is a statement about what the repositories have taught, and
+        this pass has not taught.
+        """
+        if (
+            self._client is None
+            or not bool(getattr(self._learning, "meta_prior_enabled", False))
+        ):
+            return
+        minimum = int(getattr(self._learning, "meta_prior_min_scopes", 3))
+        weights = compute_meta_prior(accepted, min_scopes=minimum)
+        if weights is None:
+            return
+        save_meta_prior(
+            self._client,
+            weights,
+            key_prefix=self._key_prefix,
+            scopes=[item.scope for item in accepted if item.scope],
+        )
 
     def read_cursor(self) -> str:
         """Where the last pass stopped in the training stream; ``0-0`` at first."""
@@ -222,16 +278,29 @@ class Learner:
 
         merged = self._labels.merge(drained)
         touched = sorted({s.scope for s in drained if s.scope and s.label})
+        # A cold scope starts from what the warm ones learned.  The prior is
+        # read once per pass; a scope with few labels of its own is fitted
+        # from it rather than from nothing, which is the difference between
+        # "the layer knows how to rank knowledge" and "this repository has
+        # not judged anything yet".
+        prior = self._read_meta_prior()
         scopes: Dict[str, Dict[str, Any]] = {}
+        accepted: List[Any] = []
         for scope in touched:
             corpus = self._labels.load(scope, limit=corpus_limit)
-            scopes[scope] = self.fit_scope(
+            report = self.fit_scope(
                 scope,
                 corpus,
                 now=now,
                 holdout_fraction=holdout_fraction,
+                prior_weights=prior,
             )
+            scopes[scope] = report
+            serving = self._last_snapshot(scope)
+            if serving is not None and serving.ranker.trained:
+                accepted.append(serving)
         self.save_cursor(seen)
+        self._refresh_meta_prior(accepted)
 
         if self._logger is not None:
             self._logger.info(
@@ -392,6 +461,37 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--bootstrap-git",
+        default=None,
+        metavar="REPO_ROOT",
+        help=(
+            "Seed a scope's knowledge base from the fix commits of a "
+            "repository instead of waiting for its first agent: reads the "
+            "subjects that say a change repaired something, publishes one "
+            "recipe per file each touched, and exits. The cold start this "
+            "answers is the one a meta-prior cannot: a first project has no "
+            "other projects to learn from, and its own history is the "
+            "judgement it has already made."
+        ),
+    )
+    parser.add_argument(
+        "--bootstrap-limit",
+        type=int,
+        default=50,
+        help="How many commits a bootstrap reads (default: 50).",
+    )
+    parser.add_argument(
+        "--bootstrap-since",
+        default=None,
+        metavar="WHEN",
+        help=(
+            "Only bootstrap commits newer than a git date, e.g. '6 months "
+            "ago'. A repository whose history predates its current "
+            "architecture should not teach the layer about the architecture "
+            "it no longer has."
+        ),
+    )
+    parser.add_argument(
         "--lock-ttl",
         default=None,
         metavar="SECONDS",
@@ -401,6 +501,74 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
+
+
+def _bootstrap_git(
+    config: AgenticKnowledgeConfig, args: Any, logger: Any
+) -> int:
+    """
+    Seed a scope from the fix commits its own history already made.
+
+    A scope is required: a bootstrap writes documents, and a document without
+    a repository to belong to is a recipe about nowhere.  The publisher is the
+    one the proxy uses, so the deduplication is the same one — re-running a
+    bootstrap on a repository it already seeded is a no-op, not a doubling of
+    the corpus.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.events import (
+        KnowledgeEventPublisher,
+    )
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.miner import (
+        mine_commit_fixes,
+    )
+
+    scope = str(args.scope or "").strip()
+    if not scope:
+        logger.error("--bootstrap-git needs --scope")
+        return 1
+    events = mine_commit_fixes(
+        str(args.bootstrap_git),
+        scope,
+        limit=max(1, int(args.bootstrap_limit)),
+        since=getattr(args, "bootstrap_since", None) or None,
+    )
+    if not events:
+        logger.info(
+            "bootstrap: %s has no fix commits to mine for %s",
+            args.bootstrap_git,
+            scope,
+        )
+        print(json.dumps({"scope": scope, "published": 0, "found": 0}))
+        return 0
+    publisher = KnowledgeEventPublisher(
+        connection=config.redis,
+        stream_key=config.stream_key,
+        key_prefix=config.key_prefix,
+        dedup_ttl_seconds=int(config.dedup_ttl_seconds),
+        max_stream_len=int(config.max_stream_len),
+        logger=logger,
+    )
+    status = publisher.publish(events)
+    logger.info(
+        "bootstrap: %s mined=%d published=%s reason=%s",
+        scope,
+        len(events),
+        getattr(status, "published", "?"),
+        getattr(status, "reason", "") or "-",
+    )
+    print(
+        json.dumps(
+            {
+                "scope": scope,
+                "found": len(events),
+                "published": int(getattr(status, "published", 0) or 0),
+                "status": str(getattr(status, "status", "")),
+                "reason": str(getattr(status, "reason", "") or ""),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 def _scope_view(
@@ -556,6 +724,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             "LLM_ROUTER_KNOWLEDGE_AGENTIC_REDIS_HOST (and friends)"
         )
         return 1
+
+    if getattr(args, "bootstrap_git", None):
+        return _bootstrap_git(config, args, logger)
 
     learner = Learner(
         config=config,
