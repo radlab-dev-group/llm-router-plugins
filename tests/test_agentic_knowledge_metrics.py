@@ -743,6 +743,69 @@ def test_a_corpus_with_nothing_labelled_reports_no_distribution():
     assert corpus["features"] is None
 
 
+def test_the_hand_printed_view_names_the_shape_and_the_exploration(capsys):
+    """
+    The operator's own reading of the two new numbers, pinned as text.
+
+    A JSON field a dashboard can compute with is one thing; a line an
+    operator reads in a terminal is another, and the wording carries the
+    claim — that only some of the fifteen features are fit candidates, so
+    "6 would be pruned" is about the seven a fit can move and not about the
+    fifteen it reads.  A test on the sentence is the only thing that keeps
+    the sentence true.
+    """
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge.stats import (
+        _print_learning,
+    )
+
+    _print_learning(
+        [
+            {
+                "scope": "webapp",
+                "enabled": True,
+                "model": {},
+                "corpus": {
+                    "records": 4,
+                    "labelled": 4,
+                    "features": {
+                        name: {"mean": 0.0, "std": 0.0}
+                        for name in (
+                            "bias",
+                            "score",
+                            "score_sq",
+                            "scale_rrf",
+                            "scale_reranker",
+                            "signature_match",
+                            "path_match",
+                            "path_stem_match",
+                            "command_match",
+                            "age_days_log",
+                            "upvotes_log",
+                            "downvotes_log",
+                            "exposure_log",
+                            "rank",
+                            "size_share",
+                        )
+                    },
+                },
+                "history": {"count": 0, "kept": 3, "newest": []},
+                "monitors": {
+                    "window": 10,
+                    "docs": 10,
+                    "docs_over_50_exposures": 0.0,
+                    "heaviest": 1,
+                    "explored_share": 0.2,
+                },
+            }
+        ]
+    )
+    printed = capsys.readouterr().out
+    # Seven of the fifteen are fit candidates; none of the seven varies here.
+    assert "15 measured, 0 of 7 a fit can move" in printed
+    assert "7 would be pruned" in printed
+    assert "explored 20%" in printed
+
+
 def test_the_reader_emits_the_learning_view_with_a_flag(capsys, monkeypatch):
     from llm_router_plugins.cli.plugins.utils.agentic_knowledge.stats import (
         main,

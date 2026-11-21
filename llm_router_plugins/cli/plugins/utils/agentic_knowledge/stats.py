@@ -29,6 +29,7 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.metrics import (
 )
 from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
     FEATURE_NAMES,
+    LEARNABLE_FEATURE_NAMES,
     LabelStore,
     SourceBandit,
     load_snapshot,
@@ -316,15 +317,11 @@ def learning_view(
         corpus = len(rows)
         labelled = sum(1 for row in rows if row.label != 0.0)
         if labelled:
-            vectors = [
-                row.features.vector() for row in rows if row.label != 0.0
-            ]
+            vectors = [row.features.vector() for row in rows if row.label != 0.0]
             for index, name in enumerate(FEATURE_NAMES):
                 column = [vector[index] for vector in vectors]
                 mean = sum(column) / len(column)
-                variance = (
-                    sum((value - mean) ** 2 for value in column) / len(column)
-                )
+                variance = sum((value - mean) ** 2 for value in column) / len(column)
                 feature_stats[name] = {
                     "mean": round(mean, 6),
                     "std": round(math.sqrt(variance), 6),
@@ -455,14 +452,22 @@ def _print_learning(views: List[Dict[str, Any]]) -> None:
             )
         features = corpus.get("features") or {}
         if features:
-            # A feature the corpus never varies is a feature the fit prunes
-            # before it starts, and a corpus that lost one it used to vary
-            # has lost a dimension the accepted model was fitted on.
-            pruned = sum(1 for row in features.values() if not row.get("std"))
-            varied = len(features) - pruned
-            shape = f"features: {varied}/{len(features)} vary"
+            # Only some of the fifteen are fit candidates — the rest are
+            # held at zero by construction — so the number worth printing is
+            # how many of *those* the corpus still varies: a candidate the
+            # corpus does not vary is a dimension an accepted model was
+            # fitted on and this corpus no longer offers.
+            candidates = [
+                row
+                for name, row in features.items()
+                if name in LEARNABLE_FEATURE_NAMES
+            ]
+            pruned = sum(1 for row in candidates if not row.get("std"))
+            varied = len(candidates) - pruned
+            shape = f"features: {len(features)} measured, {varied} of "
+            shape += f"{len(candidates)} a fit can move"
             if pruned:
-                shape += f", {pruned} a fit would prune"
+                shape += f" ({pruned} would be pruned: no variation)"
             print(f"  {'':<28} {shape}")
         if monitors:
             print(

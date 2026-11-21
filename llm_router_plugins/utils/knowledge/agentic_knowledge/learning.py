@@ -70,6 +70,7 @@ __all__ = [
     "release_pass_lock",
     "load_snapshot",
     "FEATURE_NAMES",
+    "LEARNABLE_FEATURE_NAMES",
     "SCALE_RRF",
     "SCALE_RERANKER",
 ]
@@ -105,6 +106,14 @@ _N_FEATURES = len(FEATURE_NAMES)
 #: The features a document is named by.  A corpus that varies none of them
 #: cannot identify a weight, and a weight nobody identified must not be used.
 _LEARNABLE = (1, 5, 6, 7, 8, 9, 13)
+
+#: :data:`_LEARNABLE` by name.  A reader that reports a corpus says what a fit
+#: may move as well as what it holds: a non-varying feature outside this set
+#: costs a fit nothing, and a non-varying one inside it is a dimension the
+#: accepted model was fitted on and this corpus no longer has.
+LEARNABLE_FEATURE_NAMES: Tuple[str, ...] = tuple(
+    FEATURE_NAMES[index] for index in _LEARNABLE
+)
 
 #: Correlation at which two features are one feature wearing two names, and the
 #: second is pruned rather than fitted.

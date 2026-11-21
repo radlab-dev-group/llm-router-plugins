@@ -382,11 +382,11 @@ def tune(
     # The shipped policy, measured on the same split as the grid, so the
     # deltas are against the numbers the operator already has in production
     # rather than against an average the grid happened to produce.
-    baseline_earned = _measure(config, calibration, lam, precision_floor, recall_floor)
+    baseline_earned = _measure(
+        config, calibration, lam, precision_floor, recall_floor
+    )
     baseline_scored = (
-        _measure(config, held, lam, precision_floor, recall_floor)
-        if held
-        else None
+        _measure(config, held, lam, precision_floor, recall_floor) if held else None
     )
     baseline = _Point(
         index=-1,
@@ -592,9 +592,7 @@ def _holdout_deltas(chosen: _Point, baseline: _Point) -> Optional[Dict[str, Any]
             4,
         ),
         "escalation_recall": round(
-            chosen.holdout_escalation_recall
-            - baseline.holdout_escalation_recall,
-            4,
+            chosen.holdout_escalation_recall - baseline.holdout_escalation_recall, 4
         ),
     }
 
