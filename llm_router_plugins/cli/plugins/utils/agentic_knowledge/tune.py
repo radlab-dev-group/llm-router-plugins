@@ -20,12 +20,18 @@ answered its own question.
 
 The grid is deliberately small and explicit.  A search that can find a better
 policy on the dataset it was searched on has found a policy that fits that
-dataset, and the holdout the operator keeps is the one thing it cannot see.
+dataset, so the selection is made on the calibration half and the holdout
+half is measured, not selected on: the point is picked blind to the sessions
+it is then judged on, and a delta claimed on the holdout is read against the
+delta the shipped policy claims there.  With no holdout named the whole
+dataset is the calibration and the report says so.
 """
 
 import argparse
+import hashlib
 import itertools
 import json
+import math
 import pathlib
 import sys
 
@@ -60,6 +66,14 @@ class _Point:
     escalation_precision: float
     eligible: bool
     refused_reason: str
+    #: The same point measured on the sessions it was not selected on, each
+    #: ``None`` when the run had no holdout: an empty number would read as
+    #: "it earned zero there", which is a different claim than "nobody asked".
+    holdout_objective: Optional[float] = None
+    holdout_recipe_hit_rate: Optional[float] = None
+    holdout_injected_chars_per_turn: Optional[float] = None
+    holdout_char_efficiency: Optional[float] = None
+    holdout_escalation_precision: Optional[float] = None
 
 
 def _objective(
@@ -121,6 +135,92 @@ def _apply(
     )
 
 
+def _holdout_names(
+    sessions: Sequence[Dict[str, Any]],
+    holdout_fraction: float = 0.0,
+    holdout_ids: Sequence[str] = (),
+    seed: int = 11,
+) -> List[str]:
+    """
+    The sessions the grid is not allowed to select on.
+
+    Named ids win, because the operator's holdout is a thing they already keep
+    and the tool has no right to second-guess it.  A fraction is honoured by a
+    hash of ``seed`` and the session id, so the same dataset and the same seed
+    split the same way in two runs and in two checkouts, without the split
+    depending on the order the sessions were loaded in.
+
+    The split never takes the whole dataset: a grid selected on nothing is not
+    a grid, and a point chosen by a coin cannot be reported as a measurement.
+    """
+    names = [str(session.get("id") or "") for session in sessions]
+    known = {name for name in names}
+    chosen = {str(name) for name in holdout_ids}
+    unknown = sorted(chosen - known)
+    if unknown:
+        raise ValueError(
+            "the dataset has no session(s) named: " + ", ".join(unknown)
+        )
+    if holdout_fraction > 0.0 and len(known) > 1:
+        ranked = sorted(
+            known,
+            key=lambda name: hashlib.sha256(
+                f"{int(seed)}:{name}".encode("utf-8")
+            ).hexdigest(),
+        )
+        take = min(
+            max(int(math.ceil(float(holdout_fraction) * len(ranked))), 1),
+            len(ranked) - 1,
+        )
+        chosen |= set(ranked[:take])
+    return sorted(chosen)
+
+
+def _measure(
+    config: AgenticKnowledgeConfig,
+    sessions: Sequence[Dict[str, Any]],
+    lam: float,
+    precision_floor: float,
+) -> Dict[str, Any]:
+    """
+    One configuration on one set of sessions: the objective and the gate.
+
+    The calibration and the holdout are measured by this same function, so a
+    number on either side is the number the other side would have read: the
+    split changes what a point is allowed to be selected on, not what it is
+    judged by.
+    """
+    if not sessions:
+        return {
+            "objective": 0.0,
+            "recipe_hit_rate": 0.0,
+            "injected_chars_per_turn": 0.0,
+            "char_efficiency": 0.0,
+            "escalation_precision": None,
+            "eligible": False,
+            "refused_reason": "no sessions to measure on",
+            "turns": 0,
+        }
+    report = evaluate(config, sessions)
+    read = report["variants"].get(VARIANT_READ) or {}
+    hit_rate = float(read.get("recipe_hit_rate", 0.0))
+    chars = float(read.get("injected_chars_per_turn", 0.0))
+    precision = _escalation_precision(report)
+    eligible = precision >= precision_floor
+    return {
+        "objective": _objective(hit_rate, chars, lam),
+        "recipe_hit_rate": hit_rate,
+        "injected_chars_per_turn": chars,
+        "char_efficiency": float(read.get("char_efficiency", 0.0)),
+        "escalation_precision": precision,
+        "eligible": eligible,
+        "refused_reason": (
+            "" if eligible else "escalation precision below floor"
+        ),
+        "turns": sum(len(session.get("turns") or ()) for session in sessions),
+    }
+
+
 def tune(
     config: AgenticKnowledgeConfig,
     sessions: Sequence[Dict[str, Any]],
@@ -132,6 +232,9 @@ def tune(
     lam: float,
     precision_floor: float,
     shared_factors: bool = True,
+    holdout_fraction: float = 0.0,
+    holdout_ids: Sequence[str] = (),
+    seed: int = 11,
 ) -> Dict[str, Any]:
     """
     Walk the grid, replay every point, and report what the walk found.
@@ -141,34 +244,50 @@ def tune(
     the report reproducible: a report that cannot say "point 17 is
     (0.35, 0.55, 3, 1.2)" cannot be re-run, and a tune that cannot be re-run
     is a guess with a table attached.
+
+    The selection is made on the calibration half and the holdout half is only
+    measured, which is the plan's criterion for the phase: a point chosen on
+    the sessions it is then judged on has been fitted to them, and the delta
+    it claims is the shape of the dataset rather than of the policy.  The
+    shipped policy is measured on both halves, so a holdout delta is read
+    against the delta the policy it replaces claims on the same sessions.
     """
-    shipped = (
-        config.min_similarity,
-        config.strong_recipe_score,
-        config.loop_threshold,
+    holdout = _holdout_names(
+        sessions,
+        holdout_fraction=holdout_fraction,
+        holdout_ids=holdout_ids,
+        seed=seed,
     )
+    calibration = [
+        session for session in sessions
+        if str(session.get("id") or "") not in holdout
+    ]
+    held = [
+        session for session in sessions
+        if str(session.get("id") or "") in holdout
+    ]
     shipped_weights = {
         source.category: float(source.weight)
         for policy in config.modes.values()
         for source in policy.sources
     }
+
     points: List[_Point] = []
-    index = 0
-    for ms, srs, lt, factors in itertools.product(
-        min_similarity, strong_recipe_score, loop_threshold,
-        _factor_combos(weight_categories, weight_factors, shared_factors),
+    for index, (ms, srs, lt, factors) in enumerate(
+        itertools.product(
+            min_similarity,
+            strong_recipe_score,
+            loop_threshold,
+            _factor_combos(weight_categories, weight_factors, shared_factors),
+        )
     ):
         weights = {
             category: round(shipped_weights.get(category, 1.0) * factor, 4)
             for category, factor in factors.items()
         }
         variant = _apply(config, ms, srs, lt, weights)
-        report = evaluate(variant, sessions)
-        read = report["variants"].get(VARIANT_READ) or {}
-        hit_rate = float(read.get("recipe_hit_rate", 0.0))
-        chars = float(read.get("injected_chars_per_turn", 0.0))
-        precision = _escalation_precision(report)
-        eligible = precision >= precision_floor
+        earned = _measure(variant, calibration, lam, precision_floor)
+        scored = _measure(variant, held, lam, precision_floor) if held else None
         points.append(
             _Point(
                 index=index,
@@ -176,55 +295,98 @@ def tune(
                 strong_recipe_score=srs,
                 loop_threshold=lt,
                 weights=weights,
-                objective=_objective(hit_rate, chars, lam),
-                recipe_hit_rate=hit_rate,
-                injected_chars_per_turn=chars,
-                char_efficiency=float(read.get("char_efficiency", 0.0)),
-                escalation_precision=precision,
-                eligible=eligible,
-                refused_reason=(
-                    "" if eligible else "escalation precision below floor"
+                objective=earned["objective"],
+                recipe_hit_rate=earned["recipe_hit_rate"],
+                injected_chars_per_turn=earned["injected_chars_per_turn"],
+                char_efficiency=earned["char_efficiency"],
+                escalation_precision=earned["escalation_precision"],
+                eligible=earned["eligible"],
+                refused_reason=earned["refused_reason"],
+                holdout_objective=(
+                    scored["objective"] if scored is not None else None
+                ),
+                holdout_recipe_hit_rate=(
+                    scored["recipe_hit_rate"] if scored is not None else None
+                ),
+                holdout_injected_chars_per_turn=(
+                    scored["injected_chars_per_turn"] if scored is not None else None
+                ),
+                holdout_char_efficiency=(
+                    scored["char_efficiency"] if scored is not None else None
+                ),
+                holdout_escalation_precision=(
+                    scored["escalation_precision"] if scored is not None else None
                 ),
             )
         )
-        index += 1
 
     eligible = [point for point in points if point.eligible]
     chosen = None
     if eligible:
-        chosen = max(eligible, key=lambda p: (p.objective, -p.injected_chars_per_turn))
+        chosen = max(
+            eligible, key=lambda p: (p.objective, -p.injected_chars_per_turn)
+        )
     elif points:
         chosen = max(points, key=lambda p: p.objective)
 
-    # The shipped policy, measured on the same sessions, so the deltas are
-    # against a number the operator already has in production rather than
-    # against an average the grid happened to produce.
-    baseline_report = evaluate(config, sessions)
-    baseline_read = baseline_report["variants"].get(VARIANT_READ) or {}
+    # The shipped policy, measured on the same split as the grid, so the
+    # deltas are against the numbers the operator already has in production
+    # rather than against an average the grid happened to produce.
+    baseline_earned = _measure(config, calibration, lam, precision_floor)
+    baseline_scored = _measure(config, held, lam, precision_floor) if held else None
     baseline = _Point(
         index=-1,
         min_similarity=config.min_similarity,
         strong_recipe_score=config.strong_recipe_score,
         loop_threshold=config.loop_threshold,
         weights=dict(shipped_weights),
-        objective=_objective(
-            float(baseline_read.get("recipe_hit_rate", 0.0)),
-            float(baseline_read.get("injected_chars_per_turn", 0.0)),
-            lam,
+        objective=baseline_earned["objective"],
+        recipe_hit_rate=baseline_earned["recipe_hit_rate"],
+        injected_chars_per_turn=baseline_earned["injected_chars_per_turn"],
+        char_efficiency=baseline_earned["char_efficiency"],
+        escalation_precision=baseline_earned["escalation_precision"],
+        eligible=baseline_earned["eligible"],
+        refused_reason=baseline_earned["refused_reason"],
+        holdout_objective=(
+            baseline_scored["objective"] if baseline_scored is not None else None
         ),
-        recipe_hit_rate=float(baseline_read.get("recipe_hit_rate", 0.0)),
-        injected_chars_per_turn=float(
-            baseline_read.get("injected_chars_per_turn", 0.0)
+        holdout_recipe_hit_rate=(
+            baseline_scored["recipe_hit_rate"]
+            if baseline_scored is not None
+            else None
         ),
-        char_efficiency=float(baseline_read.get("char_efficiency", 0.0)),
-        escalation_precision=_escalation_precision(baseline_report),
-        eligible=_escalation_precision(baseline_report) >= precision_floor,
-        refused_reason="",
+        holdout_injected_chars_per_turn=(
+            baseline_scored["injected_chars_per_turn"]
+            if baseline_scored is not None
+            else None
+        ),
+        holdout_char_efficiency=(
+            baseline_scored["char_efficiency"]
+            if baseline_scored is not None
+            else None
+        ),
+        holdout_escalation_precision=(
+            baseline_scored["escalation_precision"]
+            if baseline_scored is not None
+            else None
+        ),
     )
 
     return {
         "sessions": len(sessions),
         "turns": sum(len(session.get("turns") or ()) for session in sessions),
+        "split": {
+            "holdout": list(holdout),
+            "calibration_sessions": len(calibration),
+            "holdout_sessions": len(held),
+            "seed": int(seed),
+            "note": (
+                ""
+                if holdout
+                else "no holdout named: every session was calibration, and the "
+                     "chosen point was selected on the sessions it reports"
+            ),
+        },
         "grid": {
             "min_similarity": list(min_similarity),
             "strong_recipe_score": list(strong_recipe_score),
@@ -235,12 +397,13 @@ def tune(
             "lambda": lam,
             "precision_floor": precision_floor,
         },
-        "points": [
-            _point_report(point) for point in points
-        ],
+        "points": [_point_report(point) for point in points],
         "chosen": _point_report(chosen) if chosen is not None else None,
         "baseline": _point_report(baseline),
         "deltas": _deltas(chosen, baseline) if chosen is not None else None,
+        "holdout_deltas": (
+            _holdout_deltas(chosen, baseline) if chosen is not None else None
+        ),
         "note": (
             "no grid point met the precision floor; the best available point "
             "is reported with the floor it failed"
@@ -295,6 +458,15 @@ def _point_report(point: _Point) -> Dict[str, Any]:
         "escalation_precision": point.escalation_precision,
         "eligible": point.eligible,
         "refused_reason": point.refused_reason,
+        "holdout": {
+            "objective": point.holdout_objective,
+            "recipe_hit_rate": point.holdout_recipe_hit_rate,
+            "injected_chars_per_turn": point.holdout_injected_chars_per_turn,
+            "char_efficiency": point.holdout_char_efficiency,
+            "escalation_precision": point.holdout_escalation_precision,
+        }
+        if point.holdout_objective is not None
+        else None,
     }
 
 
@@ -319,6 +491,39 @@ def _deltas(chosen: _Point, baseline: _Point) -> Dict[str, Any]:
         ),
         "escalation_precision": round(
             chosen.escalation_precision - baseline.escalation_precision, 4
+        ),
+    }
+
+
+def _holdout_deltas(chosen: _Point, baseline: _Point) -> Optional[Dict[str, Any]]:
+    """
+    The same deltas on the sessions the point was not selected on.
+
+    ``None`` when the run had no holdout, rather than a table of zeros: a
+    reader who sees ``0.0`` in a holdout column reads a measured absence, and
+    what they should read is that nobody measured.
+    """
+    if chosen.holdout_objective is None or baseline.holdout_objective is None:
+        return None
+    return {
+        "objective": round(
+            chosen.holdout_objective - baseline.holdout_objective, 6
+        ),
+        "recipe_hit_rate": round(
+            chosen.holdout_recipe_hit_rate - baseline.holdout_recipe_hit_rate, 4
+        ),
+        "injected_chars_per_turn": round(
+            chosen.holdout_injected_chars_per_turn
+            - baseline.holdout_injected_chars_per_turn,
+            2,
+        ),
+        "char_efficiency": round(
+            chosen.holdout_char_efficiency - baseline.holdout_char_efficiency, 4
+        ),
+        "escalation_precision": round(
+            chosen.holdout_escalation_precision
+            - baseline.holdout_escalation_precision,
+            4,
         ),
     }
 
@@ -378,6 +583,34 @@ def _markdown(result: Dict[str, Any]) -> str:
         f"| objective | {baseline.get('objective')} | "
         f"{chosen.get('objective')} | {deltas.get('objective')} |",
     ]
+    split = result.get("split") or {}
+    holdout_deltas = result.get("holdout_deltas")
+    if holdout_deltas:
+        chosen_half = chosen.get("holdout") or {}
+        baseline_half = baseline.get("holdout") or {}
+        lines += [
+            "",
+            "## On the holdout, which the selection never saw",
+            "",
+            f"{split.get('calibration_sessions')} calibration sessions, "
+            f"{split.get('holdout_sessions')} held out.",
+            "",
+            "| metric | shipped | chosen | Δ |",
+            "|---|---|---|---|",
+        ]
+        for metric, label in (
+            ("recipe_hit_rate", "recipe_hit_rate"),
+            ("injected_chars_per_turn", "injected_chars_per_turn"),
+            ("char_efficiency", "char_efficiency"),
+            ("escalation_precision", "escalation precision"),
+            ("objective", "objective"),
+        ):
+            lines.append(
+                f"| {label} | {baseline_half.get(metric)} | "
+                f"{chosen_half.get(metric)} | {holdout_deltas.get(metric)} |"
+            )
+    elif split.get("note"):
+        lines += ["", f"Split: {split['note']}."]
     if result.get("note"):
         lines += ["", f"Note: {result['note']}."]
     lines += [
@@ -477,6 +710,34 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--holdout-fraction",
+        type=float,
+        default=0.0,
+        help=(
+            "Share of the sessions held out of the selection, split by a hash "
+            "of --seed and the session id so two runs split the same way. The "
+            "grid is chosen on the rest and only measured on the holdout "
+            "(default: 0, no holdout)."
+        ),
+    )
+    parser.add_argument(
+        "--holdout-session",
+        action="append",
+        default=None,
+        metavar="SESSION_ID",
+        help=(
+            "A session to hold out of the selection; repeatable. Names the "
+            "operator keeps win over a fraction: the holdout is theirs, not "
+            "the tool's."
+        ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=11,
+        help="Seed of the holdout split (default: 11).",
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Write the JSON report here; the markdown goes to standard out.",
@@ -528,18 +789,25 @@ def main(argv: Optional[List[str]] = None) -> int:
             }
         )
 
-    result = tune(
-        config=config,
-        sessions=sessions,
-        min_similarity=[float(v) for v in args.min_similarity],
-        strong_recipe_score=[float(v) for v in args.strong_recipe_score],
-        loop_threshold=[int(v) for v in args.loop_threshold],
-        weight_factors=[float(v) for v in args.weight_factor],
-        weight_categories=categories,
-        lam=float(args.lambda_cost),
-        precision_floor=float(args.precision_floor),
-        shared_factors=not args.per_category_factors,
-    )
+    try:
+        result = tune(
+            config=config,
+            sessions=sessions,
+            min_similarity=[float(v) for v in args.min_similarity],
+            strong_recipe_score=[float(v) for v in args.strong_recipe_score],
+            loop_threshold=[int(v) for v in args.loop_threshold],
+            weight_factors=[float(v) for v in args.weight_factor],
+            weight_categories=categories,
+            lam=float(args.lambda_cost),
+            precision_floor=float(args.precision_floor),
+            shared_factors=not args.per_category_factors,
+            holdout_fraction=float(args.holdout_fraction),
+            holdout_ids=[str(name) for name in (args.holdout_session or [])],
+            seed=int(args.seed),
+        )
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 1
 
     if args.output:
         pathlib.Path(args.output).write_text(

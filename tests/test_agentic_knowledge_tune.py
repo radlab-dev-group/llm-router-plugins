@@ -303,3 +303,114 @@ def test_the_tune_never_writes_to_the_policy():
     before = config_path.read_bytes()
     tune_main(["--dataset", str(DATASET), "--min-similarity", "0.35"])
     assert config_path.read_bytes() == before
+
+
+# ------------------------------------------------------ the split of the grid
+def _tiny_tune(config, sessions, **overrides):
+    args = dict(
+        min_similarity=[config.min_similarity],
+        strong_recipe_score=[config.strong_recipe_score],
+        loop_threshold=[config.loop_threshold],
+        weight_factors=[1.0],
+        weight_categories=[],
+        lam=0.001,
+        precision_floor=0.8,
+    )
+    args.update(overrides)
+    return tune(config=config, sessions=sessions, **args)
+
+
+def test_the_holdout_is_never_selected_on():
+    """The grid is chosen on the calibration and only judged on the holdout."""
+    config = base_config()
+    sessions = load_sessions(DATASET)
+    names = [str(session.get("id") or "") for session in sessions]
+    held = names[:1]
+
+    result = _tiny_tune(config, sessions, holdout_ids=held)
+
+    assert result["split"]["holdout"] == held
+    assert result["split"]["holdout_sessions"] == 1
+    assert result["split"]["calibration_sessions"] == len(sessions) - 1
+    # Every point carries what it earned on the half it was not selected on,
+    # and the point the selection used is the calibration number, not that
+    # one: the objective is recomputed from the calibration fields.
+    for point in result["points"]:
+        assert point["holdout"] is not None
+    assert result["chosen"]["objective"] == pytest.approx(
+        result["chosen"]["recipe_hit_rate"]
+        - 0.001 * result["chosen"]["injected_chars_per_turn"],
+        abs=1e-5,
+    )
+
+
+def test_the_holdout_delta_is_read_against_the_shipped_policy_on_the_same_half():
+    config = base_config()
+    sessions = load_sessions(DATASET)
+    held = [str(session.get("id") or "") for session in sessions][:1]
+
+    result = _tiny_tune(config, sessions, holdout_ids=held)
+
+    deltas = result["holdout_deltas"]
+    assert deltas is not None
+    # The calibration delta and the holdout delta are two different numbers:
+    # the first was selected for, the second was not.
+    assert set(deltas) == set(result["deltas"])
+
+
+def test_no_holdout_reports_no_holdout_numbers():
+    """A run that held nothing out says so instead of a column of zeros."""
+    config = base_config()
+    sessions = load_sessions(DATASET)
+
+    result = _tiny_tune(config, sessions)
+
+    assert result["split"]["holdout"] == []
+    assert result["split"]["note"]
+    assert result["holdout_deltas"] is None
+    assert result["chosen"]["holdout"] is None
+
+
+def test_a_holdout_fraction_never_eats_the_calibration():
+    """A grid selected on nothing is not a grid, whatever the operator asked."""
+    config = base_config()
+    sessions = load_sessions(DATASET)
+
+    result = _tiny_tune(config, sessions, holdout_fraction=1.0)
+
+    assert 0 < result["split"]["holdout_sessions"] < len(sessions)
+    assert result["split"]["calibration_sessions"] >= 1
+
+
+def test_the_fraction_split_is_reproducible_from_the_seed():
+    config = base_config()
+    sessions = load_sessions(DATASET)
+
+    first = _tiny_tune(config, sessions, holdout_fraction=0.4, seed=7)["split"]
+    second = _tiny_tune(config, sessions, holdout_fraction=0.4, seed=7)["split"]
+
+    # The same dataset and the same seed split the same way, whatever order
+    # the sessions were loaded in: the split is a function of the names.
+    assert first["holdout"] == second["holdout"]
+    assert first["holdout"]
+    assert first["calibration_sessions"] >= 1
+
+
+def test_an_unknown_holdout_session_is_named_and_refused():
+    config = base_config()
+    sessions = load_sessions(DATASET)
+
+    with pytest.raises(ValueError, match="no session"):
+        _tiny_tune(config, sessions, holdout_ids=["session-that-was-never-recorded"])
+
+
+def test_the_markdown_shows_the_half_the_selection_never_saw():
+    config = base_config()
+    sessions = load_sessions(DATASET)
+    held = [str(session.get("id") or "") for session in sessions][:1]
+
+    result = _tiny_tune(config, sessions, holdout_ids=held)
+    text = _markdown(result)
+
+    assert "holdout" in text.lower()
+    assert "which the selection never saw" in text
