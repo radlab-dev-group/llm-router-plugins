@@ -77,15 +77,19 @@ from llm_router_plugins.utils.routing.agentic_routing.codex.phase import (
 
 __all__ = ["evaluate", "load_sessions", "ReplayEngine"]
 
-#: The four configurations the replay measures.  The learned variant is the
+#: The five configurations the replay measures.  The learned variant is the
 #: same read path with the learner attached, fitted on the labels the replay
 #: itself has earned so far: it measures what the model adds on top of the
 #: static counters, on the same sessions, with the same anti-leak rule the
-#: rest of the replay lives by.
+#: rest of the replay lives by.  The reputation variant is the learner with
+#: one loop held back — the document's Beta posterior on its own, no fitted
+#: weights and no source arm — because a learned variant that lost ground
+#: says nothing about which of the three loops lost it.
 VARIANT_NONE = "no_kb"
 VARIANT_READ = "read"
 VARIANT_ESCALATE = "read_escalate"
 VARIANT_LEARNED = "read_learned"
+VARIANT_REPUTATION = "read_reputation"
 
 #: The learned variant is fitted on the labels the session has earned by the
 #: time a request is scored.  The gates below are the replay's, not the
@@ -319,6 +323,18 @@ class _LearnedReplay:
             rng=self.rng,
             time_fn=lambda: self._tick,
         )
+        #: The reputation loop on its own: the document's Beta posterior with
+        #: no fitted weights and no source arm, in a namespace of its own so
+        #: neither the snapshot nor the arms of the full learner leak into it.
+        #: It exists because a learned variant that loses ground says nothing
+        #: about which of the three loops lost it, and the plan's phase-2
+        #: criterion is about this loop alone.
+        self.reputation_policy = LearningPolicy(
+            config=replace(self.config, explore_rate=0.0),
+            client=_MemoryRedis(),
+            rng=random.Random(_LEARNED_CONFIG_SEED + 1),
+            time_fn=lambda: self._tick,
+        )
         self.samples: List[FeedbackSample] = []
         #: How many times the fit ran and what it said; the report reads
         #: these rather than re-fitting, because the fit is the expensive
@@ -401,6 +417,12 @@ class _LearnedReplay:
             )
             self.samples.append(sample)
             self.policy.settle(sample)
+            # The reputation-only loop gets the same verdict and nothing
+            # else: no bandit observation, no fit, no snapshot.  Its state is
+            # the Beta posterior and that is the whole of what the variant is
+            # allowed to know.
+            if sample.label:
+                self.reputation_policy.reputation.observe(name, sample.label)
             labelled = labelled or label != 0.0
         if labelled:
             self._fit()
@@ -492,6 +514,7 @@ class ReplayEngine:
             VARIANT_READ: _VariantTally(),
             VARIANT_ESCALATE: _VariantTally(),
             VARIANT_LEARNED: _VariantTally(),
+            VARIANT_REPUTATION: _VariantTally(),
         }
         loop = _LoopTally()
         per_turn: List[Dict[str, Any]] = []
@@ -536,6 +559,18 @@ class ReplayEngine:
                     doc_context,
                     learner=learned_state.policy,
                 )
+                # The same turn again, this time with only the document's
+                # reputation moved: the delta of this variant against ``read``
+                # is the phase-2 criterion, and the delta of ``read_learned``
+                # against it is what the fitted model and the arms add.
+                reputation_context, reputation_retrieved, _ = self._read(
+                    turn,
+                    policy,
+                    store,
+                    variants,
+                    doc_context,
+                    learner=learned_state.reputation_policy,
+                )
                 for hit in learned_context.hits:
                     learned_state.note_vote(dict(getattr(hit, "learning", {}) or {}))
                 # Recorded before the turn's own verdict is settled, which is
@@ -575,6 +610,17 @@ class ReplayEngine:
                     store,
                     index,
                     variant_names=(VARIANT_LEARNED,),
+                    session_id=str(session.get("id") or ""),
+                    count_baseline=False,
+                )
+                self._score(
+                    variants,
+                    raw,
+                    reputation_context,
+                    reputation_retrieved,
+                    store,
+                    index,
+                    variant_names=(VARIANT_REPUTATION,),
                     session_id=str(session.get("id") or ""),
                     count_baseline=False,
                 )
@@ -728,6 +774,13 @@ class ReplayEngine:
         policy: Any,
     ) -> None:
         """Count the escalations the read-plus-escalate variant would make."""
+        # The denominator of the recall the tune is asked to keep is the
+        # loops the ground truth marks, whatever this variant chose to do
+        # with them: a variant that escalated on none of them has a recall of
+        # zero, and a precision floor alone would never have said so, because
+        # a point that escalates on nothing also escalates on nothing wrong.
+        if raw.get("is_loop"):
+            variants[VARIANT_ESCALATE].true_loops += 1
         decision = self._escalation.decide(
             turn,
             context,
@@ -769,6 +822,12 @@ class _VariantTally:
     #: Of the escalations the variant made, the ones the ground truth marks as
     #: loops: the numerator of the precision floor a tune is asked to keep.
     escalations_on_true_loop: int = 0
+    #: The turns the ground truth marks as loops, whatever the variant did:
+    #: the denominator of the recall a tune is asked to keep, which is a
+    #: property of the dataset rather than of the policy, and is counted
+    #: here, where every turn of the replay passes, rather than reconstructed
+    #: from the report afterwards.
+    true_loops: int = 0
     missed_saves: int = 0
     #: Characters of retrieved content, before the standing documentation
     #: map the block may also carry; the fixed and the earned halves of the
@@ -800,6 +859,15 @@ class _VariantTally:
             "escalation_precision": (
                 _ratio(self.escalations_on_true_loop, self.escalations)
                 if self.escalations
+                else None
+            ),
+            # None when the dataset marked no loops: a recall with no loops
+            # to recall is a constraint met by definition, and the tune's
+            # floor reads that the way it reads the precision's empty case —
+            # as met, never as perfect-by-accident of the arithmetic.
+            "escalation_recall": (
+                _ratio(self.escalations_on_true_loop, self.true_loops)
+                if self.true_loops
                 else None
             ),
             # The block a request is shown: retrieved content and, where the
@@ -881,6 +949,14 @@ def _report(
             "model_uplift_vs_read"
         ] = _bootstrap_uplift(
             variants.get(VARIANT_READ), variants.get(VARIANT_LEARNED)
+        )
+        # The reputation loop measured on its own, against the same read:
+        # the cheap half of the learned path, and the half that has to work
+        # before a fitted model is worth its cost.
+        report["variants"][VARIANT_REPUTATION][
+            "reputation_uplift_vs_read"
+        ] = _bootstrap_uplift(
+            variants.get(VARIANT_READ), variants.get(VARIANT_REPUTATION)
         )
     return report
 

@@ -303,3 +303,235 @@ def test_the_tune_never_writes_to_the_policy():
     before = config_path.read_bytes()
     tune_main(["--dataset", str(DATASET), "--min-similarity", "0.35"])
     assert config_path.read_bytes() == before
+
+
+# ------------------------------------------------------ the split of the grid
+def _tiny_tune(config, sessions, **overrides):
+    args = dict(
+        min_similarity=[config.min_similarity],
+        strong_recipe_score=[config.strong_recipe_score],
+        loop_threshold=[config.loop_threshold],
+        weight_factors=[1.0],
+        weight_categories=[],
+        lam=0.001,
+        precision_floor=0.8,
+    )
+    args.update(overrides)
+    return tune(config=config, sessions=sessions, **args)
+
+
+def test_the_holdout_is_never_selected_on():
+    """The grid is chosen on the calibration and only judged on the holdout."""
+    config = base_config()
+    sessions = load_sessions(DATASET)
+    names = [str(session.get("id") or "") for session in sessions]
+    held = names[:1]
+
+    result = _tiny_tune(config, sessions, holdout_ids=held)
+
+    assert result["split"]["holdout"] == held
+    assert result["split"]["holdout_sessions"] == 1
+    assert result["split"]["calibration_sessions"] == len(sessions) - 1
+    # Every point carries what it earned on the half it was not selected on,
+    # and the point the selection used is the calibration number, not that
+    # one: the objective is recomputed from the calibration fields.
+    for point in result["points"]:
+        assert point["holdout"] is not None
+    assert result["chosen"]["objective"] == pytest.approx(
+        result["chosen"]["recipe_hit_rate"]
+        - 0.001 * result["chosen"]["injected_chars_per_turn"],
+        abs=1e-5,
+    )
+
+
+def test_the_holdout_delta_is_read_against_the_shipped_policy_on_the_same_half():
+    config = base_config()
+    sessions = load_sessions(DATASET)
+    held = [str(session.get("id") or "") for session in sessions][:1]
+
+    result = _tiny_tune(config, sessions, holdout_ids=held)
+
+    deltas = result["holdout_deltas"]
+    assert deltas is not None
+    # The calibration delta and the holdout delta are two different numbers:
+    # the first was selected for, the second was not.
+    assert set(deltas) == set(result["deltas"])
+
+
+def test_no_holdout_reports_no_holdout_numbers():
+    """A run that held nothing out says so instead of a column of zeros."""
+    config = base_config()
+    sessions = load_sessions(DATASET)
+
+    result = _tiny_tune(config, sessions)
+
+    assert result["split"]["holdout"] == []
+    assert result["split"]["note"]
+    assert result["holdout_deltas"] is None
+    assert result["chosen"]["holdout"] is None
+
+
+def test_a_holdout_fraction_never_eats_the_calibration():
+    """A grid selected on nothing is not a grid, whatever the operator asked."""
+    config = base_config()
+    sessions = load_sessions(DATASET)
+
+    result = _tiny_tune(config, sessions, holdout_fraction=1.0)
+
+    assert 0 < result["split"]["holdout_sessions"] < len(sessions)
+    assert result["split"]["calibration_sessions"] >= 1
+
+
+def test_the_fraction_split_is_reproducible_from_the_seed():
+    config = base_config()
+    sessions = load_sessions(DATASET)
+
+    first = _tiny_tune(config, sessions, holdout_fraction=0.4, seed=7)["split"]
+    second = _tiny_tune(config, sessions, holdout_fraction=0.4, seed=7)["split"]
+
+    # The same dataset and the same seed split the same way, whatever order
+    # the sessions were loaded in: the split is a function of the names.
+    assert first["holdout"] == second["holdout"]
+    assert first["holdout"]
+    assert first["calibration_sessions"] >= 1
+
+
+def test_an_unknown_holdout_session_is_named_and_refused():
+    config = base_config()
+    sessions = load_sessions(DATASET)
+
+    with pytest.raises(ValueError, match="no session"):
+        _tiny_tune(config, sessions, holdout_ids=["session-that-was-never-recorded"])
+
+
+def test_the_markdown_shows_the_half_the_selection_never_saw():
+    config = base_config()
+    sessions = load_sessions(DATASET)
+    held = [str(session.get("id") or "") for session in sessions][:1]
+
+    result = _tiny_tune(config, sessions, holdout_ids=held)
+    text = _markdown(result)
+
+    assert "holdout" in text.lower()
+    assert "which the selection never saw" in text
+
+
+# ------------------------------------------------------- the recall of loops
+def test_the_recall_floor_refuses_a_point_that_escalates_on_nothing():
+    """
+    A precision floor met by doing nothing is not a constraint met.
+
+    The dataset has two loops.  A loop threshold of 4 never reaches them: the
+    point escalates on nothing, so it escalates on nothing wrong, and its
+    precision reports as met — which is precisely the degenerate winner a
+    floor on precision alone hands to the operator, chosen over points that
+    caught the loops.  With a recall floor the same point is refused by name,
+    and without one it is still eligible, because the default is the search
+    the command shipped with.
+    """
+    config = base_config()
+    sessions = load_sessions(DATASET)
+
+    unguarded = _tiny_tune(
+        config, sessions, loop_threshold=[4], recall_floor=0.0
+    )
+    assert unguarded["points"][0]["eligible"] is True
+    # Nothing was escalated, so nothing was escalated wrongly: the precision
+    # floor has nothing to refuse, and says so.
+    assert unguarded["points"][0]["escalation_precision"] == 1.0
+    assert unguarded["points"][0]["escalation_recall"] == 0.0
+
+    guarded = _tiny_tune(
+        config, sessions, loop_threshold=[4], recall_floor=0.5
+    )
+    point = guarded["points"][0]
+    assert point["eligible"] is False
+    assert "recall" in point["refused_reason"]
+    assert guarded["note"]
+
+    # The same point at a threshold that does reach the loops keeps its
+    # eligibility: the floor refuses the misses, not the escalating.
+    catching = _tiny_tune(config, sessions, loop_threshold=[3], recall_floor=0.5)
+    assert catching["points"][0]["escalation_recall"] == 1.0
+    assert catching["points"][0]["eligible"] is True
+    assert catching["note"] == ""
+
+
+def test_the_recall_floor_and_the_precision_floor_name_what_each_refused():
+    """A point that breaks both floors says so, rather than one of them."""
+    config = base_config()
+    sessions = load_sessions(DATASET)
+
+    result = _tiny_tune(
+        config,
+        sessions,
+        loop_threshold=[4],
+        precision_floor=1.0001,
+        recall_floor=0.5,
+    )
+    reason = result["points"][0]["refused_reason"]
+    assert "precision" in reason
+    assert "recall" in reason
+
+
+def test_a_dataset_with_no_loops_meets_the_recall_floor_by_definition():
+    """
+    Nothing to catch is not a recall of zero.
+
+    The denominator of a recall belongs to the dataset.  When it is empty the
+    floor is met — a point cannot be refused for missing loops that were
+    never recorded — and the view says so rather than printing a zero that
+    reads as a failure.
+    """
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge.tune import (
+        _escalation_recall,
+    )
+
+    assert _escalation_recall({"variants": {"read_escalate": {}}}) == 1.0
+    assert (
+        _escalation_recall(
+            {"variants": {"read_escalate": {"escalation_recall": 0.25}}}
+        )
+        == 0.25
+    )
+
+    config = base_config()
+    sessions = [
+        session
+        for session in load_sessions(DATASET)
+        if not any(turn.get("is_loop") for turn in (session.get("turns") or ()))
+    ]
+    assert sessions
+    result = _tiny_tune(config, sessions, recall_floor=1.0)
+    assert result["points"][0]["escalation_recall"] == 1.0
+    assert result["points"][0]["eligible"] is True
+
+
+def test_the_recall_travels_with_the_other_deltas_and_the_markdown():
+    """The report and its prose both carry the number the floor was set at."""
+    config = base_config()
+    sessions = load_sessions(DATASET)
+
+    result = _tiny_tune(config, sessions, loop_threshold=[3], recall_floor=0.5)
+
+    assert "escalation_recall" in result["deltas"]
+    for point in result["points"]:
+        assert "escalation_recall" in point
+    text = _markdown(result)
+    assert "escalation recall" in text
+    assert "0.5" in text
+
+    # And the absence of a floor is said out loud, because a reader who
+    # sees a recall number and no floor needs to know the number was free.
+    unguarded = _markdown(_tiny_tune(config, sessions, loop_threshold=[3]))
+    assert "no recall floor" in unguarded
+
+
+def test_the_parser_defaults_to_no_recall_floor():
+    """The default is the search the command shipped with."""
+    parser = build_parser()
+    args = parser.parse_args(["--dataset", "x.json"])
+    assert args.recall_floor == 0.0
+    assert parser.parse_args(
+        ["--dataset", "x.json", "--recall-floor", "0.75"]
+    ).recall_floor == 0.75

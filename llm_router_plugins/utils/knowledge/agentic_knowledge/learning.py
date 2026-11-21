@@ -49,6 +49,7 @@ import math
 import random
 import threading
 import time
+import uuid
 
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -65,8 +66,11 @@ __all__ = [
     "FeedbackLog",
     "train_ranker",
     "publish_snapshot",
+    "acquire_pass_lock",
+    "release_pass_lock",
     "load_snapshot",
     "FEATURE_NAMES",
+    "LEARNABLE_FEATURE_NAMES",
     "SCALE_RRF",
     "SCALE_RERANKER",
 ]
@@ -103,12 +107,27 @@ _N_FEATURES = len(FEATURE_NAMES)
 #: cannot identify a weight, and a weight nobody identified must not be used.
 _LEARNABLE = (1, 5, 6, 7, 8, 9, 13)
 
+#: :data:`_LEARNABLE` by name.  A reader that reports a corpus says what a fit
+#: may move as well as what it holds: a non-varying feature outside this set
+#: costs a fit nothing, and a non-varying one inside it is a dimension the
+#: accepted model was fitted on and this corpus no longer has.
+LEARNABLE_FEATURE_NAMES: Tuple[str, ...] = tuple(
+    FEATURE_NAMES[index] for index in _LEARNABLE
+)
+
 #: Correlation at which two features are one feature wearing two names, and the
 #: second is pruned rather than fitted.
 _COLLINEAR_MAX = 0.995
 
 #: How far a Newton step may be halved before the fit settles for what it has.
 _BACKTRACK_LIMIT = 24
+
+#: How many documents one process remembers an exploration draw for.  The
+#: window is a generation's worth of rankings, not a corpus: a draw older
+#: than the documents a request can still be shown from is a fact about a
+#: ranking nobody is holding, and the bound is what keeps a long-lived proxy
+#: from growing a ledger of them.
+_RANKED_EXPLORATION_LIMIT = 256
 
 
 def _sigmoid(x: float) -> float:
@@ -189,6 +208,11 @@ class LearningConfig:
         How many published snapshots a scope keeps after the live one, for the
         rollback of a fit that turned out to be worse.  Zero keeps only the
         live one, which is what the layer did before this existed.
+    lock_ttl_seconds : float
+        How long a learner pass holds its lock before a crashed one is
+        overridable.  The default is a few hours, which is the longest a pass
+        may run before it is a failure rather than a slow one: a lock that
+        outlives a crash by a week is a learner that looks dead for a week.
     stream_key, key_prefix : str
         Where the training log and the state live.
     """
@@ -213,6 +237,7 @@ class LearningConfig:
     explore_rate: float = 0.1
     model_ttl_seconds: float = 60.0
     snapshot_history_size: int = 8
+    lock_ttl_seconds: float = 14400.0
     stream_key: str = "agentic_kb:training"
     key_prefix: str = "agentic-kb"
 
@@ -246,6 +271,8 @@ class LearningConfig:
             raise ValueError("learning.model_ttl_seconds must be positive")
         if self.snapshot_history_size < 0:
             raise ValueError("learning.snapshot_history_size must not be negative")
+        if self.lock_ttl_seconds <= 0.0:
+            raise ValueError("learning.lock_ttl_seconds must be positive")
         if not self.stream_key.strip() or not self.key_prefix.strip():
             raise ValueError("learning.stream_key/key_prefix must not be empty")
 
@@ -399,6 +426,12 @@ class FeedbackSample:
     label_kind: str = "counterfactual"
     #: The snapshot that was serving when this injection happened.
     model_id: str = ""
+    #: Whether the ranking of this injection drew the model's Laplace spread
+    #: instead of taking its mean.  Recorded with the label, because a fit
+    #: that cannot tell an explored vote from a greedy one cannot weight an
+    #: off-policy corpus afterwards: the share of votes a model spent
+    #: exploring is part of what the votes are worth.
+    exploration: str = "greedy"
     at: float = 0.0
 
     def to_json(self) -> Dict[str, Any]:
@@ -412,6 +445,7 @@ class FeedbackSample:
             "label": round(float(self.label), 4),
             "kind": self.label_kind,
             "model_id": self.model_id,
+            "exploration": self.exploration,
             "at": round(float(self.at or time.time()), 3),
         }
 
@@ -428,6 +462,7 @@ class FeedbackSample:
             label=float(raw.get("label") or 0.0),
             label_kind=str(raw.get("kind") or "coarse"),
             model_id=str(raw.get("model_id") or ""),
+            exploration=str(raw.get("exploration") or "greedy"),
             at=float(raw.get("at") or 0.0),
         )
 
@@ -1242,6 +1277,89 @@ def load_snapshot(
     )
 
 
+def _lock_key(key_prefix: str) -> str:
+    """The key one learner pass holds while it drains, fits and publishes."""
+    return f"{key_prefix}:learner:lock"
+
+
+#: Delete the lock only if it is still ours.  Read-and-delete without this is
+#: a pass deleting the lock another pass took after ours expired, which is the
+#: race the lock exists to close.
+_RELEASE_SCRIPT = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] then "
+    "return redis.call('del', KEYS[1]) else return 0 end"
+)
+
+
+def acquire_pass_lock(
+    client: Any,
+    key_prefix: str = "agentic-kb",
+    ttl_seconds: float = 14400.0,
+    token: str = "",
+    force: bool = False,
+) -> str:
+    """
+    Take the learner's pass lock, or return ``""`` when somebody else holds it.
+
+    The lock exists because a fit is not idempotent against itself: two
+    overlapping passes read the same cursor, both publish, and the last writer
+    decides what a scope serves — with two histories and no record of which
+    fit won.  A cron whose previous run is still fitting, and a second
+    operator who got tired of waiting, are the two ways that happens.
+
+    ``SET key token NX EX ttl`` is the whole protocol.  A store that answers
+    with an error is treated as a store holding the lock, because the safe
+    reading of "I do not know whether another pass is fitting" is "do not fit";
+    the next cron minute asks again.  Without Redis there is nothing to
+    coordinate with, and a lone process is its own lock.
+
+    *force* writes without the exclusive condition: an operator who names it
+    has decided that a pass which will not finish is worth overriding, and
+    that decision is the one thing the lock cannot make on its own.
+    """
+    if client is None:
+        return token or "in-process"
+    token = token or f"{uuid.uuid4().hex}"
+    key = _lock_key(key_prefix)
+    try:
+        if force:
+            return token if client.set(key, token, ex=int(ttl_seconds)) else ""
+        taken = client.set(key, token, nx=True, ex=int(ttl_seconds))
+    except Exception:
+        return ""
+    return token if taken else ""
+
+
+def release_pass_lock(client: Any, key_prefix: str, token: str) -> bool:
+    """
+    Give the lock back, but only if it is still the one we were given.
+
+    A pass that outlived its own TTL must not delete the lock a later pass has
+    since taken: that would put two passes back in the room, which is exactly
+    what the lock was bought to prevent.  The comparison and the delete are one
+    script when the client can run one, and a compare-then-delete when it
+    cannot — the latter leaves a window of one round trip and says so by
+    returning whether the key was actually ours.
+    """
+    if client is None or not token or token == "in-process":
+        return True
+    key = _lock_key(key_prefix)
+    try:
+        return bool(client.eval(_RELEASE_SCRIPT, 1, key, token))
+    except Exception:
+        pass
+    try:
+        current = client.get(key)
+        if isinstance(current, bytes):
+            current = current.decode("utf-8", "replace")
+        if current != token:
+            return False
+        client.delete(key)
+        return True
+    except Exception:
+        return False
+
+
 class SourceBandit:
     """
     What a character of one source's budget is worth, per mode.
@@ -1465,6 +1583,7 @@ class FeedbackLog:
         model_id: str,
         features: Iterable[CandidateFeatures],
         document_names: Sequence[str],
+        explorations: Optional[Iterable[str]] = None,
     ) -> None:
         """
         Record what a request was shown, before it has a verdict.
@@ -1472,9 +1591,16 @@ class FeedbackLog:
         Unlabelled by design: ``label == 0`` until the next turn settles it,
         and a record that never gets settled stays at zero, which is the
         honest reading of an injection nobody proved anything about.
+
+        *explorations* says, per document, whether the ranking that showed it
+        drew the model's spread or took its mean.  It is written with the
+        exposure rather than reconstructed later, because the draw belongs to
+        the request: an off-policy reading of the corpus needs the policy that
+        produced the vote, and that policy is gone by the time a verdict does.
         """
         now = time.time()
-        for item, name in zip(features, document_names):
+        draws = list(explorations) if explorations is not None else []
+        for index, (item, name) in enumerate(zip(features, document_names)):
             self.append(
                 FeedbackSample(
                     scope=scope,
@@ -1485,6 +1611,9 @@ class FeedbackLog:
                     label=0.0,
                     label_kind="injection",
                     model_id=model_id,
+                    exploration=(
+                        draws[index] if index < len(draws) else "greedy"
+                    ),
                     at=now,
                 )
             )
@@ -1685,7 +1814,16 @@ class LearningPolicy:
         self._time = time_fn
         self._logger = logger
         self._reputation = DocReputation(
-            client=client, config=self._config, rng=self._rng, logger=logger
+            client=client,
+            config=self._config,
+            rng=self._rng,
+            # The policy's clock, not the module's: a replay that counts its
+            # turns and a test that freezes time both decide what "two months
+            # ago" means, and a reputation that decays against the wall clock
+            # while its owner counts ticks is a half-decayed posterior and a
+            # report that cannot be reproduced.
+            time_fn=time_fn,
+            logger=logger,
         )
         self._bandit = SourceBandit(
             client=client, config=self._config, rng=self._rng
@@ -1696,6 +1834,10 @@ class LearningPolicy:
             logger=logger,
         )
         self._snapshots: Dict[str, Tuple[float, Optional[ModelSnapshot]]] = {}
+        #: The exploration draw of the last ranking per document, kept until
+        #: the settle path turns the document's verdict into a sample: the
+        #: ranking decides, the verdict pays for it.
+        self._ranked_exploration: Dict[str, bool] = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ api -
@@ -1770,7 +1912,25 @@ class LearningPolicy:
             "model_id": snapshot.model_id if snapshot is not None else "",
             "range": [cfg.mult_min, cfg.mult_max],
         }
+        if document_name:
+            self._remember_exploration(document_name, bool(explore))
         return clamped, detail
+
+    def _remember_exploration(self, document_name: str, explored: bool) -> None:
+        """Keep the draw the request made, bounded to a generation's window.
+
+        Only the draw is remembered, never the absence of one: a document
+        ranked twice in one generation and explored once was shown by an
+        exploring policy, and a later greedy ranking must not downgrade the
+        record the earlier one earned.  The bound is what keeps a long-lived
+        proxy from growing a ledger of every draw it ever made; when it trips,
+        the oldest entries go first, which is the order they were earned.
+        """
+        if not explored:
+            return
+        self._ranked_exploration[document_name] = True
+        while len(self._ranked_exploration) > _RANKED_EXPLORATION_LIMIT:
+            self._ranked_exploration.pop(next(iter(self._ranked_exploration)))
 
     def settle(self, sample: FeedbackSample) -> None:
         """
@@ -1782,6 +1942,11 @@ class LearningPolicy:
         """
         if not sample.document_name:
             return
+        if sample.exploration != "explore":
+            if self._ranked_exploration.pop(sample.document_name, None):
+                sample = replace(sample, exploration="explore")
+        else:
+            self._ranked_exploration.pop(sample.document_name, None)
         try:
             self._reputation.observe(sample.document_name, sample.label)
             self._bandit.observe(

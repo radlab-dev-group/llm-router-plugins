@@ -67,10 +67,20 @@ class FakeRedis:
         self.calls.append(("get", key))
         return self.values.get(key)
 
-    def set(self, key, value):
-        self.calls.append(("set", key))
+    def set(self, key, value, nx=False, ex=0):
+        # ``ex`` is a wall-clock TTL the fake does not age; the lock tests
+        # assert the value was recorded, and expire it by deleting the key.
+        self.calls.append(("set", key) if not nx else ("setnx", key))
+        if nx and key in self.values:
+            return None
         self.values[key] = value
+        if ex:
+            self.ttls[key] = int(ex)
         return True
+
+    def delete(self, key):
+        self.calls.append(("delete", key))
+        return 1 if self.values.pop(key, None) is not None else 0
 
     def xadd(self, key, fields, maxlen=0):
         self.calls.append(("xadd", key))
@@ -1214,3 +1224,233 @@ def test_the_arms_flag_prints_the_bandit_state():
     summary = learner.arm_summary()
     assert "plan|recipe" in summary
     assert summary["plan|recipe"]["n"] == 1
+
+
+# ------------------------------------------------------- exploration record --
+def test_an_exposure_records_whether_the_ranking_drew_the_spread():
+    """The draw belongs to the request, so it is written with the exposure."""
+    client = FakeRedis()
+    config = LearningConfig(enabled=True, stream_key="agentic_kb:training")
+    log = FeedbackLog(client=client, stream_key=config.stream_key)
+    features = CandidateFeatures(kind="recipe", mode="debug", score=0.6)
+
+    log.append_injection(
+        scope="repo",
+        session_id="s1",
+        generation="g1",
+        model_id="repo:1:10:0.700",
+        features=[features, features],
+        document_names=["recipe:20260101:a", "recipe:20260101:b"],
+        explorations=["explore", "greedy"],
+    )
+    _, samples = log.drain()
+
+    by_name = {sample.document_name: sample for sample in samples}
+    assert by_name["recipe:20260101:a"].exploration == "explore"
+    assert by_name["recipe:20260101:b"].exploration == "greedy"
+
+
+def test_an_exposure_without_a_recorded_draw_is_greedy():
+    """A log written by a caller that knows nothing is not an exploration."""
+    log = FeedbackLog()
+    log.append_injection(
+        scope="repo",
+        session_id="s1",
+        generation="g1",
+        model_id="",
+        features=[CandidateFeatures(kind="recipe")],
+        document_names=["recipe:20260101:a"],
+    )
+    assert log.drain()[1][0].exploration == "greedy"
+
+
+def test_the_exploration_flag_round_trips_through_the_stream_record():
+    sample = FeedbackSample(
+        scope="repo",
+        session_id="s",
+        generation="g",
+        document_name="recipe:20260101:a",
+        features=CandidateFeatures(kind="recipe"),
+        label=1.0,
+        exploration="explore",
+    )
+    assert FeedbackSample.from_json(sample.to_json()).exploration == "explore"
+    # A record written before this field existed reads as the greedy default,
+    # not as a corrupted one.
+    assert FeedbackSample.from_json({}).exploration == "greedy"
+
+
+def test_a_settled_verdict_remembers_the_draw_of_the_ranking_that_showed_it():
+    """The ranking decides what the verdict was worth, and says so."""
+    client = FakeRedis()
+    config = LearningConfig(
+        enabled=True,
+        min_samples=10,
+        explore_rate=1.0,
+        model_ttl_seconds=0.001,
+    )
+    snapshot, _ = train_ranker(
+        corpus(300, signal=True), "repo", config=config, rng=random.Random(31)
+    )
+    publish_snapshot(client, snapshot, key_prefix=config.key_prefix)
+    policy = LearningPolicy(
+        config=config,
+        client=client,
+        rng=random.Random(32),
+        time_fn=FrozenClock(),
+    )
+    features = CandidateFeatures(kind="recipe", mode="debug", score=0.7)
+    _, detail = policy.multiplier_for(features, "recipe:20260101:a", scope="repo")
+    assert detail["explore"] is True
+
+    policy.settle(
+        FeedbackSample(
+            scope="repo",
+            session_id="s",
+            generation="g",
+            document_name="recipe:20260101:a",
+            features=features,
+            label=1.0,
+        )
+    )
+    _, samples = policy.log.drain()
+    assert samples[-1].exploration == "explore"
+
+
+def test_a_greedy_ranking_leaves_the_verdict_greedy():
+    client = FakeRedis()
+    config = LearningConfig(enabled=True, explore_rate=0.0)
+    policy = LearningPolicy(
+        config=config, client=client, rng=random.Random(33), time_fn=FrozenClock()
+    )
+    features = CandidateFeatures(kind="recipe", mode="debug", score=0.7)
+    policy.multiplier_for(features, "recipe:20260101:a", scope="repo")
+    policy.settle(
+        FeedbackSample(
+            scope="repo",
+            session_id="s",
+            generation="g",
+            document_name="recipe:20260101:a",
+            features=features,
+            label=1.0,
+        )
+    )
+    _, samples = policy.log.drain()
+    assert samples[-1].exploration == "greedy"
+
+
+def test_a_later_greedy_ranking_does_not_downgrade_an_explored_one():
+    """One draw in a generation makes the generation an exploring one."""
+    policy = LearningPolicy(config=LearningConfig(enabled=True, explore_rate=1.0))
+    features = CandidateFeatures(kind="recipe", mode="debug", score=0.7)
+    policy._remember_exploration("recipe:20260101:a", True)
+    policy._remember_exploration("recipe:20260101:a", False)
+    assert policy._ranked_exploration.get("recipe:20260101:a") is True
+
+
+def test_the_exploration_ledger_is_bounded():
+    """A long-lived proxy does not grow a ledger of every draw it ever made."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        _RANKED_EXPLORATION_LIMIT,
+    )
+    policy = LearningPolicy(config=LearningConfig(enabled=True, explore_rate=1.0))
+    for index in range(1000):
+        policy._remember_exploration(f"recipe:20260101:{index}", True)
+    assert len(policy._ranked_exploration) == _RANKED_EXPLORATION_LIMIT
+    # The oldest draws go first, so the newest one is still in the ledger.
+    assert "recipe:20260101:999" in policy._ranked_exploration
+    assert "recipe:20260101:0" not in policy._ranked_exploration
+
+
+def test_settling_forgives_the_document_its_draw():
+    """A verdict consumes the draw: the next injection starts clean."""
+    config = LearningConfig(enabled=True, explore_rate=0.0)
+    policy = LearningPolicy(config=config, rng=random.Random(35))
+    policy._ranked_exploration["recipe:20260101:a"] = True
+    policy.settle(
+        FeedbackSample(
+            scope="repo",
+            session_id="s",
+            generation="g",
+            document_name="recipe:20260101:a",
+            features=CandidateFeatures(kind="recipe"),
+            label=1.0,
+        )
+    )
+    assert "recipe:20260101:a" not in policy._ranked_exploration
+
+
+# ------------------------------------------------------------ pass lock -----
+def test_a_pass_lock_keeps_the_second_pass_out():
+    """Two cron minutes must not drain the same cursor and publish over each other."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        acquire_pass_lock,
+        release_pass_lock,
+    )
+    client = FakeRedis()
+    first = acquire_pass_lock(client, "agentic-kb", ttl_seconds=60.0)
+    second = acquire_pass_lock(client, "agentic-kb", ttl_seconds=60.0)
+    assert first
+    assert second == ""
+    assert release_pass_lock(client, "agentic-kb", first) is True
+    # The slot is free again for the next minute of the cron.
+    assert acquire_pass_lock(client, "agentic-kb", ttl_seconds=60.0)
+
+
+def test_release_returns_the_lock_only_when_it_is_still_ours():
+    """A pass that outlived its ttl must not delete another pass's lock."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        acquire_pass_lock,
+        release_pass_lock,
+    )
+    client = FakeRedis()
+    first = acquire_pass_lock(client, "agentic-kb", ttl_seconds=60.0)
+    # The ttl expired while the first pass was still running, and the next
+    # cron minute took the lock in the meantime.
+    client.values.pop("agentic-kb:learner:lock", None)
+    second = acquire_pass_lock(client, "agentic-kb", ttl_seconds=60.0)
+    assert release_pass_lock(client, "agentic-kb", first) is False
+    assert client.values.get("agentic-kb:learner:lock") == second
+    assert release_pass_lock(client, "agentic-kb", second) is True
+
+
+def test_a_store_that_cannot_answer_is_a_lock_somebody_holds():
+    """The safe reading of 'I do not know' is 'do not fit'."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        acquire_pass_lock,
+        release_pass_lock,
+    )
+    client = BrokenRedis()
+    assert acquire_pass_lock(client, "agentic-kb") == ""
+    # Releasing a token into a broken store fails without a stack trace:
+    # there was nothing to release there, and the pass must finish clean.
+    assert release_pass_lock(client, "agentic-kb", "someone") is False
+
+
+def test_a_pass_without_a_store_is_its_own_lock():
+    """One process with no shared store needs no coordination with itself."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        acquire_pass_lock,
+        release_pass_lock,
+    )
+    token = acquire_pass_lock(None, "agentic-kb")
+    assert token == "in-process"
+    assert release_pass_lock(None, "agentic-kb", token) is True
+
+
+def test_force_is_the_only_key_that_opens_a_held_lock():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        acquire_pass_lock,
+        release_pass_lock,
+    )
+    client = FakeRedis()
+    first = acquire_pass_lock(client, "agentic-kb", ttl_seconds=60.0)
+    # The ordinary ask is still refused while the lock is held.
+    assert acquire_pass_lock(client, "agentic-kb", ttl_seconds=60.0) == ""
+    # A forceful pass takes what is there.
+    forced = acquire_pass_lock(client, "agentic-kb", ttl_seconds=60.0, force=True)
+    assert forced
+    assert forced != first
+    # ...and the one it displaced is no longer able to release what it held.
+    assert release_pass_lock(client, "agentic-kb", first) is False
+    assert release_pass_lock(client, "agentic-kb", forced) is True

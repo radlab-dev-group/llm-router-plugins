@@ -900,6 +900,30 @@ pointed at a different policy would report an empty scoreboard as an unused know
 command, it reads its Redis connection from **exported environment variables**, not from a `.env` in the scanned
 directory; with no Redis configured it refuses rather than printing zeros.
 
+### The learned state of a scope
+
+```bash
+llm-router-agentic-kb-stats --scope webapp --learning
+```
+
+On top of the scoreboard rows, `--learning` prints the model in force (with its holdout AUC, its
+label count and whether it is neutral), what a rollback could reach, the corpus the next fit would
+stand on, the bandit's value per source, and the monitors of the training log.  The corpus block
+carries a **per-feature mean and standard deviation** over the labelled rows — the drift baseline
+of the fit: a model that used to clear its holdout and now refuses it is usually a model whose
+input distribution moved, and the shape has to have been written down before that is a claim
+anybody can check.  A feature whose standard deviation is `0` is a feature the fit prunes before
+it starts, and the hand-printed view names how many of the fifteen that is.  A scope with nothing
+labelled reports no distribution at all, because a distribution over unlabelled exposures
+describes the traffic, not the corpus a fit reads.
+
+The log's monitors read the window the stream still holds (it is bounded by design, and the window
+is exactly what the next fit would see): the share of documents the layer has shown more than
+fifty times, the heaviest of them, and the window's **explored share** — the records whose ranking
+drew the model's Laplace spread rather than taking its mean.  A greedy vote is one the policy
+already serving would have cast anyway; a log of nothing else tells a fit what the current model
+believes, not what is true, and the share says how much of the evidence is a comparison.
+
 ### Learner command
 
 ```bash
@@ -915,6 +939,8 @@ llm-router-agentic-kb-learner --show                   # print each touched scop
 llm-router-agentic-kb-learner --arms                   # the bandit's value per (mode, source kind)
 llm-router-agentic-kb-learner --history --scope webapp # the live model and what a rollback could reach
 llm-router-agentic-kb-learner --rollback webapp:1763347200:1412:0.710 --scope webapp
+llm-router-agentic-kb-learner --lock-ttl 7200      # a pass that crashes is overridable in two hours
+llm-router-agentic-kb-learner --force              # take the lock from whatever holds it
 ```
 
 The offline half of [Learning (opt-in)](#learning-opt-in): it reads the training stream, fits
@@ -928,6 +954,15 @@ are two different sentences an operator can tell apart.  It needs Redis and noth
 engine, no embedder, no reranker, and it can run on a machine that cannot reach either.  It is
 not a daemon: a pass is a pass, which is what makes `cron` the natural supervisor, and a scope
 is only worth refitting when enough labels have changed to move the fit.
+
+A pass takes a lock before it drains anything: `{prefix}:learner:lock`, a `SET NX EX`
+of `learning.lock_ttl_seconds` (default four hours). A pass that finds the lock held
+says so in one log line and exits without fitting, because two overlapping passes would
+read the same cursor, publish over each other, and leave two histories with no record
+of which fit won. Release is a compare-and-delete on the token the pass was given, so a
+pass that ran past its own TTL cannot delete the lock a later pass has since taken.
+`--force` writes past a held lock — an operator who names it has decided the pass that
+holds it will not finish — and `--lock-ttl` moves the window a crash is overridable in.
 
 `--history` prints the snapshot in force and the ones the last publishes retired, newest first, with
 each row's `model_id`, holdout AUC and sample count.  `--rollback` copies one of them back to the
@@ -943,15 +978,31 @@ llm-router-agentic-kb-tune --dataset eval.json \
   --min-similarity 0.25 0.35 0.45 --strong-recipe-score 0.5 0.6 0.7 \
   --loop-threshold 2 3 4 --weight-factor 0.8 1.0 1.2 \
   --weight-category recipe --per-category-factors --output tune-report/
+llm-router-agentic-kb-tune --dataset eval.json --holdout-fraction 0.3 --seed 11
+llm-router-agentic-kb-tune --dataset eval.json --precision-floor 0.8 --recall-floor 0.5
 ```
 
 The search over the policy's own numbers: it replays every point of the grid the operator names and
-reports the point maximizing `recipe_hit_rate - lambda * injected_chars_per_turn` under the
-constraint `escalation_precision >= --precision-floor`, with the deltas against the shipped policy
-on the same sessions.  It writes a JSON report and a markdown justification, and **never** the
-policy: the file is the operator's to change, and a tune that edited the policy it measured has
-already answered its own question.  A point below the precision floor is reported with the reason
-and not selected.
+reports the point maximizing `recipe_hit_rate - lambda * injected_chars_per_turn` under
+`escalation_precision >= --precision-floor` and, when `--recall-floor` is named,
+`escalation_recall >= --recall-floor`, with the deltas against the shipped policy on the same
+sessions.  The recall is the share of the turns the dataset marks as loops that the point
+escalated on: a precision floor alone is satisfiable by a point that escalates on nothing —
+escalating never is escalating never wrongly — and the recall floor is the half of the
+confusion matrix that says a point must still catch the loops it was given a chance to catch.
+A dataset with no loops meets the recall floor by definition.  It writes a JSON report and a
+markdown justification, and **never** the policy: the file is the operator's to change, and a
+tune that edited the policy it measured has already answered its own question.  A point below
+either floor is reported with the reason and not selected.
+
+The selection is made on the calibration half of the dataset; the holdout half is only measured.
+`--holdout-session` names the sessions the operator already keeps and they win over a fraction;
+`--holdout-fraction` splits the rest by a hash of `--seed` and the session id, so two runs of the
+same dataset split the same way, and a fraction never eats the calibration — a grid selected on
+nothing is not a grid. Every point carries what it earned on each half and the report holds two
+delta tables, the one the grid was chosen on and the one it was judged on: a point selected on the
+sessions it reports has been fitted to them. With no holdout named the report says so instead of
+printing a column of zeros.
 
 ---
 
