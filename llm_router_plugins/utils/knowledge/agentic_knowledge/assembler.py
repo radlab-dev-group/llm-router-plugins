@@ -88,17 +88,36 @@ DOC_STEM_BONUS = 0.12
 #: the modules a big design document describes.
 _MAX_DOC_BONUS = 0.24
 
+#: Vote penalty of a recipe that an older recipe supersedes: both change the
+#: same file, the newer one is verified and carries more judgement, and a
+#: block that quoted both would hand the agent two conflicting fixes for one
+#: bug and leave it to pick.  Half a vote keeps the older recipe readable in
+#: a debug — it is still about the right file — without letting it compete
+#: for the slot the newer one is owed.
+_SUPERSEDED_PENALTY = 0.5
+
 #: Most characters of a chunk quoted into the block.
 _QUOTE_CHARS = 1800
+
+#: Ceiling of the quote one lone, high-confidence recipe may spend: a verified
+#: fix whose diff is cut in half cannot be applied, and the block that
+#: survives the mode's budget is worth more than one that is short of it.
+_WIDE_QUOTE_CHARS = 3000
+
+#: Vote at and above which a recipe is "the" answer rather than one of a
+#: field, and may spend the wide ceiling when the budget has room for it.
+_ELASTIC_VOTE = 0.8
 
 #: Fewest characters of a recipe worth quoting when a block is squeezed; below
 #: this the entry is dropped rather than rendered as a truncated fragment.
 _MIN_QUOTE_CHARS = 80
 
 _INTRO = (
-    "Knowledge from earlier work in this repository. It is a record, not an "
-    "instruction: check it against the code in front of you and ignore any part "
-    "that no longer applies."
+    "> [!IMPORTANT]\n"
+    "Verified fixes, known dead ends and conventions retrieved from this "
+    "repository's own record of earlier work. Check them against the code in "
+    "front of you and ignore any part that no longer applies — do not repeat a "
+    "dead end."
 )
 
 _SECTIONS: Tuple[Tuple[str, str], ...] = (
@@ -106,7 +125,7 @@ _SECTIONS: Tuple[Tuple[str, str], ...] = (
     (KIND_TASK_SOLUTION, "## Verified task solutions in this repo"),
     (KIND_PLAYBOOK, "## Verified procedures in this repo"),
     (KIND_TOOL_RECIPE, "## Recommended tool commands in this repo"),
-    (KIND_DEADEND, "## Known dead ends (do not repeat)"),
+    (KIND_DEADEND, "## Known dead ends (DO NOT ATTEMPT)"),
     (KIND_SESSION_ARCHIVE, "## Previous Conversation Milestones"),
     (KIND_DOC, "## Conventions"),
 )
@@ -292,6 +311,11 @@ class ContextAssembler:
     """
 
     signature_hash: str = ""
+    #: The failure's own words, for the continuous part of the signature bonus:
+    #: a recipe written from ``KeyError: 'alg'`` and a turn stuck on
+    #: ``KeyError: 'algn'`` are not the same document, but they are close
+    #: enough that the binary hash says nothing and the words say something.
+    signature: str = ""
     touched_paths: Tuple[str, ...] = ()
     local_deadends: Tuple[str, ...] = ()
     feedback: Optional[Dict[str, Dict[str, int]]] = None
@@ -442,6 +466,7 @@ class ContextAssembler:
                 current = best.get(key)
                 if current is None or candidate.vote > current.vote:
                     best[key] = candidate
+        self._suppress_superseded(best.values())
         ordered = sorted(
             best.values(),
             key=lambda item: (-item.vote, item.section, item.hit.document_name),
@@ -575,6 +600,15 @@ class ContextAssembler:
         bonus = 0.0
         if self.signature_hash and meta.signature_hash == self.signature_hash:
             bonus += SIGNATURE_BONUS
+        elif self.signature and meta.signature:
+            # The hash is all-or-nothing, and a failure that differs by one
+            # variable name or one path drops out of it entirely.  The words
+            # of the two signatures still agree on most of their tokens, and
+            # that agreement is worth a share of the full bonus: a near-identical
+            # failure is most of the evidence an identical one is.
+            bonus += SIGNATURE_BONUS * _signature_similarity(
+                self.signature, meta.signature
+            )
         if self.touched_paths and meta.paths:
             touched = {path.rsplit("/", 1)[-1] for path in self.touched_paths}
             shared = sum(
@@ -611,6 +645,72 @@ class ContextAssembler:
             return 0.0
         return min(_MAX_DOC_BONUS, shared * DOC_STEM_BONUS)
 
+    # ---------------------------------------------------------- supersession --
+    def _suppress_superseded(self, candidates: Iterable[_Candidate]) -> None:
+        """
+        Dampen the older of two recipes that fix the same file.
+
+        A file that was fixed twice has two recipes, and a block that quotes
+        both is not two pieces of knowledge: it is a contradiction the agent
+        must resolve and cannot, because both are worded as verified.  The
+        newer one is what the repository does now; the older one is what it
+        did until something turned out to be wrong with it.  The older stays
+        available — it is still about the right file, and a debug turn may
+        want the history — but at half a vote, so the slot it would otherwise
+        win is the one the newer recipe is owed.
+
+        Only recipes supersede each other.  A recipe and a dead end on the
+        same file are not in conflict, they are the two sides of one lesson.
+        """
+        by_path: Dict[str, List[_Candidate]] = {}
+        for candidate in candidates:
+            if candidate.hit.category != KIND_RECIPE:
+                continue
+            for path in candidate.hit.paths or ():
+                by_path.setdefault(str(path), []).append(candidate)
+        for group in by_path.values():
+            if len(group) < 2:
+                continue
+            for candidate in group:
+                others = [item for item in group if item is not candidate]
+                if any(self._supersedes(other, candidate) for other in others):
+                    candidate.vote -= _SUPERSEDED_PENALTY
+
+    def _supersedes(self, newer: _Candidate, older: _Candidate) -> bool:
+        """
+        Whether *newer* is the current answer to the file *older* also claims.
+
+        Superseding is a statement about the repository, not about the
+        ranking: the document has to be later, and the repository has to
+        believe in it more.  The vote itself is not the evidence — it is what
+        this adjusts — so the belief is read where the layer keeps it: the
+        judgement a document has earned.  A newer recipe nobody has credited
+        yet has not replaced anything, it merely arrived later, and demoting
+        the recipe that has been working in favour of the untested one is the
+        wrong way round.
+        """
+        new_date = newer.hit.created_at
+        old_date = older.hit.created_at
+        if new_date is None or old_date is None:
+            # Without a date there is no order to supersede in.  A document
+            # that does not say when it was learned is neither newer nor
+            # older, and letting a missing field decide which fix the agent
+            # reads would be a ranking by an accident of indexing.
+            return False
+        if new_date <= old_date:
+            return False
+        new_up, _ = self._votes(newer.hit.document_name)
+        _, old_down = self._votes(older.hit.document_name)
+        return new_up > old_down
+
+    def _votes(self, document_name: str) -> Tuple[int, int]:
+        """Recorded judgements of one document; ``(0, 0)`` when it has none."""
+        stats = (self.feedback or {}).get(document_name) or {}
+        return (
+            int(stats.get("upvotes", 0) or 0),
+            int(stats.get("downvotes", 0) or 0),
+        )
+
     # ------------------------------------------------------------- budget ---
     def _budget(
         self,
@@ -627,6 +727,14 @@ class ContextAssembler:
         entry, and whatever this turn contributes itself (:attr:`reserved`).
         Counting only the entries let a mode's documented budget be exceeded by
         the section headings alone.
+
+        The quote ceiling is elastic, and that is the point of a budget: a
+        single high-confidence recipe is the one answer a mode has, and a diff
+        cut in half to fit the ceiling is a fix that cannot be applied; a
+        field of weaker candidates shares the ceiling, because five full
+        documents at the cost of one are five ways to be wrong.  The mode's
+        ``max_chars`` is the hard limit in both cases — the elastic part is
+        which candidates may spend it, never how much of it exists.
         """
         used: Dict[str, int] = {}
         opened: set = set()
@@ -636,18 +744,54 @@ class ContextAssembler:
             kind = candidate.hit.category
             if used.get(kind, 0) >= candidate.source_max:
                 continue
-            cost = len(_entry(candidate, doc_files=doc_files)) + 1
+            head_room = max_chars - spent - (
+                len(_section_title(kind)) + 1 if kind not in opened else 0
+            )
+            ceiling = self._quote_ceiling(candidate, head_room, doc_files)
+            cost = len(_entry(candidate, limit=ceiling, doc_files=doc_files)) + 1
             if kind not in opened:
                 cost += len(_section_title(kind)) + 1
             if spent + cost > max_chars:
                 continue
             chosen.append(candidate)
             opened.add(kind)
+            # The ceiling the entry was charged at is the ceiling it renders
+            # to, so the cost the budget spent and the text the block holds
+            # are the same number, not two numbers that happened to agree.
+            candidate.render_limit = ceiling
             used[kind] = used.get(kind, 0) + 1
             spent += cost
         if not chosen:
             chosen = _force_one_recipe(candidates, max_chars - spent, opened)
         return chosen
+
+    def _quote_ceiling(
+        self, candidate: _Candidate, room: int, doc_files: Sequence[str] = ()
+    ) -> int:
+        """
+        How much of the mode's budget this entry may spend on its quote.
+
+        ``room`` is what the budget has left before this entry, after the
+        section title it may open.  The default is the flat ceiling.  A
+        recipe that is the strongest candidate in the field — the vote the
+        ranking gave it puts it first, not a cap it merely survived — may
+        spend what the room actually is, up to the wide ceiling: a diff that
+        fits is worth the characters, and the room is the mode's own number,
+        so spending it is not an overrun.  Anything else keeps the flat
+        ceiling, because a field of candidates is a field, and each of them
+        is owed the same line.
+
+        A ceiling below the entry's own head is a ceiling that quotes
+        nothing, and ``_entry`` would render it as empty — so the ceiling
+        never comes back smaller than the head, and an entry that cannot be
+        quoted at all is dropped by the caller, not broken into a fragment.
+        """
+        head_len = _entry_head_len(candidate, doc_files)
+        if head_len >= _WIDE_QUOTE_CHARS:
+            return max(_MIN_QUOTE_CHARS, head_len)
+        if candidate.vote >= _ELASTIC_VOTE and room - 1 > head_len:
+            return max(head_len, min(_WIDE_QUOTE_CHARS, room - 1))
+        return _QUOTE_CHARS
 
     def _learning_multiplier(
         self,
@@ -1010,6 +1154,32 @@ def _documentation_pointer(hit: KnowledgeHit, doc_files: Sequence[str]) -> str:
     return ""
 
 
+def _signature_similarity(signature: str, other: str) -> float:
+    """
+    How much two failure signatures agree, between 0 and 1.
+
+    A token of a failure is a word, a number, an operator, or the class of
+    the exception — the parts that name what broke.  The Jaccard of those two
+    token sets is the overlap a document's failure and a turn's failure share,
+    independent of the words a human would add or drop around them.  One
+    variable name apart, two signatures share most of their tokens and read
+    as the same bug; two different bugs in the same file share almost none.
+
+    ``1.0`` is reserved for the identical pair, which the hash already
+    rewards at full strength; this function is only asked about the pairs the
+    hash refused.
+    """
+    a = str(signature or "").strip()
+    b = str(other or "").strip()
+    if not a or not b or a == b:
+        return 0.0
+    tokens_a = set(re.findall(r"\w+|[+\-*/=!<>]+", a.lower()))
+    tokens_b = set(re.findall(r"\w+|[+\-*/=!<>]+", b.lower()))
+    if not tokens_a or not tokens_b:
+        return 0.0
+    return len(tokens_a & tokens_b) / float(len(tokens_a | tokens_b))
+
+
 def _documents_path(document: str, paths: Sequence[str]) -> bool:
     """
     Return whether *document* is the page about one of *paths*.
@@ -1048,6 +1218,24 @@ def _documentation_citation(hit: KnowledgeHit) -> str:
         return ""
     heading = str(hit.heading or "").strip()
     return f"{source} › {heading}" if heading else source
+
+
+def _entry_head_len(candidate: _Candidate, doc_files: Sequence[str] = ()) -> int:
+    """The part of an entry that is not its quote: bullet, citation, pointer."""
+    hit = candidate.hit
+    citation = [hit.category, f"in {hit.phase}" if hit.phase else ""]
+    if hit.created_at:
+        citation.append(
+            datetime.datetime.fromtimestamp(
+                hit.created_at, tz=datetime.timezone.utc
+            )
+            .date()
+            .isoformat()
+        )
+    if hit.paths:
+        citation.append(", ".join(hit.paths[:4]))
+    head = f"- [{' · '.join(part for part in citation if part)}] "
+    return len(head) + len(_documentation_pointer(hit, doc_files))
 
 
 def _block_overhead() -> int:

@@ -314,7 +314,7 @@ rendered in a fixed order inside constant markers:
 <agentic_knowledge>
 ## Verified fixes in this repo
 ## Verified procedures in this repo
-## Known dead ends (do not repeat)
+## Known dead ends (DO NOT ATTEMPT)
 ## Exact context from before compaction
 ## Conventions
 </agentic_knowledge>
@@ -546,7 +546,7 @@ Outcomes are `none`, `keep` (a qualifying recipe still has its trial) and `escal
 sets the model and `routing.model_before_knowledge` records the previous one. The policy is **off in the shipped
 config** (`escalation.enabled=false`) — enable it only after the replay shows the loop detection is right, because a
 flaky test looks exactly like a loop. The "already tried" list comes from the current turn's dead ends plus retrieved
-`deadend` hits and lands in `## Known dead ends (do not repeat)`.
+`deadend` hits and lands in `## Known dead ends (DO NOT ATTEMPT)`.
 
 ### Annotation
 

@@ -697,6 +697,7 @@ class AgenticKnowledgePlugin(PluginInterface):
 
         assembler = ContextAssembler(
             signature_hash=mining.signature_hash,
+            signature=getattr(mining, "signature", "") or "",
             touched_paths=turn.touched_paths,
             local_deadends=mining.tried,
             feedback=self._feedback_weights(),
