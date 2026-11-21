@@ -110,6 +110,13 @@ _COLLINEAR_MAX = 0.995
 #: How far a Newton step may be halved before the fit settles for what it has.
 _BACKTRACK_LIMIT = 24
 
+#: How many documents one process remembers an exploration draw for.  The
+#: window is a generation's worth of rankings, not a corpus: a draw older
+#: than the documents a request can still be shown from is a fact about a
+#: ranking nobody is holding, and the bound is what keeps a long-lived proxy
+#: from growing a ledger of them.
+_RANKED_EXPLORATION_LIMIT = 256
+
 
 def _sigmoid(x: float) -> float:
     """Numerically safe logistic."""
@@ -399,6 +406,12 @@ class FeedbackSample:
     label_kind: str = "counterfactual"
     #: The snapshot that was serving when this injection happened.
     model_id: str = ""
+    #: Whether the ranking of this injection drew the model's Laplace spread
+    #: instead of taking its mean.  Recorded with the label, because a fit
+    #: that cannot tell an explored vote from a greedy one cannot weight an
+    #: off-policy corpus afterwards: the share of votes a model spent
+    #: exploring is part of what the votes are worth.
+    exploration: str = "greedy"
     at: float = 0.0
 
     def to_json(self) -> Dict[str, Any]:
@@ -412,6 +425,7 @@ class FeedbackSample:
             "label": round(float(self.label), 4),
             "kind": self.label_kind,
             "model_id": self.model_id,
+            "exploration": self.exploration,
             "at": round(float(self.at or time.time()), 3),
         }
 
@@ -428,6 +442,7 @@ class FeedbackSample:
             label=float(raw.get("label") or 0.0),
             label_kind=str(raw.get("kind") or "coarse"),
             model_id=str(raw.get("model_id") or ""),
+            exploration=str(raw.get("exploration") or "greedy"),
             at=float(raw.get("at") or 0.0),
         )
 
@@ -1465,6 +1480,7 @@ class FeedbackLog:
         model_id: str,
         features: Iterable[CandidateFeatures],
         document_names: Sequence[str],
+        explorations: Optional[Iterable[str]] = None,
     ) -> None:
         """
         Record what a request was shown, before it has a verdict.
@@ -1472,9 +1488,16 @@ class FeedbackLog:
         Unlabelled by design: ``label == 0`` until the next turn settles it,
         and a record that never gets settled stays at zero, which is the
         honest reading of an injection nobody proved anything about.
+
+        *explorations* says, per document, whether the ranking that showed it
+        drew the model's spread or took its mean.  It is written with the
+        exposure rather than reconstructed later, because the draw belongs to
+        the request: an off-policy reading of the corpus needs the policy that
+        produced the vote, and that policy is gone by the time a verdict does.
         """
         now = time.time()
-        for item, name in zip(features, document_names):
+        draws = list(explorations) if explorations is not None else []
+        for index, (item, name) in enumerate(zip(features, document_names)):
             self.append(
                 FeedbackSample(
                     scope=scope,
@@ -1485,6 +1508,9 @@ class FeedbackLog:
                     label=0.0,
                     label_kind="injection",
                     model_id=model_id,
+                    exploration=(
+                        draws[index] if index < len(draws) else "greedy"
+                    ),
                     at=now,
                 )
             )
@@ -1696,6 +1722,10 @@ class LearningPolicy:
             logger=logger,
         )
         self._snapshots: Dict[str, Tuple[float, Optional[ModelSnapshot]]] = {}
+        #: The exploration draw of the last ranking per document, kept until
+        #: the settle path turns the document's verdict into a sample: the
+        #: ranking decides, the verdict pays for it.
+        self._ranked_exploration: Dict[str, bool] = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ api -
@@ -1770,7 +1800,25 @@ class LearningPolicy:
             "model_id": snapshot.model_id if snapshot is not None else "",
             "range": [cfg.mult_min, cfg.mult_max],
         }
+        if document_name:
+            self._remember_exploration(document_name, bool(explore))
         return clamped, detail
+
+    def _remember_exploration(self, document_name: str, explored: bool) -> None:
+        """Keep the draw the request made, bounded to a generation's window.
+
+        Only the draw is remembered, never the absence of one: a document
+        ranked twice in one generation and explored once was shown by an
+        exploring policy, and a later greedy ranking must not downgrade the
+        record the earlier one earned.  The bound is what keeps a long-lived
+        proxy from growing a ledger of every draw it ever made; when it trips,
+        the oldest entries go first, which is the order they were earned.
+        """
+        if not explored:
+            return
+        self._ranked_exploration[document_name] = True
+        while len(self._ranked_exploration) > _RANKED_EXPLORATION_LIMIT:
+            self._ranked_exploration.pop(next(iter(self._ranked_exploration)))
 
     def settle(self, sample: FeedbackSample) -> None:
         """
@@ -1782,6 +1830,11 @@ class LearningPolicy:
         """
         if not sample.document_name:
             return
+        if sample.exploration != "explore":
+            if self._ranked_exploration.pop(sample.document_name, None):
+                sample = replace(sample, exploration="explore")
+        else:
+            self._ranked_exploration.pop(sample.document_name, None)
         try:
             self._reputation.observe(sample.document_name, sample.label)
             self._bandit.observe(

@@ -1136,7 +1136,11 @@ class AgenticKnowledgePlugin(PluginInterface):
         if not features:
             return
         shown = [
-            (hit.document_name, features[hit.document_name])
+            (
+                hit.document_name,
+                features[hit.document_name],
+                bool(getattr(hit, "learning", {}) and (hit.learning or {}).get("explore")),
+            )
             for hit in context.hits
             if hit.document_name and hit.document_name in features
         ]
@@ -1148,8 +1152,9 @@ class AgenticKnowledgePlugin(PluginInterface):
                 session_id=turn.session_id,
                 generation=turn.cache_generation,
                 model_id=str(policy.annotation(turn.scope).get("model_id") or ""),
-                features=[item for _, item in shown],
-                document_names=[name for name, _ in shown],
+                features=[item for _, item, _ in shown],
+                document_names=[name for name, _, _ in shown],
+                explorations=["explore" if e else "greedy" for _, _, e in shown],
             )
         except Exception:  # an unwritten log line is a lost sample, not a failure
             return
