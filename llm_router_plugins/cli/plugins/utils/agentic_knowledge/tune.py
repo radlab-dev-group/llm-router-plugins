@@ -64,6 +64,7 @@ class _Point:
     injected_chars_per_turn: float
     char_efficiency: float
     escalation_precision: float
+    escalation_recall: float
     eligible: bool
     refused_reason: str
     #: The same point measured on the sessions it was not selected on, each
@@ -74,6 +75,7 @@ class _Point:
     holdout_injected_chars_per_turn: Optional[float] = None
     holdout_char_efficiency: Optional[float] = None
     holdout_escalation_precision: Optional[float] = None
+    holdout_escalation_recall: Optional[float] = None
 
 
 def _objective(
@@ -100,6 +102,30 @@ def _escalation_precision(report: Dict[str, Any]) -> float:
     if precision is None:
         return 1.0
     return float(precision)
+
+
+def _escalation_recall(report: Dict[str, Any]) -> float:
+    """
+    The share of the loops that were there to catch the variant caught.
+
+    The denominator is the turns the ground truth marks as loops — a property
+    of the dataset, not of the point — and the numerator is the ones the
+    variant escalated on.  It exists because a precision floor on its own is
+    satisfiable by doing nothing: a point whose threshold is high enough never
+    escalates, never escalates wrongly, and reads as flawless on the one
+    number the search was constrained by.  Recall is the half of the
+    confusion matrix the floor ignored, and with a floor under it a point can
+    no longer meet the constraint by declining to act.
+
+    A dataset with no loops reports no recall, and the floor reads that as
+    met: there was nothing to catch, and a number invented for it would be a
+    claim about a policy that had no opportunity to be wrong.
+    """
+    escalate = report["variants"].get("read_escalate") or {}
+    recall = escalate.get("escalation_recall")
+    if recall is None:
+        return 1.0
+    return float(recall)
 
 
 def _apply(
@@ -181,6 +207,7 @@ def _measure(
     sessions: Sequence[Dict[str, Any]],
     lam: float,
     precision_floor: float,
+    recall_floor: float = 0.0,
 ) -> Dict[str, Any]:
     """
     One configuration on one set of sessions: the objective and the gate.
@@ -189,6 +216,14 @@ def _measure(
     number on either side is the number the other side would have read: the
     split changes what a point is allowed to be selected on, not what it is
     judged by.
+
+    Two floors gate the point, not one: the precision floor says "when the
+    point escalates, it escalates on a loop", and the recall floor says "when
+    a loop happens, the point escalates on it".  A point that clears the first
+    by never escalating fails the second, and that is the failure mode the
+    recall floor exists to catch — a precision floor alone would let a point
+    that escalates on nothing read as one that escalates flawlessly, because
+    the empty case is reported as perfect rather than as absent.
     """
     if not sessions:
         return {
@@ -197,6 +232,7 @@ def _measure(
             "injected_chars_per_turn": 0.0,
             "char_efficiency": 0.0,
             "escalation_precision": None,
+            "escalation_recall": None,
             "eligible": False,
             "refused_reason": "no sessions to measure on",
             "turns": 0,
@@ -206,17 +242,22 @@ def _measure(
     hit_rate = float(read.get("recipe_hit_rate", 0.0))
     chars = float(read.get("injected_chars_per_turn", 0.0))
     precision = _escalation_precision(report)
-    eligible = precision >= precision_floor
+    recall = _escalation_recall(report)
+    eligible = precision >= precision_floor and recall >= recall_floor
+    reasons = []
+    if precision < precision_floor:
+        reasons.append("escalation precision below floor")
+    if recall < recall_floor:
+        reasons.append("escalation recall below floor")
     return {
         "objective": _objective(hit_rate, chars, lam),
         "recipe_hit_rate": hit_rate,
         "injected_chars_per_turn": chars,
         "char_efficiency": float(read.get("char_efficiency", 0.0)),
         "escalation_precision": precision,
+        "escalation_recall": recall,
         "eligible": eligible,
-        "refused_reason": (
-            "" if eligible else "escalation precision below floor"
-        ),
+        "refused_reason": "; ".join(reasons),
         "turns": sum(len(session.get("turns") or ()) for session in sessions),
     }
 
@@ -231,6 +272,7 @@ def tune(
     weight_categories: Sequence[str],
     lam: float,
     precision_floor: float,
+    recall_floor: float = 0.0,
     shared_factors: bool = True,
     holdout_fraction: float = 0.0,
     holdout_ids: Sequence[str] = (),
@@ -286,8 +328,12 @@ def tune(
             for category, factor in factors.items()
         }
         variant = _apply(config, ms, srs, lt, weights)
-        earned = _measure(variant, calibration, lam, precision_floor)
-        scored = _measure(variant, held, lam, precision_floor) if held else None
+        earned = _measure(variant, calibration, lam, precision_floor, recall_floor)
+        scored = (
+            _measure(variant, held, lam, precision_floor, recall_floor)
+            if held
+            else None
+        )
         points.append(
             _Point(
                 index=index,
@@ -300,6 +346,7 @@ def tune(
                 injected_chars_per_turn=earned["injected_chars_per_turn"],
                 char_efficiency=earned["char_efficiency"],
                 escalation_precision=earned["escalation_precision"],
+                escalation_recall=earned["escalation_recall"],
                 eligible=earned["eligible"],
                 refused_reason=earned["refused_reason"],
                 holdout_objective=(
@@ -317,6 +364,9 @@ def tune(
                 holdout_escalation_precision=(
                     scored["escalation_precision"] if scored is not None else None
                 ),
+                holdout_escalation_recall=(
+                    scored["escalation_recall"] if scored is not None else None
+                ),
             )
         )
 
@@ -332,8 +382,12 @@ def tune(
     # The shipped policy, measured on the same split as the grid, so the
     # deltas are against the numbers the operator already has in production
     # rather than against an average the grid happened to produce.
-    baseline_earned = _measure(config, calibration, lam, precision_floor)
-    baseline_scored = _measure(config, held, lam, precision_floor) if held else None
+    baseline_earned = _measure(config, calibration, lam, precision_floor, recall_floor)
+    baseline_scored = (
+        _measure(config, held, lam, precision_floor, recall_floor)
+        if held
+        else None
+    )
     baseline = _Point(
         index=-1,
         min_similarity=config.min_similarity,
@@ -345,6 +399,7 @@ def tune(
         injected_chars_per_turn=baseline_earned["injected_chars_per_turn"],
         char_efficiency=baseline_earned["char_efficiency"],
         escalation_precision=baseline_earned["escalation_precision"],
+        escalation_recall=baseline_earned["escalation_recall"],
         eligible=baseline_earned["eligible"],
         refused_reason=baseline_earned["refused_reason"],
         holdout_objective=(
@@ -367,6 +422,11 @@ def tune(
         ),
         holdout_escalation_precision=(
             baseline_scored["escalation_precision"]
+            if baseline_scored is not None
+            else None
+        ),
+        holdout_escalation_recall=(
+            baseline_scored["escalation_recall"]
             if baseline_scored is not None
             else None
         ),
@@ -396,6 +456,7 @@ def tune(
             "shared_factors": bool(shared_factors),
             "lambda": lam,
             "precision_floor": precision_floor,
+            "recall_floor": recall_floor,
         },
         "points": [_point_report(point) for point in points],
         "chosen": _point_report(chosen) if chosen is not None else None,
@@ -456,6 +517,7 @@ def _point_report(point: _Point) -> Dict[str, Any]:
         "injected_chars_per_turn": point.injected_chars_per_turn,
         "char_efficiency": point.char_efficiency,
         "escalation_precision": point.escalation_precision,
+        "escalation_recall": point.escalation_recall,
         "eligible": point.eligible,
         "refused_reason": point.refused_reason,
         "holdout": {
@@ -464,6 +526,7 @@ def _point_report(point: _Point) -> Dict[str, Any]:
             "injected_chars_per_turn": point.holdout_injected_chars_per_turn,
             "char_efficiency": point.holdout_char_efficiency,
             "escalation_precision": point.holdout_escalation_precision,
+            "escalation_recall": point.holdout_escalation_recall,
         }
         if point.holdout_objective is not None
         else None,
@@ -491,6 +554,9 @@ def _deltas(chosen: _Point, baseline: _Point) -> Dict[str, Any]:
         ),
         "escalation_precision": round(
             chosen.escalation_precision - baseline.escalation_precision, 4
+        ),
+        "escalation_recall": round(
+            chosen.escalation_recall - baseline.escalation_recall, 4
         ),
     }
 
@@ -525,6 +591,11 @@ def _holdout_deltas(chosen: _Point, baseline: _Point) -> Optional[Dict[str, Any]
             - baseline.holdout_escalation_precision,
             4,
         ),
+        "escalation_recall": round(
+            chosen.holdout_escalation_recall
+            - baseline.holdout_escalation_recall,
+            4,
+        ),
     }
 
 
@@ -556,7 +627,13 @@ def _markdown(result: Dict[str, Any]) -> str:
         f"`loop_threshold` × {len(grid['loop_threshold'])}, "
         f"weight factors {factor_shape}).",
         f"Objective: `recipe_hit_rate − {grid['lambda']} · injected_chars_per_turn` "
-        f"under `escalation precision ≥ {grid['precision_floor']}`.",
+        f"under `escalation precision ≥ {grid['precision_floor']}`"
+        + (
+            f" and `escalation recall ≥ {grid['recall_floor']}`."
+            if grid.get("recall_floor")
+            else " (no recall floor: a point may meet the precision floor by "
+                 "escalating on nothing)."
+        ),
         "",
         "## Chosen point",
         "",
@@ -580,6 +657,8 @@ def _markdown(result: Dict[str, Any]) -> str:
         f"| escalation precision | {baseline.get('escalation_precision')} | "
         f"{chosen.get('escalation_precision')} | "
         f"{deltas.get('escalation_precision')} |",
+        f"| escalation recall | {baseline.get('escalation_recall')} | "
+        f"{chosen.get('escalation_recall')} | {deltas.get('escalation_recall')} |",
         f"| objective | {baseline.get('objective')} | "
         f"{chosen.get('objective')} | {deltas.get('objective')} |",
     ]
@@ -603,6 +682,7 @@ def _markdown(result: Dict[str, Any]) -> str:
             ("injected_chars_per_turn", "injected_chars_per_turn"),
             ("char_efficiency", "char_efficiency"),
             ("escalation_precision", "escalation precision"),
+            ("escalation_recall", "escalation recall"),
             ("objective", "objective"),
         ):
             lines.append(
@@ -710,6 +790,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--recall-floor",
+        type=float,
+        default=0.0,
+        help=(
+            "The other constraint: of the turns the dataset marks as loops, "
+            "the share the point must escalate on (default: 0, no floor). A "
+            "precision floor alone is satisfiable by escalating never; this "
+            "is the floor that says a point must still catch the loops it "
+            "was given a chance to catch."
+        ),
+    )
+    parser.add_argument(
         "--holdout-fraction",
         type=float,
         default=0.0,
@@ -800,6 +892,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             weight_categories=categories,
             lam=float(args.lambda_cost),
             precision_floor=float(args.precision_floor),
+            recall_floor=float(args.recall_floor),
             shared_factors=not args.per_category_factors,
             holdout_fraction=float(args.holdout_fraction),
             holdout_ids=[str(name) for name in (args.holdout_session or [])],

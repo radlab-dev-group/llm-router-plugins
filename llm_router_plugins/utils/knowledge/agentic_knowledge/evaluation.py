@@ -774,6 +774,13 @@ class ReplayEngine:
         policy: Any,
     ) -> None:
         """Count the escalations the read-plus-escalate variant would make."""
+        # The denominator of the recall the tune is asked to keep is the
+        # loops the ground truth marks, whatever this variant chose to do
+        # with them: a variant that escalated on none of them has a recall of
+        # zero, and a precision floor alone would never have said so, because
+        # a point that escalates on nothing also escalates on nothing wrong.
+        if raw.get("is_loop"):
+            variants[VARIANT_ESCALATE].true_loops += 1
         decision = self._escalation.decide(
             turn,
             context,
@@ -815,6 +822,12 @@ class _VariantTally:
     #: Of the escalations the variant made, the ones the ground truth marks as
     #: loops: the numerator of the precision floor a tune is asked to keep.
     escalations_on_true_loop: int = 0
+    #: The turns the ground truth marks as loops, whatever the variant did:
+    #: the denominator of the recall a tune is asked to keep, which is a
+    #: property of the dataset rather than of the policy, and is counted
+    #: here, where every turn of the replay passes, rather than reconstructed
+    #: from the report afterwards.
+    true_loops: int = 0
     missed_saves: int = 0
     #: Characters of retrieved content, before the standing documentation
     #: map the block may also carry; the fixed and the earned halves of the
@@ -846,6 +859,15 @@ class _VariantTally:
             "escalation_precision": (
                 _ratio(self.escalations_on_true_loop, self.escalations)
                 if self.escalations
+                else None
+            ),
+            # None when the dataset marked no loops: a recall with no loops
+            # to recall is a constraint met by definition, and the tune's
+            # floor reads that the way it reads the precision's empty case —
+            # as met, never as perfect-by-accident of the arithmetic.
+            "escalation_recall": (
+                _ratio(self.escalations_on_true_loop, self.true_loops)
+                if self.true_loops
                 else None
             ),
             # The block a request is shown: retrieved content and, where the
