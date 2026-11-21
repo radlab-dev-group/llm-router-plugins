@@ -915,6 +915,8 @@ llm-router-agentic-kb-learner --show                   # print each touched scop
 llm-router-agentic-kb-learner --arms                   # the bandit's value per (mode, source kind)
 llm-router-agentic-kb-learner --history --scope webapp # the live model and what a rollback could reach
 llm-router-agentic-kb-learner --rollback webapp:1763347200:1412:0.710 --scope webapp
+llm-router-agentic-kb-learner --lock-ttl 7200      # a pass that crashes is overridable in two hours
+llm-router-agentic-kb-learner --force              # take the lock from whatever holds it
 ```
 
 The offline half of [Learning (opt-in)](#learning-opt-in): it reads the training stream, fits
@@ -928,6 +930,15 @@ are two different sentences an operator can tell apart.  It needs Redis and noth
 engine, no embedder, no reranker, and it can run on a machine that cannot reach either.  It is
 not a daemon: a pass is a pass, which is what makes `cron` the natural supervisor, and a scope
 is only worth refitting when enough labels have changed to move the fit.
+
+A pass takes a lock before it drains anything: `{prefix}:learner:lock`, a `SET NX EX`
+of `learning.lock_ttl_seconds` (default four hours). A pass that finds the lock held
+says so in one log line and exits without fitting, because two overlapping passes would
+read the same cursor, publish over each other, and leave two histories with no record
+of which fit won. Release is a compare-and-delete on the token the pass was given, so a
+pass that ran past its own TTL cannot delete the lock a later pass has since taken.
+`--force` writes past a held lock — an operator who names it has decided the pass that
+holds it will not finish — and `--lock-ttl` moves the window a crash is overridable in.
 
 `--history` prints the snapshot in force and the ones the last publishes retired, newest first, with
 each row's `model_id`, holdout AUC and sample count.  `--rollback` copies one of them back to the
@@ -943,6 +954,7 @@ llm-router-agentic-kb-tune --dataset eval.json \
   --min-similarity 0.25 0.35 0.45 --strong-recipe-score 0.5 0.6 0.7 \
   --loop-threshold 2 3 4 --weight-factor 0.8 1.0 1.2 \
   --weight-category recipe --per-category-factors --output tune-report/
+llm-router-agentic-kb-tune --dataset eval.json --holdout-fraction 0.3 --seed 11
 ```
 
 The search over the policy's own numbers: it replays every point of the grid the operator names and
@@ -952,6 +964,15 @@ on the same sessions.  It writes a JSON report and a markdown justification, and
 policy: the file is the operator's to change, and a tune that edited the policy it measured has
 already answered its own question.  A point below the precision floor is reported with the reason
 and not selected.
+
+The selection is made on the calibration half of the dataset; the holdout half is only measured.
+`--holdout-session` names the sessions the operator already keeps and they win over a fraction;
+`--holdout-fraction` splits the rest by a hash of `--seed` and the session id, so two runs of the
+same dataset split the same way, and a fraction never eats the calibration — a grid selected on
+nothing is not a grid. Every point carries what it earned on each half and the report holds two
+delta tables, the one the grid was chosen on and the one it was judged on: a point selected on the
+sessions it reports has been fitted to them. With no holdout named the report says so instead of
+printing a column of zeros.
 
 ---
 

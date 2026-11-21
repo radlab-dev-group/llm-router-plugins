@@ -142,8 +142,51 @@ release tagged as `v<version>`.
   path — features field by field, labels and how traffic becomes a target, the Redis layout,
   the publishing gates, the `read_learned` replay and its uplift interval, the response
   annotation, the threshold grid and its objective, and what is never learned.
+- **An exposure remembers whether the ranking explored.** Every training-stream record
+  carries `exploration`: `explore` when the model's Laplace spread was drawn for that
+  document on that request, `greedy` when its mean was taken.  It is written with the
+  exposure and not reconstructed, because the draw belongs to the request — an off-policy
+  reading of the corpus (IPS, a doubly-robust estimate, or the plain question of how much
+  of what the layer learned was paid for by exploring) needs the policy that produced the
+  vote, and that policy is gone by the time a verdict does.  A document ranked twice in a
+  generation and explored once counts as explored, and the ledger of draws is bounded to a
+  generation's window: a draw older than that is a fact about a ranking nobody is holding.
+- **The replay measures the reputation loop on its own.** The counterfactual replay gains
+  `read_reputation` beside `read_learned`: the same walker with the learner's other two
+  loops held back — the document's Beta posterior, no fitted weights, no source arm, in a
+  namespace of its own — and the report gains `reputation_uplift_vs_read`, the same
+  session-bootstrapped interval as the model's.  It exists because a learned variant that
+  lost ground said nothing about **which** of the three loops lost it: the reputation
+  uplift is the phase-2 criterion read on its own, and the difference between the two
+  uplifts is what the fitted model and the arms add on top of it.
+- **A learner pass holds a lock, and only one pass at a time.** A pass now takes
+  `{prefix}:learner:lock` (`SET NX EX learning.lock_ttl_seconds`, four hours by default)
+  before it drains anything, and a pass that finds it held logs one line and exits without
+  fitting: two overlapping passes read the same cursor, publish over each other, and leave
+  two histories with no record of which fit won — which is how a cron whose previous run is
+  still going, or a second impatient operator, used to end up deciding what a scope serves.
+  Release is a compare-and-delete on the token the pass was given, so a pass that outlived
+  its own TTL cannot delete the lock a later pass has since taken.  `--force` writes past a
+  held lock when an operator has decided that pass will not finish; `--lock-ttl` moves how
+  long a crash is overridable in.
+- **The tune selects on calibration and is judged on a holdout.** `--holdout-session`
+  names sessions the grid may not select on (the operator's own holdout wins over any
+  fraction), `--holdout-fraction` splits the dataset by a hash of `--seed` and the session
+  id so two runs split the same way, and a fraction never eats the calibration.  Every grid
+  point now carries what it earned on each half and the report holds two delta tables — the
+  one the winner was chosen on and the one it was judged on — because a point selected on
+  the sessions it reports has been fitted to them, which is the criterion the plan set for
+  this command and the tool did not enforce until now.  A run with no holdout named says so
+  in the report instead of printing a column of zeros.
 
 ### Fixed
+- **A learner's reputation now keeps the clock its owner keeps.** `LearningPolicy` built
+  its `DocReputation` without the injected clock, so a replay that counts its turns and a
+  test that freezes time both decayed reputation against the wall clock instead: a
+  posterior half-decayed against its own timestamps, an exposure count that truncated a
+  judgement away, and a report that could not be reproduced from its seed.  The policy's
+  clock is passed through now, and the replay's counter is the only clock the learned path
+  reads.
 - **The ranker's feedback is the deployment's, not one process'.** `all_feedback()` answered
   from process memory, so every worker ranked the same recipe by the votes *its* requests had
   cast, and a restart zeroed the whole reputation the static counter had been built to keep

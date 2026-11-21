@@ -779,6 +779,16 @@ command that went green):
 | `-0.3` rejected | the failure came back and the document is unrelated to it | 1/3 |
 | `±1.0` coarse | the document names neither a signature nor a file (a plain text hit): the whole-block verdict, marked so a fit can tell the two kinds of credit apart | 0.5 |
 
+Every record also carries `exploration`: whether the ranking that showed the
+document drew the model's Laplace spread or took its mean. It is written with
+the exposure rather than reconstructed afterwards, because the draw belongs to
+the request — an off-policy reading of this corpus (IPS, a doubly-robust
+estimate, or simply "how much of what we learned was paid for by exploring")
+needs the policy that produced the vote, and that policy is gone by the time a
+verdict does. A document ranked twice in one generation and explored once
+counts as explored; a draw older than a generation's window of documents is
+dropped, because it is a fact about a ranking nobody is holding.
+
 `0.0` is not a downvote: it means "this turn proves nothing about this
 document", and training it as a failure would teach the model that being shown
 is bad. A coarse credit is worth half a counterfactual one (`_KIND_CREDIT`:
@@ -862,6 +872,15 @@ llm-router-agentic-kb-learner --arms                # print the bandit's view pe
 
 It needs Redis and nothing else — no engine, no embedder, no reranker — and it
 is not a daemon: a pass is a pass, which makes `cron` the natural supervisor.
+A pass takes a lock (`{prefix}:learner:lock`, `SET NX EX
+learning.lock_ttl_seconds`, default four hours) before it drains anything, and
+a pass that finds it held says so and exits without fitting: two overlapping
+passes would read the same cursor, publish over each other, and leave two
+histories with no record of which fit won. Release is compare-and-delete by
+the token the pass was given, so a pass that ran past its own TTL cannot
+delete the lock a later pass has since taken. `--force` writes past a held
+lock when an operator has decided the pass will not finish; `--lock-ttl`
+moves the crash window.
 It writes nothing to the engine and touches no policy: the policy's thresholds
 and source weights are never overwritten by a model; the model multiplies,
 the policy clamps. That clamp is the brake an operator can read in a diff.
@@ -879,8 +898,8 @@ corpus a later phase trains on.
 The same offline replay that measures the static layer
 (`knowledge/agentic_knowledge/evaluation.py`, the command
 `python -m llm_router_plugins.utils.knowledge.agentic_knowledge.evaluation
---dataset …`) carries a fourth variant, `read_learned`, next to `no_kb`,
-`read` and `read_escalate`. It walks the sessions in order with a real
+--dataset …`) carries two learned variants, next to `no_kb`, `read` and
+`read_escalate`. `read_learned` walks the sessions in order with a real
 `LearningPolicy` in memory — one per **scope**, because the holdout split is
 by session and a corpus of one session has nothing to hold out — and the
 anti-leak rule stays a rule about time: the model a request may see was
@@ -892,7 +911,14 @@ a statistically legal corpus"; determinism is kept with one seeded generator
 per scope and a clock that is a counter, so a model id built from the second
 a fit ran cannot move between two runs of the same dataset. A scope without
 labels yet reads the neutral snapshot, which reorders nothing, so the variant
-degrades to `read` rather than to a guess.
+degrades to `read` rather than to a guess. `read_reputation` is the same
+walker with the learner's other two loops held back: the document's Beta
+posterior on its own, no fitted weights and no source arm, in a namespace of
+its own. It exists because a learned variant that loses ground says nothing
+about **which** of the three loops lost it, and the plan's phase-2 criterion
+is about the reputation loop alone: `reputation_uplift_vs_read` is that
+loop's number, and the difference between `model_uplift_vs_read` and it is
+what the fitted model and the arms add on top.
 
 What the report adds on top of the per-variant counters:
 
@@ -901,6 +927,8 @@ What the report adds on top of the per-variant counters:
   **by session** (200 draws, fixed seed), because the turns of one session
   are not independent evidence; one session reports a point and no interval,
   and says so instead of inventing one.
+- `reputation_uplift_vs_read` — the same measurement for the reputation
+  variant: the phase-2 gate, read before a fitted model is worth its cost.
 - `char_efficiency` — `turns_saved / injected_chars_per_turn`: the number the
   layer is actually being paid for, because knowledge costs tokens.
 - a per-scope appendix: how many times the fit ran, how many times it was
@@ -908,8 +936,8 @@ What the report adds on top of the per-variant counters:
   it published along the way.
 
 The `no_kb` baseline is counted once for the whole report, not per variant,
-because it is the counterfactual the other three are measured against — and
-`turns_saved` for any variant is the difference to that one baseline.
+because it is the counterfactual the other variants are measured against —
+and `turns_saved` for any variant is the difference to that one baseline.
 
 ### 9.7 How much evidence each loop needs
 
@@ -968,11 +996,24 @@ recipe_hit_rate − λ · injected_chars_per_turn
 
 under the constraint `escalation_precision ≥ floor` (the floor the operator
 sets; a missing floor is `1.0`, i.e. "only escalate when it is the loop").
-The report is JSON + markdown with the winner and the deltas against the
-shipped policy on the same sessions, so a pull request can quote it:
+The selection is made on the calibration half and the holdout half is only
+measured: `--holdout-session` names the sessions the operator already keeps,
+`--holdout-fraction` splits them by a hash of `--seed` and the session id so
+two runs split the same way, and a fraction never eats the calibration. Every
+point carries what it earned on each half, and the report holds two delta
+tables — the one the grid was chosen on, and the one it was judged on —
+because a point selected on the sessions it reports has been fitted to them.
+With no holdout named the report says so rather than printing a column of
+zeros. The report is JSON + markdown with the winner and the deltas against
+the shipped policy on the same sessions, so a pull request can quote it:
 
 ```
-llm-router-agentic-kb-tune --dataset tests/data/eval.json   --min-similarity 0.25 0.35 0.45   --strong-recipe-score 0.5 0.6 0.7   --loop-threshold 2 3 4   --weight-factor 0.8 1.0 1.2   --lambda 0.001 --precision-floor 0.8   [--per-category-factors]   # one exponential grid per source category
+llm-router-agentic-kb-tune --dataset tests/data/eval.json \
+  --min-similarity 0.25 0.35 0.45 --strong-recipe-score 0.5 0.6 0.7 \
+  --loop-threshold 2 3 4 --weight-factor 0.8 1.0 1.2 \
+  --lambda 0.001 --precision-floor 0.8 \
+  [--holdout-fraction 0.3] [--seed 11]   # or --holdout-session ID, repeatable
+  [--per-category-factors]   # one exponential grid per source category
   [--output tune-report/]
 ```
 
@@ -1098,7 +1139,7 @@ evaluator reports.
 | the learned path (reputation, ranker, bandit, stream, corpus, snapshot, history, rollback) | `../../knowledge/agentic_knowledge/learning.py` |
 | the learner process (`--report`, `--show`, `--arms`, `--history`, `--rollback`) | `../../../../llm_router_plugins/cli/plugins/utils/agentic_knowledge/learner.py` |
 | label grading on the settle path | `../../knowledge/agentic_knowledge/plugin.py` |
-| the counterfactual replay and its four variants (`no_kb`, `read`, `read_escalate`, `read_learned`), the uplift bootstrap, `char_efficiency` | `../../knowledge/agentic_knowledge/evaluation.py` |
+| the counterfactual replay and its five variants (`no_kb`, `read`, `read_escalate`, `read_learned`, `read_reputation`), the uplift bootstrap, `char_efficiency` | `../../knowledge/agentic_knowledge/evaluation.py` |
 | the threshold grid and its objective/constraint | `../../../../llm_router_plugins/cli/plugins/utils/agentic_knowledge/tune.py` |
 | the scoreboard and `--learning` | `../../../../llm_router_plugins/cli/plugins/utils/agentic_knowledge/stats.py` |
 | the learning policy in the JSON (`enabled`, gates, bounds) | `../../../resources/knowledge/agentic_knowledge.json` |
@@ -1120,8 +1161,8 @@ no content in a training record),
 path, the annotation, Redis-backed feedback),
 `tests/test_agentic_knowledge_assembler.py` (the per-candidate multiplier and
 its detail),
-`tests/test_agentic_knowledge_evaluation.py` (the `read_learned` replay, the
-uplift interval, `char_efficiency`),
+`tests/test_agentic_knowledge_evaluation.py` (the `read_learned` and
+`read_reputation` replays, the uplift intervals, `char_efficiency`),
 `tests/test_agentic_knowledge_metrics.py` (the `--learning` view),
 `tests/test_agentic_knowledge_tune.py` (the objective, the constraint, and
 that nothing writes the policy).
