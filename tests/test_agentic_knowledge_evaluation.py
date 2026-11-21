@@ -9,6 +9,7 @@ helped" must not quietly mean "already knew the answer".
 import sys
 import pathlib
 import copy
+import random
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -19,8 +20,15 @@ from llm_router_plugins.utils.knowledge.agentic_knowledge.evaluation import (
     VARIANT_LEARNED,
     VARIANT_NONE,
     VARIANT_READ,
+    VARIANT_REPUTATION,
+    _LearnedReplay,
     evaluate,
     load_sessions,
+)
+from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+    CandidateFeatures,
+    publish_snapshot,
+    train_ranker,
 )
 
 DATASET = (
@@ -433,3 +441,109 @@ def test_the_report_carries_the_ranking_metrics_for_the_reading_variants():
         # its document, and found it first
         assert block["precision_at_3"] == block["recipe_hit_rate"]
         assert block["mrr"] >= block["precision_at_3"]
+
+
+# ------------------------------------------------ the reputation-only loop --
+class _Hit:
+    """The one field of an injected document the replay reads."""
+
+    def __init__(self, name: str) -> None:
+        self.document_name = name
+
+
+class _Context:
+    def __init__(self, hits) -> None:
+        self.hits = list(hits)
+
+
+def test_the_reputation_variant_is_measured_over_the_same_turns_as_read():
+    report = report_with()
+    reputation = report["variants"][VARIANT_REPUTATION]
+    read = report["variants"][VARIANT_READ]
+    # The same read, the same sessions, one loop held back: it may not buy a
+    # better number by being cheaper to run.
+    assert reputation["turns"] == read["turns"]
+    assert reputation["injected_chars_per_turn"] == read["injected_chars_per_turn"]
+    uplift = reputation["reputation_uplift_vs_read"]
+    assert uplift["sessions"] == report["sessions"]
+    assert uplift["bootstrap"] >= 100
+    assert uplift["ci_low"] <= uplift["point"] <= uplift["ci_high"]
+
+
+def test_the_reputation_variant_holds_the_fitted_model_and_the_arm_back():
+    """What the variant measures is the posterior, and only the posterior."""
+    state = _LearnedReplay("repo", knowledge_config())
+    features = CandidateFeatures(
+        kind="recipe", mode="debug", score=0.7, size_chars=300, budget_chars=3000
+    )
+    for _ in range(4):
+        state.reputation_policy.reputation.observe("recipe:20260101:x", -1.0)
+
+    _, detail = state.reputation_policy.multiplier_for(
+        features, "recipe:20260101:x", scope="repo"
+    )
+    assert detail["rep"] < 1.0, "the posterior did not move"
+    assert detail["model"] == 1.0
+    assert detail["arm"] == 1.0
+    assert detail["model_id"] == ""
+
+
+def test_the_reputation_variant_is_in_a_namespace_of_its_own():
+    """A snapshot the full learner published must not reach this variant."""
+    state = _LearnedReplay("repo", knowledge_config())
+    features = {
+        "recipe:20260101:x": CandidateFeatures(
+            kind="recipe", mode="debug", score=0.6, size_chars=200, budget_chars=3000
+        )
+    }
+    context = _Context([_Hit("recipe:20260101:x")])
+    for index in range(6):
+        state.observe(
+            session_id=f"s{index}",
+            generation=f"g{index}",
+            context=context,
+            features=features,
+            saved_by="x",
+            is_loop=False,
+        )
+    snapshot, _ = train_ranker(
+        state.samples,
+        "repo",
+        config=state.config,
+        rng=random.Random(5),
+        now=1.0,
+    )
+    publish_snapshot(state.client, snapshot, key_prefix=state.config.key_prefix)
+
+    assert state.policy._snapshot("repo") is not None
+    assert state.reputation_policy._snapshot("repo") is None
+
+
+def test_the_reputation_loop_earns_the_verdicts_of_the_turns_it_ran():
+    """The variant is fed the same labels the learned one is, and nothing more."""
+    state = _LearnedReplay("repo", knowledge_config())
+    features = {
+        "recipe:20260101:x": CandidateFeatures(
+            kind="recipe", mode="debug", score=0.6, size_chars=200, budget_chars=3000
+        )
+    }
+    context = _Context([_Hit("recipe:20260101:x")])
+    for index in range(5):
+        state.observe(
+            session_id=f"s{index}",
+            generation=f"g{index}",
+            context=context,
+            features=features,
+            saved_by="x",
+            is_loop=False,
+        )
+
+    stats = state.reputation_policy.reputation.stats("recipe:20260101:x")
+    assert stats["exposure"] == 5
+    _, detail = state.reputation_policy.multiplier_for(
+        features["recipe:20260101:x"], "recipe:20260101:x", scope="repo"
+    )
+    assert detail["rep"] > 1.0, "five confirmed fixes left no trace"
+    # The learned policy folded the same verdicts into its bandit; this one
+    # was handed the posterior and nothing else.
+    assert state.policy.bandit.arms()

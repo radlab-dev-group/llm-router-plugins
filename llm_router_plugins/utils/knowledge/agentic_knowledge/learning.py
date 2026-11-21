@@ -1805,7 +1805,16 @@ class LearningPolicy:
         self._time = time_fn
         self._logger = logger
         self._reputation = DocReputation(
-            client=client, config=self._config, rng=self._rng, logger=logger
+            client=client,
+            config=self._config,
+            rng=self._rng,
+            # The policy's clock, not the module's: a replay that counts its
+            # turns and a test that freezes time both decide what "two months
+            # ago" means, and a reputation that decays against the wall clock
+            # while its owner counts ticks is a half-decayed posterior and a
+            # report that cannot be reproduced.
+            time_fn=time_fn,
+            logger=logger,
         )
         self._bandit = SourceBandit(
             client=client, config=self._config, rng=self._rng
