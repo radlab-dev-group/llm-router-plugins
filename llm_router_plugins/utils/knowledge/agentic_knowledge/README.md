@@ -900,6 +900,30 @@ pointed at a different policy would report an empty scoreboard as an unused know
 command, it reads its Redis connection from **exported environment variables**, not from a `.env` in the scanned
 directory; with no Redis configured it refuses rather than printing zeros.
 
+### The learned state of a scope
+
+```bash
+llm-router-agentic-kb-stats --scope webapp --learning
+```
+
+On top of the scoreboard rows, `--learning` prints the model in force (with its holdout AUC, its
+label count and whether it is neutral), what a rollback could reach, the corpus the next fit would
+stand on, the bandit's value per source, and the monitors of the training log.  The corpus block
+carries a **per-feature mean and standard deviation** over the labelled rows — the drift baseline
+of the fit: a model that used to clear its holdout and now refuses it is usually a model whose
+input distribution moved, and the shape has to have been written down before that is a claim
+anybody can check.  A feature whose standard deviation is `0` is a feature the fit prunes before
+it starts, and the hand-printed view names how many of the fifteen that is.  A scope with nothing
+labelled reports no distribution at all, because a distribution over unlabelled exposures
+describes the traffic, not the corpus a fit reads.
+
+The log's monitors read the window the stream still holds (it is bounded by design, and the window
+is exactly what the next fit would see): the share of documents the layer has shown more than
+fifty times, the heaviest of them, and the window's **explored share** — the records whose ranking
+drew the model's Laplace spread rather than taking its mean.  A greedy vote is one the policy
+already serving would have cast anyway; a log of nothing else tells a fit what the current model
+believes, not what is true, and the share says how much of the evidence is a comparison.
+
 ### Learner command
 
 ```bash
@@ -955,15 +979,21 @@ llm-router-agentic-kb-tune --dataset eval.json \
   --loop-threshold 2 3 4 --weight-factor 0.8 1.0 1.2 \
   --weight-category recipe --per-category-factors --output tune-report/
 llm-router-agentic-kb-tune --dataset eval.json --holdout-fraction 0.3 --seed 11
+llm-router-agentic-kb-tune --dataset eval.json --precision-floor 0.8 --recall-floor 0.5
 ```
 
 The search over the policy's own numbers: it replays every point of the grid the operator names and
-reports the point maximizing `recipe_hit_rate - lambda * injected_chars_per_turn` under the
-constraint `escalation_precision >= --precision-floor`, with the deltas against the shipped policy
-on the same sessions.  It writes a JSON report and a markdown justification, and **never** the
-policy: the file is the operator's to change, and a tune that edited the policy it measured has
-already answered its own question.  A point below the precision floor is reported with the reason
-and not selected.
+reports the point maximizing `recipe_hit_rate - lambda * injected_chars_per_turn` under
+`escalation_precision >= --precision-floor` and, when `--recall-floor` is named,
+`escalation_recall >= --recall-floor`, with the deltas against the shipped policy on the same
+sessions.  The recall is the share of the turns the dataset marks as loops that the point
+escalated on: a precision floor alone is satisfiable by a point that escalates on nothing —
+escalating never is escalating never wrongly — and the recall floor is the half of the
+confusion matrix that says a point must still catch the loops it was given a chance to catch.
+A dataset with no loops meets the recall floor by definition.  It writes a JSON report and a
+markdown justification, and **never** the policy: the file is the operator's to change, and a
+tune that edited the policy it measured has already answered its own question.  A point below
+either floor is reported with the reason and not selected.
 
 The selection is made on the calibration half of the dataset; the holdout half is only measured.
 `--holdout-session` names the sessions the operator already keeps and they win over a fraction;

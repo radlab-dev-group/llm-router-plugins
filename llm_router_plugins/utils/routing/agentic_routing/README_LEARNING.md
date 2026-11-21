@@ -994,8 +994,16 @@ point that maximizes
 recipe_hit_rate − λ · injected_chars_per_turn
 ```
 
-under the constraint `escalation_precision ≥ floor` (the floor the operator
-sets; a missing floor is `1.0`, i.e. "only escalate when it is the loop").
+under two constraints the operator sets:
+`escalation_precision ≥ --precision-floor` (a missing floor is `1.0`, i.e.
+"only escalate when it is the loop") and, when named,
+`escalation_recall ≥ --recall-floor`. The recall is the share of the turns the
+dataset marks as loops that the point escalated on — the denominator belongs to
+the dataset, not to the point — and it exists because a precision floor on its
+own is satisfiable by doing nothing: a threshold high enough never escalates,
+never escalates wrongly, and reads as flawless on the one number the search was
+constrained by, while catching none of the loops it was shown. A dataset with no
+loops meets the recall floor by definition rather than reporting a zero.
 The selection is made on the calibration half and the holdout half is only
 measured: `--holdout-session` names the sessions the operator already keeps,
 `--holdout-fraction` splits them by a hash of `--seed` and the session id so
@@ -1012,15 +1020,16 @@ llm-router-agentic-kb-tune --dataset tests/data/eval.json \
   --min-similarity 0.25 0.35 0.45 --strong-recipe-score 0.5 0.6 0.7 \
   --loop-threshold 2 3 4 --weight-factor 0.8 1.0 1.2 \
   --lambda 0.001 --precision-floor 0.8 \
+  [--recall-floor 0.5]     # of the dataset's loops, the share to escalate on
   [--holdout-fraction 0.3] [--seed 11]   # or --holdout-session ID, repeatable
   [--per-category-factors]   # one exponential grid per source category
   [--output tune-report/]
 ```
 
-A point that misses the precision floor is reported with the reason
-(`escalation precision below floor`) and is not selected; if no point is
-eligible the report says so and names the best of the ineligible rather than
-silently promoting one. The grid is deliberately small and explicit: a
+A point that misses a floor is reported with the reason
+(`escalation precision below floor`, `escalation recall below floor`, or both)
+and is not selected; if no point is eligible the report says so and names the
+best of the ineligible rather than silently promoting one. The grid is deliberately small and explicit: a
 search that can find a better policy on the dataset it was searched on has
 found a policy that fits that dataset, and the holdout the operator keeps is
 the one thing it cannot see.
@@ -1036,6 +1045,18 @@ most exposures and the heaviest of them — so the operator can see a
 document's reputation and the model that serves it from one command. The
 scoreboard rows themselves are unchanged; `--learning` adds a `learning`
 block to `--json` for a dashboard to consume.
+
+Two of the numbers in that block are there to be read over time rather than
+once. The corpus carries a **per-feature mean and standard deviation** over the
+labelled rows: the shape of the input the next fit will read, which is the only
+way "the fit refuses because the input moved" becomes a checkable claim, and a
+feature with a standard deviation of `0` is one the fit prunes before it starts.
+The log carries its **explored share** — the records whose ranking drew the
+model's spread instead of taking its mean — because a greedy vote is one the
+policy already serving would have cast anyway, and a corpus made of nothing else
+tells a fit what the current model believes, not what is true. Both are read off
+the window the stream still holds, which is bounded by design and is exactly the
+window the next fit sees.
 
 ---
 

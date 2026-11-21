@@ -169,6 +169,29 @@ release tagged as `v<version>`.
   its own TTL cannot delete the lock a later pass has since taken.  `--force` writes past a
   held lock when an operator has decided that pass will not finish; `--lock-ttl` moves how
   long a crash is overridable in.
+- **The scoreboard reads the shape of the corpus, and how much of the log was paid for
+  exploring.** The `--learning` view's corpus block gains a **per-feature mean and standard
+  deviation** over the labelled rows: the shape of the input the next fit will read, which is the
+  only way "the fit refused because the input moved" becomes a claim anyone can check, and a
+  feature whose standard deviation is `0` is a feature the fit prunes before it starts (the
+  hand-printed view names how many of the fifteen that is).  A scope with nothing labelled gets
+  no distribution at all, because a distribution over unlabelled exposures describes the traffic
+  rather than the corpus.  The log's monitors gain the window's **explored share** — the records
+  whose ranking drew the model's Laplace spread instead of taking its mean — counted from the
+  record's own `exploration` field, because a greedy vote is one the policy already serving would
+  have cast anyway, and a corpus of nothing else tells a fit what the current model believes, not
+  what is true.  A record written before the field existed counts as greedy, the behaviour it was
+  written under.
+- **The tune can no longer meet its escalation floor by escalating on nothing.** A precision
+  floor is satisfiable by a point whose loop threshold is high enough never to fire: it never
+  escalates, it never escalates wrongly, and it reads as flawless on the one number the search
+  was constrained by, while catching none of the loops the dataset recorded.  The replay now
+  counts the ground-truth loops each variant was shown and reports the variant's
+  `escalation_recall` — the share of them it escalated on — and `llm-router-agentic-kb-tune`
+  gates a point on `--recall-floor` beside the precision floor, refuses a point that breaks both
+  with both reasons, and prints the number in both delta tables and in the objective line, where
+  the absence of a floor is said out loud rather than left for a reader to notice.  A dataset
+  with no loops meets the floor by definition: nothing to catch is not a recall of zero.
 - **The tune selects on calibration and is judged on a holdout.** `--holdout-session`
   names sessions the grid may not select on (the operator's own holdout wins over any
   fraction), `--holdout-fraction` splits the dataset by a hash of `--seed` and the session
