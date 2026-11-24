@@ -363,6 +363,23 @@ A request whose repository is unknown publishes nothing: its documents would hav
 in — the reader asks for a scope's collection, never the bare prefix — and every scope-less checkout would archive
 into that one prefix, which is the isolation the scope exists to prevent.
 
+**The quote is capped and honest about the cut.** A diff is quoted into a document under a budget:
+`write.max_patch_chars` (default 4000, `LLM_ROUTER_KNOWLEDGE_AGENTIC_MAX_PATCH_CHARS`) for a recipe or a dead end —
+one failure's fix — and a wider 8000 for a playbook or a task solution, the kinds that carry a whole change rather
+than a single fix (the read path already holds the real ceiling: the assembler quotes 1800–3000 of whatever is
+retrieved, so a more generous write ceiling loses nothing and hides nothing). When the budget runs out it runs out
+on *files*, not on hunks: an envelope is split into its per-file sections, source files are quoted before generated
+bookkeeping (`dist/`, `build/`, lockfiles, snapshots — the list the miner keeps), a section that fits only partly is
+cut in front of the next `*** Update File:` header rather than in the middle of a hunk, and every file the budget
+could not reach is named in a marker — `[... quote ends here; not quoted: dist/bundle.js (+2 more) ...]` for a file
+left out, `[... quote ends here; this file is longer than the quote budget and was cut at a file boundary ...]`
+for a file that was cut. A partial document that says it is partial is the most a truncation can do; a partial
+document that reads as complete sends the next session to apply half of a fix. A ceiling an operator lowered below
+the kind's own wins for every kind — the number is the operator's. The cut is counted: each mining pass reports a
+`truncated` diagnostic (how many published documents carry a marker), and the layer records it per scope as
+`mined_docs` / `mined_truncated`, which `stats` prints as `mined` / `trunc` columns and derives `truncated_share`
+from.
+
 A green command verifies a recipe only when its full test scope can be established as equivalent to the failing
 command. A subset, selection filter, unknown option, or shell composition is conservatively rejected; command
 comparison is not truncated. This may omit valid fixes using unsupported runners/options rather than certify them
@@ -599,6 +616,8 @@ fire-and-forget: a Redis that cannot be written costs a metric and never a reque
 | `feedback_up` / `feedback_down` | the same verdict, per settled injection |
 | `read_failures` | a search came back unreachable |
 | `memo_hits` | a search was answered from this process's memo of an identical question instead of from the engine — the saving, counted against the `searches_per_request` that asks whether the engine was |
+| `mined_docs` | a document published by the miner in the turn — the denominator of the truncation rate |
+| `mined_truncated` | of the published documents, the ones whose quote carries a `[... quote ends here; ...]` marker — the diff did not fit the budget and says so |
 
 `derived()` turns those into the rates the layer is read by. Each is `null` when its denominator is zero — a day
 that injected nothing measured nothing, and printing `0.0` would let a quiet day read as a bad one.
@@ -610,6 +629,9 @@ that injected nothing measured nothing, and printing `0.0` would let a quiet day
 - **`failure_turn_share`**, **`loop_turn_share`** — how often a turn met a failure, and how often it met one enough
   times to be stuck. The layer's own target is the second; the first is the weather.
 - **`escalation_rate`** = `escalations / turns` — how far the escalation policy actually reaches.
+- **`truncated_share`** = `mined_truncated / mined_docs` — of the documents the miner published, how many
+  could not hold their whole diff. A share that climbs with the repository's change size says the budget is
+  the ceiling, not the quote's; a share that stays at zero says nothing was ever cut.
 
 A deployment without Redis still counts, in process only: the numbers describe a run, not a history.
 

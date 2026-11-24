@@ -49,6 +49,7 @@ _RATE_ORDER = (
     "failure_turn_share",
     "loop_turn_share",
     "escalation_rate",
+    "truncated_share",
 )
 
 
@@ -149,7 +150,8 @@ def _format_rate(value: Optional[float]) -> str:
 def _print_text(rows: List[Dict[str, Any]]) -> None:
     print(
         f"{'scope':<28} {'day':<10} {'turns':>6} {'inj':>5} {'docs':>5} "
-        f"{'loops':>6} {'esc':>4} {'fail':>5} {'memo':>5}  "
+        f"{'loops':>6} {'esc':>4} {'fail':>5} {'memo':>5} {'mined':>6} "
+        f"{'trunc':>6}  "
         + "  ".join(
             name.replace("_rate", "").replace("_share", "") for name in _RATE_ORDER
         )
@@ -160,7 +162,8 @@ def _print_text(rows: List[Dict[str, Any]]) -> None:
             f"{row['turns']:>6} {row['injected_turns']:>5} "
             f"{row['injected_docs']:>5} {row['loops']:>6} "
             f"{row['escalations']:>4} {row['read_failures']:>5} "
-            f"{row.get('memo_hits', 0):>5}  "
+            f"{row.get('memo_hits', 0):>5} "
+            f"{row.get('mined_docs', 0):>6} {row.get('mined_truncated', 0):>6}  "
             + "  ".join(_format_rate(row.get(name)) for name in _RATE_ORDER)
         )
 

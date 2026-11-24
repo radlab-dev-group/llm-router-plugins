@@ -1494,6 +1494,17 @@ class AgenticKnowledgePlugin(PluginInterface):
             ",".join(sorted({str(event.kind) for event in result.events})) or "-",
             result.loop_count,
         )
+        if self._metrics is not None and turn.scope and result.events:
+            counts = dict(result.diagnostics or ())
+            mined = {
+                "mined_docs": counts.get("published", 0),
+                "mined_truncated": counts.get("truncated", 0),
+            }
+            if any(mined.values()):
+                try:
+                    self._metrics.record(turn.scope, **mined)
+                except Exception:  # a scoreboard is never a reason to fail a turn
+                    pass
         return result
 
     def _publish(

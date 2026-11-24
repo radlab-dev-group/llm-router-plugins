@@ -197,6 +197,53 @@ class _Procedure:
     verified_at: int = -1
 
 
+#: A quote that does not hold everything says so with this prefix, so a
+#: partial document never reads as a complete one.
+_TRUNCATED_NOTE_PREFIX = "[... quote ends here;"
+_TRUNCATED_BODY_NOTE = (
+    "[... quote ends here; this file is longer than the quote budget "
+    "and was cut at a file boundary ...]"
+)
+
+#: The quote budget of the kinds that carry a whole task rather than one
+#: failure's fix. A single fix fits in 4000 almost always; a multi-file
+#: procedure does not, and the read path already holds the real ceiling —
+#: the assembler quotes 1800 to 3000 of whatever is retrieved, so a more
+#: generous write ceiling loses nothing and hides nothing.
+_MULTIFILE_PATCH_BUDGET = 8000
+
+#: Patch-header line of the apply_patch envelope; the cut may land only in
+#: front of one of these, never inside a hunk.
+_PATCH_HEADER_RE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: ", re.MULTILINE)
+
+#: Directory or file-name markers of generated bookkeeping, quoted last.
+_BOOKKEEPING_MARKERS = (
+    "dist/",
+    "/dist/",
+    "build/",
+    "/build/",
+    "/target/",
+    "/node_modules/",
+    "/.venv/",
+    "/venv/",
+    "/__pycache__/",
+    "/migrations/versions/",
+    ".min.",
+    ".lock",
+    ".svg",
+    ".png",
+    ".jpg",
+    ".ico",
+    ".woff",
+    ".generated.",
+    ".g.dart",
+    "_pb2.py",
+    ".tfstate",
+    "/snapshots/",
+    "/coverage/",
+)
+
+
 class EpisodeMiner:
     """
     Turn phase evidence into knowledge events.
@@ -205,6 +252,11 @@ class EpisodeMiner:
     ----------
     max_patch_chars : int
         Ceiling of the diff quoted into a recipe or a dead end.
+    multifile_patch_budget : int
+        Ceiling of the diff quoted into a playbook or a task solution — the
+        kinds that carry a whole change rather than one failure's fix.  A
+        ceiling below :attr:`max_patch_chars` is read as that lower number:
+        the operator who shrank every quote meant this one too.
     archive_enabled : bool
         Whether compaction windows are archived at all.
     archive_max_chunk_chars : int
@@ -224,9 +276,11 @@ class EpisodeMiner:
         test_mode: str = "test",
         task_solutions_enabled: bool = False,
         tool_recipes_enabled: bool = False,
+        multifile_patch_budget: int = _MULTIFILE_PATCH_BUDGET,
     ) -> None:
         """Bind the budgets the miner writes into its documents."""
         self._max_patch_chars = max_patch_chars
+        self._multifile_patch_budget = multifile_patch_budget
         self._archive_enabled = archive_enabled
         self._archive_max_chunk_chars = archive_max_chunk_chars
         self._archive_ttl_seconds = archive_ttl_seconds
@@ -321,12 +375,16 @@ class EpisodeMiner:
             if item.patches and not item.verified() and not item.failed_attempts
         )
         published = len(events)
+        truncated = sum(
+            1 for event in events if _TRUNCATED_NOTE_PREFIX in (event.text or "")
+        )
         return (
             ("no_failure", no_failure),
             ("no_patch", no_patch),
             ("not_verified", not_verified),
             ("covered_by_recipe", covered_by_recipe),
             ("published", published),
+            ("truncated", truncated),
         )
 
     # ------------------------------------------------------------- episodes -
@@ -498,7 +556,11 @@ class EpisodeMiner:
         patches = procedure.patches
         if not patches or procedure.verified_by is None:
             return None
-        patch_text = self._patch_text(turn, patches)
+        patch_text = self._patch_text(
+            turn,
+            patches,
+            budget=max(self._max_patch_chars, self._multifile_patch_budget),
+        )
         if not patch_text.strip():
             return None
         command = self._command_text(turn, procedure.verified_by)[:200]
@@ -858,15 +920,17 @@ class EpisodeMiner:
         patches = [e for e in turn.evidence if e.kind == EVIDENCE_PATCH]
         if not patches:
             return None
-        patch_text = self._patch_text(turn, patches)
+        patch_text = self._patch_text(
+            turn,
+            patches,
+            budget=max(self._max_patch_chars, self._multifile_patch_budget),
+        )
         if not patch_text.strip():
             return None
         paths = turn.touched_paths or _patched_paths(patch_text)
         if not paths:
             return None
-        cmds = [
-            _command_line(arg) for arg in _call_arguments(turn).values() if arg
-        ]
+        cmds = [_command_line(arg) for arg in _call_arguments(turn).values() if arg]
         body = "\n".join(
             part
             for part in (
@@ -934,22 +998,48 @@ class EpisodeMiner:
             )
         return events
 
-    def _patch_text(self, turn: AgentTurn, patches: Sequence[PhaseEvidence]) -> str:
-        """Quote the patches of an episode, capped.
+    def _patch_text(
+        self,
+        turn: AgentTurn,
+        patches: Sequence[PhaseEvidence],
+        budget: Optional[int] = None,
+    ) -> str:
+        """Quote the patches of an episode, capped and honest about the cut.
 
         The envelope is what a reader needs, and a CLI release decides how it
         is carried — an ``apply_patch`` argument today, a here-document piped
         through ``exec_command`` yesterday — so the arguments are decoded first
         and quoted raw only when they hold no envelope at all.
+
+        The budget is shared by every file the episode touched, and the cut
+        is the part a reader must be able to see: source files are quoted
+        before bookkeeping, every file that does not fit is named in a
+        marker, and a file that fits only partly is cut at its own
+        ``*** Update File`` header rather than in the middle of a hunk.  A
+        document that says nothing about what it left out reads as complete,
+        and a reader who applies a partial diff is a reader who applies half
+        of a fix.
+
+        Parameters
+        ----------
+        turn : AgentTurn
+            The request's turn, with its evidence.
+        patches : Sequence[PhaseEvidence]
+            The patch evidence to quote.
+        budget : int, optional
+            The ceiling of the quote in characters; defaults to
+            :attr:`self._max_patch_chars`.  A kind that carries more than one
+            file names its own, because a whole-task change is not the same
+            budget as a single failure's fix.
         """
+        ceiling = int(budget) if budget else self._max_patch_chars
         arguments = _call_arguments(turn)
-        chunks = []
-        total = 0
+        sections: List[str] = []
         for item in patches:
-            text = arguments.get(item.call_id) or arguments.get(item.event_id) or ""
-            if not text.strip():
+            raw = arguments.get(item.call_id) or arguments.get(item.event_id) or ""
+            if not raw.strip():
                 continue
-            bodies = patch_envelopes(text) or [text]
+            bodies = patch_envelopes(raw) or [raw]
             for body in bodies:
                 if not body.strip():
                     continue
@@ -961,14 +1051,50 @@ class EpisodeMiner:
                     # all noise is dropped from the quote, not kept for the
                     # few real lines it may hide among the hashes.
                     continue
-                chunks.append(body.strip())
-                total += len(body)
-                if total >= self._max_patch_chars:
-                    break
-            if total >= self._max_patch_chars:
-                break
-        joined = "\n".join(chunks)
-        return joined[: self._max_patch_chars]
+                # One envelope may carry several files, and the budget is
+                # spent file by file: a section of a file is what is quoted
+                # or named, never a mixed bag of half of two.
+                sections.extend(_file_sections(body))
+        # Source first, bookkeeping last, order of appearance inside each
+        # class: when the budget runs out it should run out on the generated
+        # file, not on the module the change is actually about.
+        ordered = sorted(
+            enumerate(sections),
+            key=lambda pair: (0 if _is_source_patch(pair[1]) else 1, pair[0]),
+        )
+        quote: List[str] = []
+        omitted: List[str] = []
+        used = 0
+        cut_note = False
+        for _, section in ordered:
+            if used + len(section) + 1 <= ceiling:
+                quote.append(section)
+                used += len(section) + 1
+                continue
+            if not quote:
+                # The only file that got this far is what the document is
+                # about: cut it at a file header, never in the middle of a
+                # hunk, so the reader still sees whole changes.  Everything
+                # behind it stays named in the marker — a file the budget
+                # could not reach at all is still a file the document left
+                # out.
+                quote.append(_cut_patch_at_header(section, ceiling))
+                used = ceiling
+                cut_note = True
+                omitted.extend(
+                    _patched_paths(section) or ["(file without a header)"]
+                )
+                continue
+            omitted.extend(_patched_paths(section) or ["(file without a header)"])
+        parts = ["\n".join(quote)]
+        if cut_note:
+            parts.append(_TRUNCATED_BODY_NOTE)
+        if omitted:
+            omitted = list(_deduplicated(omitted))
+            shown = ", ".join(omitted[:8])
+            more = f" (+{len(omitted) - 8} more)" if len(omitted) > 8 else ""
+            parts.append(f"{_TRUNCATED_NOTE_PREFIX} not quoted: {shown}{more} ...]")
+        return "\n".join(parts)
 
     def _command_text(
         self, turn: AgentTurn, evidence: Optional[PhaseEvidence]
@@ -1228,6 +1354,76 @@ def _is_noise_patch(body: str) -> bool:
         if name not in _NOISE_FILENAMES and not name.endswith(_NOISE_SUFFIXES):
             return False
     return True
+
+
+def _file_sections(body: str) -> List[str]:
+    """Split an envelope into its per-file sections.
+
+    The unit of a quote is a file: a budget that runs out spends what it has
+    on whole file sections, and a file that does not fit is named, not half
+    of two.  The envelope's own open and close lines ride with the first and
+    the last section, so the sections joined back are the envelope, and a
+    body that carries no file header at all is one section — a raw hunk has
+    no file to split it by.
+    """
+    body = body.strip()
+    headers = [match.start() for match in _PATCH_HEADER_RE.finditer(body)]
+    if not headers:
+        return [body]
+    prefix = body[: headers[0]]
+    sections: List[str] = []
+    for index, start in enumerate(headers):
+        end = headers[index + 1] if index + 1 < len(headers) else len(body)
+        section = body[start:end]
+        if index == 0:
+            section = prefix + section
+        if index == len(headers) - 1 and not section.endswith("\n"):
+            section += "\n"
+        sections.append(section)
+    return [section.rstrip("\n") for section in sections if section.rstrip("\n")]
+
+
+def _is_source_patch(body: str) -> bool:
+    """Whether a patch body touches something other than bookkeeping.
+
+    The order a budget is spent in is a quality decision: when not
+    everything fits, generated and binary bookkeeping is what should fall
+    off the quote, not the module the change is about.  A body whose files
+    are all bookkeeping sorts last; anything else — a nameless hunk
+    included — is treated as source.
+    """
+    paths = _patched_paths(body)
+    if not paths:
+        return True
+    for path in paths:
+        lowered = path.lower()
+        if not any(marker in lowered for marker in _BOOKKEEPING_MARKERS):
+            return True
+    return False
+
+
+def _cut_patch_at_header(body: str, ceiling: int) -> str:
+    """Cut a patch at a file header, never in the middle of a hunk.
+
+    Whole file sections either fit or are not shown: a reader who applies
+    what they see applies a complete change to a complete file.  The two
+    cases with no boundary to honour — a body of one file section, and a
+    body whose first header does not even open — fall back to a hard cut at
+    the ceiling, which is why the caller always appends the note: a partial
+    document that says it is partial is the most an honest truncation gets.
+    """
+    if len(body) <= ceiling:
+        return body
+    headers = [m.start() for m in _PATCH_HEADER_RE.finditer(body)]
+    if not headers or headers[0] > ceiling or len(headers) == 1:
+        return body[:ceiling].rstrip("\n")
+    cut = headers[0]
+    for start in headers[1:]:
+        if start <= ceiling:
+            cut = start
+        else:
+            break
+    return body[:cut].rstrip("\n")
 
 
 def _reverted_paths(turn: AgentTurn) -> List[str]:
@@ -1524,6 +1720,7 @@ def _is_nontrivial_tool_command(cmd: str) -> bool:
         return True
     return False
 
+
 # ------------------------------------------------------------------ bootstrap --
 #: A commit subject that says a change is a repair, not a feature.  A
 #: bootstrap that mines every commit mines the feature work too, and a corpus
@@ -1670,9 +1867,7 @@ def _commit_events(
             )
             if part is not None
         )
-        digest = fingerprint(
-            "bootstrap", scope, str(commit.get("hash") or ""), path
-        )
+        digest = fingerprint("bootstrap", scope, str(commit.get("hash") or ""), path)
         text = build_document_text(
             KIND_RECIPE,
             body,

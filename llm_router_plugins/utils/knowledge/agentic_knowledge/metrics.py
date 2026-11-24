@@ -50,6 +50,8 @@ FIELDS = (
     "feedback_down",
     "read_failures",
     "memo_hits",
+    "mined_docs",
+    "mined_truncated",
 )
 
 
@@ -211,6 +213,11 @@ class KnowledgeMetrics:
             "escalations": snap.get("escalations", 0),
             "read_failures": snap.get("read_failures", 0),
             "memo_hits": snap.get("memo_hits", 0),
+            # How much the miner wrote, and how much of it had to say it is
+            # partial: the number that answers "are the quote budgets cutting
+            # real content" without guessing from the documents themselves.
+            "mined_docs": snap.get("mined_docs", 0),
+            "mined_truncated": snap.get("mined_truncated", 0),
             # Of the turns that were shown a block, how many went on to mine a
             # verified fix: the layer's adoption of its own guidance.
             "adoption_rate": ratio(
@@ -228,4 +235,7 @@ class KnowledgeMetrics:
             "loop_turn_share": ratio("loops", turns),
             # How often a loop reached a model switch: the escalation's reach.
             "escalation_rate": ratio("escalations", turns),
+            # Share of published documents whose quoted diff did not fit the
+            # quote budget.  None, not 0%, on a day that mined nothing.
+            "truncated_share": ratio("mined_truncated", snap.get("mined_docs", 0)),
         }

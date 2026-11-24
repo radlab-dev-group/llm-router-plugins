@@ -27,6 +27,21 @@ release tagged as `v<version>`.
 ## [Unreleased]
 
 ### Added
+- **The miner quotes fairly, and says when it cuts.** The diff a document
+  carries is spent file by file under a budget: an envelope is split into its
+  per-file sections, source files are quoted before generated bookkeeping
+  (`dist/`, `build/`, lockfiles, snapshots, the miner's own list), a section
+  that fits only partly is cut in front of the next `*** Update File:` header
+  rather than in the middle of a hunk, and every file the budget could not
+  reach is named in a marker — a partial document that reads as complete
+  sends the next session to apply half of a fix. The kinds that carry a whole
+  task (`playbook`, `task_solution`) quote under a wider ceiling (8000,
+  against the 4000 of a single failure's fix; the read path already holds the
+  real ceiling, the assembler quotes 1800–3000 of whatever is retrieved), and
+  a ceiling an operator lowered below a kind's own wins for every kind. The
+  cut is counted: each mining pass reports a `truncated` diagnostic, the layer
+  records `mined_docs` / `mined_truncated` per scope, and `stats` prints them
+  as `mined` / `trunc` columns beside the new `truncated_share` rate.
 - **The read path asks a better question, and answers it with less.** `_extract_keywords`
   mines the user's own sentence as well as the failure and the command — backticked
   identifiers, `snake_case` and `CamelCase` tokens included — so a `plan` or `implement`
