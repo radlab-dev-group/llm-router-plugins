@@ -98,7 +98,7 @@ def test_deadends_are_separated_and_collected():
     context = assemble(
         ((SearchResult(STATUS_OK, hits=(deadend_hit(),)), ("deadend",)),)
     )
-    assert "## Known dead ends (do not repeat)" in context.rendered
+    assert "## Known dead ends (DO NOT ATTEMPT)" in context.rendered
     assert context.deadends
 
 

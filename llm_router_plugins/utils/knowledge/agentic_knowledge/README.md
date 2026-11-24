@@ -314,7 +314,7 @@ rendered in a fixed order inside constant markers:
 <agentic_knowledge>
 ## Verified fixes in this repo
 ## Verified procedures in this repo
-## Known dead ends (do not repeat)
+## Known dead ends (DO NOT ATTEMPT)
 ## Exact context from before compaction
 ## Conventions
 </agentic_knowledge>
@@ -546,7 +546,7 @@ Outcomes are `none`, `keep` (a qualifying recipe still has its trial) and `escal
 sets the model and `routing.model_before_knowledge` records the previous one. The policy is **off in the shipped
 config** (`escalation.enabled=false`) — enable it only after the replay shows the loop detection is right, because a
 flaky test looks exactly like a loop. The "already tried" list comes from the current turn's dead ends plus retrieved
-`deadend` hits and lands in `## Known dead ends (do not repeat)`.
+`deadend` hits and lands in `## Known dead ends (DO NOT ATTEMPT)`.
 
 ### Annotation
 
@@ -676,6 +676,8 @@ per repository, naming both numbers.
                 "prior_alpha": 2.0, "prior_beta": 2.0,
                 "half_life_seconds": 2592000, "min_observations": 3,
                 "l2": 32.0, "weight_clip": 3.0, "newton_steps": 4,
+                "loss": "pointwise", "meta_prior_enabled": false,
+                "meta_prior_min_scopes": 3,
                 "min_samples": 200, "min_evidence": 100.0, "min_holdout_auc": 0.6,
                 "explore_coeff": 0.25, "explore_rate": 0.1,
                 "model_ttl_seconds": 60, "stream_key": "agentic_kb:training"},
@@ -913,7 +915,7 @@ carries a **per-feature mean and standard deviation** over the labelled rows —
 of the fit: a model that used to clear its holdout and now refuses it is usually a model whose
 input distribution moved, and the shape has to have been written down before that is a claim
 anybody can check.  A feature whose standard deviation is `0` is a feature the fit prunes before
-it starts, and the hand-printed view names how many of the fifteen that is.  A scope with nothing
+it starts, and the hand-printed view names how many of the twenty-two that is.  A scope with nothing
 labelled reports no distribution at all, because a distribution over unlabelled exposures
 describes the traffic, not the corpus a fit reads.
 
@@ -941,6 +943,8 @@ llm-router-agentic-kb-learner --history --scope webapp # the live model and what
 llm-router-agentic-kb-learner --rollback webapp:1763347200:1412:0.710 --scope webapp
 llm-router-agentic-kb-learner --lock-ttl 7200      # a pass that crashes is overridable in two hours
 llm-router-agentic-kb-learner --force              # take the lock from whatever holds it
+llm-router-agentic-kb-learner --bootstrap-git /path/to/repo --scope webapp   # seed from its fix commits
+llm-router-agentic-kb-learner --bootstrap-git /path/to/repo --scope webapp --bootstrap-since '6 months ago'
 ```
 
 The offline half of [Learning (opt-in)](#learning-opt-in): it reads the training stream, fits
@@ -964,6 +968,16 @@ pass that ran past its own TTL cannot delete the lock a later pass has since tak
 `--force` writes past a held lock — an operator who names it has decided the pass that
 holds it will not finish — and `--lock-ttl` moves the window a crash is overridable in.
 
+`--bootstrap-git REPO_ROOT` answers the cold start the meta-prior cannot: a first project has no other
+projects to learn from, and its own history is the judgement it has already made.  It reads the commit subjects
+that say a change repaired something — `fix`, `bugfix`, `hotfix`, `repair`, `correct`, `revert` — and publishes
+one recipe per file each touched, the commit's patch quoted and the subject as the signature, through the same
+publisher the proxy uses, so re-running a bootstrap is a no-op.  `--bootstrap-limit` (50) caps the commits read
+and `--bootstrap-since` a git date — a repository whose history predates its current architecture should not
+teach the layer about the architecture it no longer has.  A commit that only bumped a lockfile is a dependency,
+not a fix, and is skipped; a directory without a git repository is nothing, not an error.  The scope is required:
+history is knowledge about *a* repository, and there is no defensible default for which one.
+
 `--history` prints the snapshot in force and the ones the last publishes retired, newest first, with
 each row's `model_id`, holdout AUC and sample count.  `--rollback` copies one of them back to the
 live key and retires what it displaces, so a rollback is itself reversible; an id that is not in that
@@ -980,6 +994,8 @@ llm-router-agentic-kb-tune --dataset eval.json \
   --weight-category recipe --per-category-factors --output tune-report/
 llm-router-agentic-kb-tune --dataset eval.json --holdout-fraction 0.3 --seed 11
 llm-router-agentic-kb-tune --dataset eval.json --precision-floor 0.8 --recall-floor 0.5
+llm-router-agentic-kb-tune --dataset eval.json --search bayesian --evaluations 60 --seed 11
+llm-router-agentic-kb-tune --dataset eval.json --search bayesian --write-policy --output tune-report/
 ```
 
 The search over the policy's own numbers: it replays every point of the grid the operator names and
@@ -991,9 +1007,21 @@ escalated on: a precision floor alone is satisfiable by a point that escalates o
 escalating never is escalating never wrongly — and the recall floor is the half of the
 confusion matrix that says a point must still catch the loops it was given a chance to catch.
 A dataset with no loops meets the recall floor by definition.  It writes a JSON report and a
-markdown justification, and **never** the policy: the file is the operator's to change, and a
-tune that edited the policy it measured has already answered its own question.  A point below
-either floor is reported with the reason and not selected.
+markdown justification, and — with `--write-policy` — one proposal file: the chosen point as
+`agentic_knowledge.tuned.json` next to the report, a policy-shaped file the layer **never reads**,
+whose only job is to make the merge into the real policy a diff against the evidence it reports.
+A point below either floor is reported with the reason and not selected.
+
+`--search bayesian` replaces the walk with a Tree-structured Parzen Estimator over the same space
+under a `--evaluations` budget (40 by default): the first eight points are drawn uniformly, each one
+after that is proposed by the ratio of the Parzen density of the measurements that earned most to the
+density of the rest, and the walk ranks on the multi-criteria objective
+`hit + 0.3·recall − λ·chars − 1.5·max(0, precision-floor − precision)` — a point that cannot hold
+the precision floor pays a penalty that grows the further under it it sits, which no hit rate buys
+its way out of.  The search is seeded by `--seed`: the same dataset, budget and seed propose the
+same points in the same order, because a report that says "the search found this" has to be checkable
+by anyone but the machine that found it.  The grid stays the default: on a three-dimensional space it
+is cheap, exhaustive, and needs no argument about whether the search had enough budget.
 
 The selection is made on the calibration half of the dataset; the holdout half is only measured.
 `--holdout-session` names the sessions the operator already keeps and they win over a fraction;
@@ -1095,7 +1123,7 @@ Two loops, deliberately of different speed, and **nothing trains on the request 
 | Level | Question | Model | Where it runs | How it is used |
 |-------|----------|-------|---------------|----------------|
 | document | "does this particular advice work" | a Beta posterior with a half-life, sampled by Thompson's rule | online, in the proxy, as counting | a multiplier in `learning.mult_min … learning.mult_max` — the same range the static counter already used |
-| candidate features | "which features predict that an advice works" | a ridge logistic regression over the features a candidate already carries; Newton with a corpus-scaled ridge, a Laplace spread per weight | offline, in `llm-router-agentic-kb-learner` | a versioned snapshot the proxy reads with one `GET` and a 60 s local cache; the spread is the exploration term |
+| candidate features | "which features predict that an advice works" | a logistic ranker over the 22 features a candidate carries — `pointwise`, one judgement at a time, or `pairwise` (RankNet), the order of two judgements of the same request; Newton with a corpus-scaled ridge, a Laplace spread per weight, optionally started from the cross-repository meta-prior | offline, in `llm-router-agentic-kb-learner` | a versioned snapshot the proxy reads with one `GET` and a 60 s local cache; the spread is the exploration term |
 | source per mode | "what a character of this source's budget is worth here" | a Beta posterior per `(mode, kind)` with the character cost averaged in | online, as counting | the value-per-character the hand-written `weight` in the policy is a guess at |
 
 The policy's own thresholds — `strong_recipe_score`, `loop_threshold`, the source `weight`s — are **never
@@ -1114,11 +1142,22 @@ The learner grades each document against the evidence of the turn that judged it
 
 | label | when | weight |
 |-------|------|--------|
-| `+1.0` confirmed | the document names the very failure that was verified fixed this turn | full |
+| `+1.0` confirmed | the document names the very failure that was verified fixed on the turn | full |
+| `+1.0` adopted | the turn repeated at least 40% of the lines the document's diff adds — shown, applied, green, the only causal chain the layer can observe | full |
 | `+0.5` plausible | the turn was resolved and the document shares a touched file or declares the command that just went green | half |
-| `0.0` unattributed | the turn was resolved and this document has nothing in common with it — logged as an exposure, fitted as nothing | none |
+| `0.0` unattributed | the turn was resolved and this document has nothing in common with it — or it shares a file but repeated less than 5% of the change: the turn had its own reason to be there. Logged as an exposure, fitted as nothing | none |
 | `-1.0` debunked | the same failure came back and the document was about it | full |
+| `-1.0` reverted | the agent reverted a file the document is about: the change went in and came back out, the strongest negative that does not wait for the failure to return | full |
 | `-0.3` rejected | the failure came back and the document is unrelated to it | a third |
+
+The verdict is not due the next turn.  A request's documents stay in an attribution window of
+three requests, and a settled turn walks the window from the newest request to the oldest, judging
+each injection at its own delay and discounting its label by 0.85 per turn of it: a fix that is
+shown on one turn, applied on the next and proven green on the one after is credited at 0.72, not
+lost because the proof arrived late.  A turn that proves nothing keeps the window it was given —
+a no-verdict is not a verdict of zero — and a document is credited once per verdict, at the
+nearest injection that showed it, so three showings and one green test are one piece of evidence
+rather than three.
 
 `0.0` is not a downvote.  It is "this turn proves nothing about this document", and training it as a failure would
 teach the model that being shown is bad — which is the opposite of what a knowledge base is for.
@@ -1132,15 +1171,45 @@ without teaching anything, while the verdict still counts as labelled when the f
 of plausible fixes clears the holdout and publishes a model that had learned nothing, so the direction comes
 through with a magnitude that says how sure the verdict was, and a test pins it.
 
+### What the fit climbs, and where a cold scope starts
+
+`learning.loss` chooses the objective.  The default `pointwise` is the layer's original likelihood, one judgement
+at a time: the probability that *this* document, shown to *this* turn, was useful.  `pairwise` reads the same
+labels as an order: the training set becomes the comparisons implied by a single request — the probability that
+the document a turn credited should have stood above the one it blamed — and the Newton step is RankNet's over
+the difference of the two feature vectors, under the same ridge prior and backtracking as the pointwise fit.
+Only the opposite judgements *of the same request* pair: a fix this session proved and a dead end this session
+blamed are a comparison, and two documents from two sessions are not.  A corpus whose verdicts never contradict a
+request has an order to learn and nothing to learn it from, and the fit falls back to pointwise — the report
+names which of the two actually ran, because "pairwise was asked" and "pairwise fitted" are different answers.
+
+`learning.meta_prior_enabled` (off by default) answers the other half of the cold start.  A scope with few labels
+fits toward zero, which is the layer refusing to know that the features that made a verified fix useful
+*somewhere* make it useful *here* too.  With the switch on, every learner pass starts each scope's fit from
+`{prefix}:meta_prior` — the mean of the weight vectors this pass *accepted* (a refused fit carries the neutral
+vector, and a neutral vector is the absence of an opinion, not one repository's opinion) — and rewrites it when
+the pass ends, refusing to write it at all below `learning.meta_prior_min_scopes` (3) accepted scopes, because a
+prior of one repository's accidents is worse than the policy.  A pass that accepted nothing leaves the prior
+alone: seeing no evidence is not a reason to forget the evidence an earlier pass saw.  A prior of another schema
+or the wrong length reads as no prior.  The remaining cold start — the deployment with no other scopes at all —
+is what `--bootstrap-git` answers from the repository's own history.
+
 ### The features, and why they are safe
 
-Every feature is a number the assembler already has when it builds a candidate: the normalized score and the scale
-it was normalized on, whether the signature matches, how many touched files the document names, whether its
-verification command is the one now failing, its age, its vote history, its rank in the engine's result set, and its
-share of the mode's character budget.  Nothing here is content — no text, no path, no command, no session id —
-because the record goes to the training stream, and the worker masks the documents it is fitted on precisely so the
-layer never keeps content it cannot re-identify.  A training record that carried a path would undo that masking
-from the other side, so the stream is numbers and names by construction, and a test pins it.
+Every feature is a number the assembler already has when it builds a candidate.  The first fifteen are the
+originals: the normalized score and the scale it was normalized on, whether the signature matches, how many
+touched files the document names, whether its verification command is the one now failing, its age, its vote
+history, its rank in the engine's result set, and its share of the mode's character budget.  Seven were added at
+the end of the vector — the order of the first fifteen is unchanged — so a corpus that predates them still fits
+the same shape: two interactions (`score_x_path`, `sig_x_cmd`), the agent's loop level, whether the document is
+prose a person wrote rather than a record of what happened (`is_human_doc`), how much of the document's diff the
+turn's own change repeats (`patch_sim_prior`), whether the document's kind is the kind the turn is looking for
+(`query_intent_align`), and whether the two failures name the same exception class (`error_class_match`).  Nothing
+here is content — no text, no path, no command, no session id — because the record goes to the training stream, and
+the worker masks the documents it is fitted on precisely so the layer never keeps content it cannot re-identify.
+A training record that carried a path would undo that masking from the other side, so the stream is numbers and
+names by construction, and a test pins it.  The snapshot's schema is 2, and a snapshot of another schema is
+refused at the read: the order of the weights is the schema, and a misread is worse than a refusal.
 
 ### Redis layout
 
@@ -1153,6 +1222,7 @@ Next to the rest of the plugin state, under `learning.key_prefix` (the policy's 
 | `{prefix}:arms` | the per-`(mode, kind)` source posteriors |
 | `{prefix}:model:{scope}` | one scope's published snapshot: weights, the Laplace diagonal, `model_id`, `trained_at`, `samples`, `holdout_auc` |
 | `{prefix}:model_history:{scope}` | the snapshots that fit retired, newest first, capped at `learning.snapshot_history_size` |
+| `{prefix}:meta_prior` | the mean of the weight vectors this deployment's scopes last accepted: the starting point a cold scope's fit begins from, written only when `learning.meta_prior_min_scopes` (3) scopes have accepted, under the same schema the snapshots use |
 
 A document's state is written on every verdict and read on every ranking; a snapshot is written by the learner and
 read with one `GET` per scope per `model_ttl_seconds`.  A Redis that is not configured keeps all of it in process
@@ -1254,6 +1324,12 @@ must produce, so the mining shapes a recorded corpus lacks are asserted where th
   that got fixed may have been read and ignored while the agent fixed it by hand.  The coarse
   fallback is marked as such, and `labelled` in the annotation is the number to read against
   any claim the model makes.
+- **The source bandit is a bandit, not a contextual one.** Its arm is the pair
+  `(mode, kind)` and nothing more: what a character of a recipe's budget is worth in `debug` is learned per
+  mode, not per repository, per hour, or per how the last dozen reads went.  A LinUCB over the candidate
+  context was the plan's ambition and stays out of the shipped layer — it needs an order of magnitude more
+  traffic per arm than a knowledge base earns, and a contextual model that never leaves its prior is
+  indistinguishable from the Beta posterior that already answers, with fewer numbers to audit.
 - **Signature quality decides everything.** Loop detection and recipe relevance both hang on `signature.py`, which
   normalizes paths, line numbers, addresses, hashes and timestamps. Verify on real output before trusting a threshold.
 - **Token cost.** Re-injecting every request of a generation costs tokens, bounded per mode by `max_chars`; the

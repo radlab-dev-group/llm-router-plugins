@@ -8,6 +8,7 @@ model that flaps.
 """
 
 import json
+import math
 import random
 import time
 
@@ -484,13 +485,67 @@ def test_snapshot_from_a_different_build_is_refused_not_partially_applied():
 
 
 def test_snapshot_with_a_corrupt_body_reads_as_no_snapshot():
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        FEATURE_NAMES,
+        SNAPSHOT_SCHEMA,
+    )
+
     client = FakeRedis()
     client.set("agentic-kb:model:repo", "{not json")
     assert load_snapshot(client, "repo", config=LearningConfig()) is None
-    client.set("agentic-kb:model:repo", json.dumps({"w": [1.0, 2.0]}))
+    client.set(
+        "agentic-kb:model:repo",
+        json.dumps(
+            {
+                "schema": SNAPSHOT_SCHEMA,
+                "features": list(FEATURE_NAMES),
+                "w": [1.0, 2.0],
+            }
+        ),
+    )
     loaded = load_snapshot(client, "repo", config=LearningConfig())
     assert loaded is not None
     assert loaded.neutral is True
+
+
+def test_a_snapshot_of_another_schema_is_refused_not_misread():
+    """A weight order is a schema: reading it under another name reorders nothing.
+
+    A schema-1 snapshot has fifteen weights in one order; this build's model
+    has twenty-two in another.  Reading the old weights with the new names
+    would mean feature five by one name and another by another, so the safe
+    read is the one that reads nothing: the policy serves the scope until the
+    model is republished.
+    """
+    client = FakeRedis()
+    old_features = (
+        "bias",
+        "score",
+        "score_sq",
+        "scale_rrf",
+        "scale_reranker",
+        "signature_match",
+        "path_match",
+        "path_stem_match",
+        "command_match",
+        "age_days_log",
+        "upvotes_log",
+        "downvotes_log",
+        "exposure_log",
+        "rank",
+        "size_share",
+    )
+    client.set(
+        "agentic-kb:model:repo",
+        json.dumps(
+            {
+                "schema": 1,
+                "features": list(old_features),
+                "w": [0.0] * 15,
+            }
+        ),
+    )
+    assert load_snapshot(client, "repo", config=LearningConfig()) is None
 
 
 # ------------------------------------------------------------- history -----
@@ -1454,3 +1509,415 @@ def test_force_is_the_only_key_that_opens_a_held_lock():
     # ...and the one it displaced is no longer able to release what it held.
     assert release_pass_lock(client, "agentic-kb", first) is False
     assert release_pass_lock(client, "agentic-kb", forced) is True
+
+
+# ------------------------------------------------------- features, schema 2 -
+def test_the_feature_vector_carries_the_twenty_two_names_the_snapshot_publishes():
+    """The vector's order is the schema; a new feature is a new name, not a new meaning.
+
+    The seven features added for the interactions and for the state the
+    document sits in sit at the end, so the fifteen a snapshot of the
+    previous build carries are still read under the names they were fit with
+    — and a snapshot of that build is refused by the schema, not misread.
+    """
+    assert len(FEATURE_NAMES) == 22
+    for name in (
+        "score_x_path",
+        "sig_x_cmd",
+        "agent_loop_level",
+        "is_human_doc",
+        "patch_sim_prior",
+        "query_intent_align",
+        "error_class_match",
+    ):
+        assert name in FEATURE_NAMES
+    features = CandidateFeatures(kind="recipe", mode="debug", score=0.5)
+    assert len(features.vector()) == len(FEATURE_NAMES)
+
+
+def test_the_interactions_and_the_state_the_document_sits_in_reach_the_vector():
+    """Each added feature answers one question the other features cannot.
+
+    ``score_x_path`` is the product the plan named, not a new score; the loop
+    level saturates at eight, a document a person wrote reads as one against
+    a mined one's zero, and the error-class match is a fact about the pair:
+    both halves must name the class, and neither may name it differently.
+    """
+    plain = CandidateFeatures(kind="recipe", mode="debug", score=0.5)
+    indexed = {name: value for name, value in zip(FEATURE_NAMES, plain.vector())}
+    assert indexed["score_x_path"] == 0.0
+    assert indexed["sig_x_cmd"] == 0.0
+    assert indexed["agent_loop_level"] == 0.0
+    assert indexed["is_human_doc"] == 0.0
+    assert indexed["patch_sim_prior"] == 0.0
+    assert indexed["query_intent_align"] == 0.0
+    assert indexed["error_class_match"] == 0.0
+
+    met = CandidateFeatures(
+        kind="doc",
+        mode="debug",
+        score=0.5,
+        path_match=2,
+        signature_match=True,
+        command_match=True,
+        loop_count=8,
+        patch_sim=0.75,
+        intent_align=True,
+        error_class="KeyError",
+        doc_error_class="keyerror",
+    )
+    indexed = dict(zip(FEATURE_NAMES, met.vector()))
+    assert indexed["score_x_path"] == pytest.approx(0.5)
+    assert indexed["sig_x_cmd"] == 1.0
+    assert indexed["agent_loop_level"] == 1.0
+    assert indexed["is_human_doc"] == 1.0
+    assert indexed["patch_sim_prior"] == pytest.approx(0.75)
+    assert indexed["query_intent_align"] == 1.0
+    # The match folds case: a class named differently by the two sides is
+    # still the class, and one side naming none is no match at all.
+    assert indexed["error_class_match"] == 1.0
+    missing = replace(met, error_class="")
+    indexed = dict(zip(FEATURE_NAMES, missing.vector()))
+    assert indexed["error_class_match"] == 0.0
+
+
+def test_the_new_features_survive_the_stream_round_trip():
+    """What the worker reads is what the request path wrote, feature for feature."""
+    features = CandidateFeatures(
+        kind="recipe",
+        mode="debug",
+        score=0.4,
+        loop_count=2,
+        error_class="KeyError",
+        doc_error_class="KeyError",
+        signature_similarity=0.33,
+        patch_sim=0.5,
+        intent_align=True,
+    )
+    back = CandidateFeatures.from_json(features.to_json())
+    assert back.loop_count == 2
+    assert back.error_class == "KeyError"
+    assert back.doc_error_class == "KeyError"
+    assert back.signature_similarity == pytest.approx(0.33)
+    assert back.patch_sim == 0.5
+    assert back.intent_align is True
+    assert back.vector() == features.vector()
+
+
+# ------------------------------------------------------------- pairwise -----
+def _contrast_corpus(seed: int = 3) -> list:
+    """One request's worth of verdicts: two documents, one credited, one blamed.
+
+    The pairs a pairwise fit needs are the two judgements of the *same
+    request* pointing at each other, so every sample here shares a session
+    and a generation, and the credited document differs from the blamed one
+    in exactly the feature the fit is asked to read: the signature match.
+    """
+    rng = random.Random(seed)
+    rows = []
+    for index in range(40):
+        rows.extend(
+            [
+                FeedbackSample(
+                    scope="repo",
+                    session_id=f"s{index}",
+                    generation=f"g{index}",
+                    document_name=f"recipe:20260101:{index:04d}:win",
+                    features=CandidateFeatures(
+                        kind="recipe",
+                        mode="debug",
+                        score=rng.random(),
+                        signature_match=True,
+                    ),
+                    label=1.0,
+                ),
+                FeedbackSample(
+                    scope="repo",
+                    session_id=f"s{index}",
+                    generation=f"g{index}",
+                    document_name=f"recipe:20260101:{index:04d}:lose",
+                    features=CandidateFeatures(
+                        kind="recipe",
+                        mode="debug",
+                        score=rng.random(),
+                        signature_match=False,
+                    ),
+                    label=-1.0,
+                ),
+            ]
+        )
+    return rows
+
+
+def test_the_pairwise_objective_is_the_log_likelihood_of_the_order():
+    """The loss the Newton step climbs: each pair is a probability of an order.
+
+    At zero weights the model cannot tell the two documents apart, and every
+    pair is worth ``weight * log(0.5)`` — the whole objective before any
+    ridge, which a zero ridge leaves out.  A weight that puts the winner
+    above the loser moves the objective up; one that swaps the order down.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        _pairwise_objective,
+    )
+
+    winner = CandidateFeatures(
+        kind="recipe", mode="debug", signature_match=True
+    ).vector()
+    loser = CandidateFeatures(kind="recipe", mode="debug").vector()
+    pairs = [(winner, loser, 2.0)]
+    varied = [FEATURE_NAMES.index(name) for name in ("signature_match",)]
+    zero = [0.0] * 22
+    assert _pairwise_objective(zero, pairs, 0.0, varied) == pytest.approx(
+        2.0 * math.log(0.5)
+    )
+    ordered = list(zero)
+    ordered[varied[0]] = 1.0
+    reversed_ = list(zero)
+    reversed_[varied[0]] = -1.0
+    assert (
+        _pairwise_objective(ordered, pairs, 0.0, varied)
+        > _pairwise_objective(zero, pairs, 0.0, varied)
+        > _pairwise_objective(reversed_, pairs, 0.0, varied)
+    )
+    # The ridge is a penalty on leaving the prior, not on the weights: the
+    # same weights at a prior that agrees with them cost nothing.
+    assert _pairwise_objective(ordered, pairs, 1.0, varied, ordered) > (
+        _pairwise_objective(ordered, pairs, 1.0, varied)
+    )
+
+
+def test_the_pairwise_newton_step_climbs_the_objective():
+    """One damped step from the zero prior must not land below where it stood."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        _pairwise_newton_step,
+        _pairwise_objective,
+    )
+
+    rows = _contrast_corpus()
+    pairs = [
+        (rows[index].features.vector(), rows[index + 1].features.vector(), 1.0)
+        for index in range(0, len(rows), 2)
+    ]
+    varied = [1, 5, 6, 7, 15, 16, 17, 18, 19, 20, 21]
+    zero = [0.0] * 22
+    start = _pairwise_objective(zero, pairs, 0.5, varied)
+    weights = zero
+    for _ in range(4):
+        weights = _pairwise_newton_step(weights, pairs, 0.5, 3.0, varied)
+    end = _pairwise_objective(weights, pairs, 0.5, varied)
+    assert end >= start - 1e-9
+    # The step is not a no-op: a separable contrast moves the weight the
+    # contrast varies, or the objective would never have anything to climb.
+    assert any(abs(w) > 1e-4 for w in weights)
+
+
+def test_the_pairwise_fit_orders_the_contrast_it_was_shown():
+    """A corpus of same-request verdicts fits on the order, and the report says so.
+
+    Every pair is the credited document of one request against the blamed one
+    of the same, so the objective has nothing else to read; the fit that
+    publishes is the one that ranks the winner above the loser, and the
+    report names the loss it climbed and the pairs it climbed on.
+    """
+    config = LearningConfig(loss="pairwise", min_samples=10, min_evidence=10.0)
+    ranker = ContextRanker(config=config)
+    report = ranker.fit(_contrast_corpus())
+    assert report["loss"] == "pairwise"
+    assert report["pairs"] > 0
+    winner = CandidateFeatures(kind="recipe", mode="debug", signature_match=True)
+    loser = CandidateFeatures(kind="recipe", mode="debug", signature_match=False)
+    assert ranker.predict(winner) > ranker.predict(loser)
+
+
+def test_the_pairwise_fit_falls_back_to_pointwise_when_nothing_can_be_compared():
+    """A corpus whose verdicts never contradict a request has no order to fit.
+
+    One document per request holds one verdict each, and a pair needs two of
+    opposite direction in the same request: the fit then reads the labels the
+    pointwise way, and the report says ``pointwise`` ran — "pairwise was
+    asked" and "pairwise fitted" are two different answers, and the report
+    exists so nobody confuses them.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        LOSS_POINTWISE,
+    )
+
+    config = LearningConfig(loss="pairwise", min_samples=10, min_evidence=10.0)
+    ranker = ContextRanker(config=config)
+    rows = [
+        FeedbackSample(
+            scope="repo",
+            session_id=f"s{index}",
+            generation=f"g{index}",
+            document_name=f"recipe:20260101:{index:05d}",
+            features=CandidateFeatures(
+                kind="recipe", mode="debug", signature_match=index % 2 == 0
+            ),
+            label=1.0 if index % 2 == 0 else -1.0,
+        )
+        for index in range(40)
+    ]
+    report = ranker.fit(rows)
+    assert report["loss"] == LOSS_POINTWISE
+    assert report["pairs"] == 0
+
+
+def test_the_pairwise_gate_reads_the_same_evidence_the_pointwise_one_does():
+    """Both objectives refuse a corpus too thin to trust; neither is an escape hatch."""
+    config = LearningConfig(loss="pairwise", min_samples=200, min_evidence=100.0)
+    snapshot, report = train_ranker(
+        _contrast_corpus(), "repo", config=config, rng=random.Random(1)
+    )
+    assert report["pairs"] > 0
+    assert report["labelled"] < config.min_samples
+    assert snapshot.neutral is True
+
+
+# ------------------------------------------------------------ meta prior ----
+def test_the_meta_prior_needs_the_scopes_it_claims():
+    """One repository is not a prior; the mean of the accepted models is.
+
+    A fit a scope was accepted for is the evidence the prior averages, and
+    fewer scopes than the minimum is an answer the prior cannot give — it
+    returns ``None`` and the fit starts from the zero prior, which is the
+    policy, rather than from one repository's accidents.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        compute_meta_prior,
+    )
+
+    def model(weights, scope):
+        ranker = ContextRanker(config=LearningConfig())
+        ranker.weights = list(weights)
+        ranker.precision = [[1.0] * 22 for _ in range(22)]
+        return ModelSnapshot(
+            scope=scope,
+            model_id=f"m-{scope}",
+            trained_at=0.0,
+            samples=300,
+            labelled=300,
+            positive=150,
+            holdout_auc=0.9,
+            features=FEATURE_NAMES,
+            ranker=ranker,
+        )
+
+    a = model([0.1] * 22, "a")
+    b = model([0.3] * 22, "b")
+    assert compute_meta_prior([a, b], min_scopes=3) is None
+    assert compute_meta_prior([a, b], min_scopes=2) is not None
+    mean = compute_meta_prior([a, b, model([0.5] * 22, "c")], min_scopes=3)
+    assert mean is not None
+    assert all(value == pytest.approx(0.3) for value in mean)
+    # A snapshot the gate refused carries the neutral vector, and a neutral
+    # vector is not a repository's opinion: it is the absence of one, and the
+    # mean is over the models that moved.
+    neutral = model([0.0] * 22, "d")
+    assert neutral.neutral is True
+    assert compute_meta_prior(
+        [a, b, model([0.5] * 22, "c"), neutral], min_scopes=3
+    ) == mean
+
+
+def test_the_meta_prior_keeps_what_the_other_repositories_agreed_on():
+    """A feature this repository's labels do not speak about keeps its weight.
+
+    The cold repository has judged nothing about ``signature_match`` — its
+    labels are about the commands it ran — and a fit from the zero prior
+    returns the feature to zero, which is the layer forgetting what every
+    other repository learned.  A fit from the meta prior keeps the shared
+    weight, and a corpus whose own verdicts *contradict* the prior still
+    moves away from it: the prior is where a fit starts, and the ridge is
+    what lets this repository's labels move it.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        _as_prior,
+    )
+
+    index = FEATURE_NAMES.index("signature_match")
+    config = LearningConfig(l2=32.0, min_samples=10)
+
+    def corpus_uninformed(count):
+        """Labels driven by the command, so the signature says nothing."""
+        rng = random.Random(5)
+        rows = []
+        for position in range(count):
+            features = CandidateFeatures(
+                kind="recipe",
+                mode="debug",
+                signature_match=position % 2 == 0,
+                command_match=rng.random() < 0.5,
+                score=0.5,
+            )
+            rows.append(
+                FeedbackSample(
+                    scope="repo",
+                    session_id=f"s{position}",
+                    generation=f"g{position}",
+                    document_name=f"recipe:20260101:{position:05d}",
+                    features=features,
+                    label=1.0 if features.command_match else -1.0,
+                )
+            )
+        return rows
+
+    prior = _as_prior([0.9] * 22)
+    rows = corpus_uninformed(400)
+    with_prior = ContextRanker(config=config)
+    with_prior.fit(rows, prior=prior)
+    from_zero = ContextRanker(config=config)
+    from_zero.fit(rows)
+    # The shared weight survives where this repository has no opinion, and
+    # the zero prior forgets it.
+    assert with_prior.weights[index] > 0.25
+    assert abs(from_zero.weights[index]) < 0.25
+
+    # And a repository whose own verdicts contradict the prior is not held to
+    # it: the same fit with the labels turned around moves the weight down,
+    # below the prior, because the ridge is a pull and not a chain.
+    contradicted = [
+        replace(row, label=-1.0 if row.features.signature_match else 1.0)
+        for row in rows
+    ]
+    pulled = ContextRanker(config=config)
+    pulled.fit(contradicted, prior=prior)
+    assert pulled.weights[index] < with_prior.weights[index]
+    assert pulled.weights[index] < prior[index]
+    report = ContextRanker(config=config).fit(rows, prior=prior)
+    assert report["prior"] == "meta"
+    assert ContextRanker(config=config).fit(rows)["prior"] == "zero"
+
+
+def test_the_meta_prior_round_trips_and_refuses_another_schema():
+    """The prior lives next to the snapshots, under the same refusal rules."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.learning import (
+        SNAPSHOT_SCHEMA,
+        load_meta_prior,
+        meta_prior_key,
+        save_meta_prior,
+    )
+
+    client = FakeRedis()
+    weights = [0.1 * (index % 7) for index in range(22)]
+    assert save_meta_prior(
+        client, weights, key_prefix="agentic-kb", scopes=("a", "b", "c")
+    )
+    loaded = load_meta_prior(client, key_prefix="agentic-kb")
+    assert loaded is not None
+    assert loaded == [round(value, 6) for value in weights]
+    assert client.values[meta_prior_key("agentic-kb")]
+
+    # A prior of another schema is a prior of another build's feature order:
+    # the safe read is the one that reads nothing, and the fit starts from
+    # the zero prior instead.
+    client.values[meta_prior_key("agentic-kb")] = json.dumps(
+        {"schema": 1, "w": [0.0] * 15}
+    )
+    assert load_meta_prior(client, key_prefix="agentic-kb") is None
+    # And a prior of the right schema but the wrong length is no prior at
+    # all: a misaligned vector is worse than none, and the reader says so.
+    client.values[meta_prior_key("agentic-kb")] = json.dumps(
+        {"schema": SNAPSHOT_SCHEMA, "w": [0.0] * 21}
+    )
+    assert load_meta_prior(client, key_prefix="agentic-kb") is None

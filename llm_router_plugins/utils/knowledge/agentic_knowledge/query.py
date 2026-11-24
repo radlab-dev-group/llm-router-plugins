@@ -63,6 +63,41 @@ _MAX_QUERY_PATHS = 8
 #: short question that names a file is still a question.
 _MIN_QUESTION_CHARS = 12
 
+#: The engine multiplies ``max_results`` by its own factor on every leg of a
+#: hybrid search, so this number is not how many chunks the assembler reads —
+#: it is how many the engine embeds, deserializes and ranks first.  A floor of
+#: fifteen bought one hundred and fifty vectors per request for a block that
+#: quotes two or three documents, and paid for it in queueing latency.  The
+#: ceiling keeps a policy that genuinely asks for more audible; the floor
+#: keeps a narrow policy from retrieving so little that fusion has nothing to
+#: fuse.
+_MAX_RESULTS_FLOOR = 6
+_MAX_RESULTS_CEILING = 12
+
+#: Directory names that say "where the tree keeps code", not "which module
+#: this is".  A `src/` tree and its `tests/` mirror share a module name under
+#: them, and the plain common prefix of the two is the repository root — that
+#: is, no scope at all.  Dropping them is what lets a turn that edits
+#: `src/auth/jwt.py` and `tests/auth/test_jwt.py` still ask about `auth`.
+_ROOT_DIRECTORIES = frozenset(
+    {
+        "src",
+        "lib",
+        "libs",
+        "app",
+        "apps",
+        "pkg",
+        "packages",
+        "test",
+        "tests",
+        "spec",
+        "specs",
+        "integration",
+        "integrationtest",
+        "e2e",
+    }
+)
+
 
 @dataclass(frozen=True)
 class QueryBuilder:
@@ -210,7 +245,7 @@ class QueryBuilder:
                     # its failure; everything else keeps the mode-shaped query.
                     query=self.docs_query_for(turn) if documented else query,
                     categories=tuple(dict.fromkeys(categories)),
-                    max_results=max(15, limits.get(name, 3)),
+                    max_results=_max_results_for(limits.get(name, 3)),
                     thread_id=turn.thread_id if archived else "",
                     # An archived window is already narrowed to one thread, and
                     # the engine cannot intersect two metadata filters.
@@ -223,6 +258,16 @@ class QueryBuilder:
                         self.path_scope_for(turn)
                         if not archived and not documented
                         else ""
+                    ),
+                    # A debug turn is choosing between recipes by their order:
+                    # the first one read is the one the agent tries next, so
+                    # that one question is worth the cross-encoder when the
+                    # first pass is undecided.  Archive and documentation
+                    # orders are not chosen the way a fix is.
+                    rerank_if_contested=(
+                        not archived
+                        and not documented
+                        and turn.mode in ("debug", "test")
                     ),
                 )
             )
@@ -258,31 +303,31 @@ class QueryBuilder:
         )
 
     def path_scope_for(self, turn: AgentTurn) -> str:
-        """Find common directory prefix of touched paths, or empty string.
+        """
+        Return the module the touched paths belong to, or the empty string.
 
-        The deepest directory every touched path shares is the narrowest
-        scope that still holds all of them: paths in one package scope the
-        search to that package, and paths scattered over the repository
-        scope it to nothing — a search with no hits widens back to the
-        whole repository in the reader.
+        The narrowest scope that holds every touched path is what a scoped
+        search wants, and for a turn that edits a module and its test the
+        plain common prefix is the repository root: `src/auth/jwt.py` and
+        `tests/auth/test_jwt.py` share nothing above the first slash, so the
+        filter the turn would ask for is the one that filters nothing, and
+        the widening fallback then reads the whole repository.
+
+        So the scope is read as a *module*, not as a prefix.  The directory
+        names that say where a tree keeps code (`src`, `tests`, `lib`, `app`)
+        carry no meaning about which part of it a turn is working on; under
+        them the two paths name the same module, and that is the scope.  When
+        the paths still disagree the prefix rule decides, and when even that
+        is empty the search is asked unscoped — a search with no hits widens
+        back to the whole repository in the reader, and a wrong narrow scope
+        has no such remedy.
         """
         if not turn.touched_paths:
             return ""
-        paths = [p for p in turn.touched_paths if p and "/" in p]
+        paths = [str(path) for path in turn.touched_paths if path and "/" in str(path)]
         if not paths:
             return ""
-        common = paths[0].rsplit("/", 1)[0].split("/")
-        for path in paths[1:]:
-            directories = path.rsplit("/", 1)[0].split("/")
-            depth = 0
-            while (
-                depth < len(common)
-                and depth < len(directories)
-                and common[depth] == directories[depth]
-            ):
-                depth += 1
-            common = common[:depth]
-        return "/".join(common)
+        return _module_scope(paths) or _common_prefix(paths)
 
     def docs_query_for(self, turn: AgentTurn) -> str:
         """
@@ -338,7 +383,15 @@ class QueryBuilder:
         mode = turn.mode
 
         if mode == "debug":
-            parts: list = [failure, text]
+            # A failure the agent is staring at is two things: the sentence
+            # that names it, and the twenty lines of somebody else's
+            # internals below it.  The first is what a recipe was written
+            # from; the second is a library's stack, and embedding it pulls
+            # the query toward every document that mentions the same
+            # framework.  The keywords still harvest the whole normalized
+            # signature — the sparse leg wants the frames — while the dense
+            # leg is asked with the head of it.
+            parts: list = [_failure_head(failure), text]
         elif mode == "test":
             parts = [self.test_command or _test_command(turn), paths, text]
         elif mode == "implement":
@@ -358,6 +411,79 @@ class QueryBuilder:
             # nothing to order.
             joined = _join([text, paths, failure])
         return joined[:_MAX_QUERY_CHARS]
+
+
+#: A line that says a command lost, not what broke: an exit status, a frame
+#: of somebody else's library, the seam of a traceback.  Every failure has
+#: them, no document is written from them, and as the head of a dense query
+#: they ask the vector store for the harness instead of for the bug.
+_NOISE_LINE = re.compile(
+    r"""^(?:"""
+    r"""process\s+exited|"""
+    # The writer's own digest of which files a trace crossed: a list of paths
+    # under a label no document uses, useful to a human reading a log.
+    r"""chain\s*:|"""
+    r"""exit\s+(?:code|status)\b|"""
+    r"""command\s+(?:failed|returned)\b|"""
+    r"""traceback\s*\(most\s+recent\s+call\s+last\)|"""
+    r"""file\s+"|"""
+    r"""at\s+[\w.$]+\(|"""
+    r"""\^+|"""
+    r"""\.{3,})""",
+    re.IGNORECASE,
+)
+
+#: A line that names a failure: an exception class, a pytest verdict, an
+#: assertion, or the one ``word: message`` shape a normalized signature leads
+#: with.  The first line matching this is the sentence a recipe was written
+#: from, which is exactly what the dense leg is looking for.
+_FAILURE_LINE = re.compile(
+    r"""(?:\b[A-Z][A-Za-z0-9_]*(?:Error|Exception|Failure|Timeout|Warning)\b"""
+    r"""|\b[A-Z][A-Za-z_]*Error\b"""
+    r"""|^FAILED\b"""
+    r"""|^E\s+"""
+    r"""|^FAIL\b"""
+    r"""|\bassert\b"""
+    r"""|:\s*\S.*$)""",
+    re.IGNORECASE,
+)
+
+
+def _failure_head(signature: str) -> str:
+    """
+    Return the line of a failure that names it, without the noise around it.
+
+    A normalized signature is not ordered by informativeness.  The exit status
+    of the command and the frames of the library that raised sit in the same
+    block as ``KeyError: 'alg'``, and which one lands first depends on the
+    tool that produced the output — so the head is *chosen*, not taken: the
+    first line that names a failure, skipping the ones that only say that
+    something lost.
+
+    Retrieval wants that line because a recipe was written from it.  The
+    frames below are shared by every failure that ever passed through the same
+    library, so embedding them asks the store for the library; the exit status
+    is in every failure ever recorded, so embedding it asks for nothing.  When
+    no line names a failure the whole signature is the question — a head made
+    up of noise asks about nothing, and the unshaped text is the older, safer
+    default.
+
+    The keywords are unaffected: the sparse leg still harvests the whole
+    normalized signature, frames and all, because a frame is an exact token
+    and the text index reads exact tokens well.
+    """
+    text = str(signature or "").strip()
+    if not text:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) <= 1:
+        return text
+    for line in lines:
+        if _NOISE_LINE.match(line):
+            continue
+        if _FAILURE_LINE.search(line):
+            return line[:_MAX_TEXT_CHARS]
+    return text
 
 
 def _join(parts: Sequence[str]) -> str:
@@ -417,6 +543,86 @@ def _stems(paths: Sequence[str]) -> List[str]:
         if stem and stem not in stems:
             stems.append(stem)
     return stems
+
+
+def _max_results_for(limit: int) -> int:
+    """
+    Translate a policy's item caps into the ceiling to ask the engine for.
+
+    The policy says how many documents of a source the assembler may *quote*;
+    the engine is asked for more than that, because fusion, the signature
+    bonus and the per-source caps all throw most of what comes back away.
+    Asking for double with a ceiling is the whole compromise: enough candidates
+    for a mode that reads four sources, not one hundred and fifty vectors for
+    a mode that quotes two documents.
+    """
+    return max(_MAX_RESULTS_FLOOR, min(int(limit) * 2, _MAX_RESULTS_CEILING))
+
+
+def _directories(path: str) -> list:
+    """Directory components of a repository-relative path, innermost last."""
+    head = str(path).replace("\\", "/").rsplit("/", 1)[0]
+    return [part for part in head.split("/") if part]
+
+
+def _without_roots(directory: Sequence[str]) -> List[str]:
+    """Drop the leading directory names that name a tree, not a module."""
+    parts = list(directory)
+    while parts and parts[0].lower() in _ROOT_DIRECTORIES:
+        parts = parts[1:]
+    return parts
+
+
+def _common_of(sequences: Sequence[Sequence[str]]) -> List[str]:
+    """Longest leading run of components every sequence shares."""
+    if not sequences:
+        return []
+    common = list(sequences[0])
+    for sequence in sequences[1:]:
+        depth = 0
+        while (
+            depth < len(common)
+            and depth < len(sequence)
+            and common[depth] == sequence[depth]
+        ):
+            depth += 1
+        common = common[:depth]
+    return common
+
+
+def _common_prefix(paths: Sequence[str]) -> str:
+    """Deepest directory every path shares; ``""`` when they share none."""
+    directories = [_directories(path) for path in paths]
+    return "/".join(_common_of(directories))
+
+
+def _module_scope(paths: Sequence[str]) -> str:
+    """
+    Return the module directory the paths agree on, or ``""``.
+
+    Each path is reduced to the directory it lives in with the tree names
+    (`src`, `tests`, …) stripped from the front, which is the part that says
+    what the file *is* rather than which half of the repository keeps it.  A
+    module is worth scoping on only when every path agrees on it: scoping on
+    one file's module because the others disagreed would hide the recipes
+    about the rest of the turn, and an unscoped search is the honest answer
+    to a turn that really is about several modules at once.
+    """
+    if len(paths) < 2:
+        return ""
+    stripped = [_without_roots(_directories(path)) for path in paths]
+    if any(not parts for parts in stripped):
+        return ""
+    shared = _common_of(stripped)
+    if not shared:
+        return ""
+    prefix = "/".join(shared)
+    # A scope the plain prefix already provides adds nothing; returning the
+    # stripped one would only be right when it is *narrower* than the prefix,
+    # and a stripped path is never deeper than the directory it came from.
+    if prefix and prefix in _common_prefix(paths):
+        return ""
+    return prefix
 
 
 def _failure_signature(turn: AgentTurn) -> str:
@@ -508,8 +714,43 @@ _STOPWORDS = frozenset(
         "assert",
         "test",
         "tests",
+        # The verbs of an instruction to an agent say what the reader should
+        # do, never what the code is: they are in every prompt and in no
+        # document, so as BM25 terms they only dilute the ones that matter.
+        "please",
+        "fix",
+        "run",
+        "check",
+        "update",
+        "add",
+        "make",
+        "should",
+        "would",
+        "could",
+        "will",
+        "need",
+        "needs",
+        "want",
+        "wants",
+        "use",
+        "using",
+        "try",
+        "tried",
+        "still",
+        "does",
+        "did",
+        "have",
+        "has",
+        "had",
+        "can",
+        "cant",
     }
 )
+
+#: Ceiling of the BM25 term list.  The engine scores every term it is given;
+#: past a dozen or so the extra ones are the tail of the user's sentence, and
+#: a long conjunction of weak terms retrieves the average document.
+_MAX_KEYWORDS = 15
 
 
 def _extract_keywords(
@@ -518,7 +759,25 @@ def _extract_keywords(
     paths: Sequence[str],
     text: Optional[str] = None,
 ) -> List[str]:
-    """Extract distinct lexical tokens for the sparse BM25 branch."""
+    """
+    Extract distinct lexical tokens for the sparse BM25 branch.
+
+    Four harvests, strongest first.  An exception class and a file stem are
+    terms a document was written with; an identifier in the failure's own
+    text is next; and the user's sentence is last, because in `plan` and
+    `implement` it is the only signal the turn has — a mode with no failure
+    and no command used to send the engine an empty keyword list and rely on
+    the vector leg alone for a question whose terms were spelled out in the
+    prompt.
+
+    The user's words are harvested for the shapes code is written in, not for
+    English: a backticked term is a name the author chose deliberately, and a
+    `snake_case` or `CamelCase` token is a symbol.  Prose in between is where
+    the stopword list earns its keep, and it is why the agent's own verbs —
+    *please*, *fix*, *run* — are stopwords too: they are in every request and
+    in no document, so as terms they only dilute the ones that identify
+    something.
+    """
     tokens: List[str] = []
     # 1. Exception class names (e.g. ConnectionTimeoutError, TypeError)
     for exc in re.findall(
@@ -539,6 +798,25 @@ def _extract_keywords(
         lower = token.lower()
         if lower not in _STOPWORDS and token not in tokens and not token.isdigit():
             tokens.append(token)
-        if len(tokens) >= 15:
+        if len(tokens) >= _MAX_KEYWORDS:
             break
-    return tokens
+    # 4. Names the user spelled out: a backticked term, a snake_case or a
+    # CamelCase identifier.  Prose words are not terms; these are.
+    if text and len(tokens) < _MAX_KEYWORDS:
+        for quoted in re.findall(r"`([^`]+)`", text):
+            clean = re.sub(r"[^\w.\-]", "", quoted)
+            if (
+                len(clean) > 2
+                and clean.lower() not in _STOPWORDS
+                and clean not in tokens
+            ):
+                tokens.append(clean)
+        for token in re.findall(
+            r"\b(?:[a-z]+(?:_[a-z0-9]+)+|[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b",
+            text,
+        ):
+            if token.lower() not in _STOPWORDS and token not in tokens:
+                tokens.append(token)
+            if len(tokens) >= _MAX_KEYWORDS:
+                break
+    return tokens[:_MAX_KEYWORDS]

@@ -28,6 +28,7 @@ the router cannot see the repository from.
 """
 
 import json
+import re
 
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Optional, Tuple
@@ -59,6 +60,11 @@ _MAX_HEADINGS_PER_FILE = 6
 
 #: A heading longer than this is a paragraph, not a heading.
 _MAX_HEADING_CHARS = 60
+
+#: Most declared symbols quoted per file.  A page that declares forty
+#: classes is a page about a library, and the map needs its name, not its
+#: table of contents.
+_MAX_SYMBOLS_PER_FILE = 8
 
 #: Said when the map is not the whole repository.  A reader who is not told
 #: will conclude a page does not exist and rewrite it.
@@ -126,6 +132,12 @@ class DocFile:
     path: str = ""
     doc_type: str = ""
     headings: Tuple[str, ...] = ()
+    #: The API the page declares: the names of the classes, interfaces and
+    #: functions its second-level headings announce.  A heading is a promise
+    #: about what a page says, and a symbol is the part of the promise an
+    #: agent can act on — the name to import, the interface to implement.
+    #: ``()`` when a heading names no symbol, which is most of them.
+    symbols: Tuple[str, ...] = ()
     content_hash: str = ""
 
 
@@ -169,6 +181,10 @@ def build_doc_context(
                     for heading in entry.headings
                     if heading.strip()
                 ),
+                symbols=_symbols_of(
+                    entry.headings,
+                    getattr(entry, "symbols", ()) or (),
+                ),
                 content_hash=str(entry.content_hash or ""),
             )
             for entry in files
@@ -207,6 +223,12 @@ def build_doc_context(
         if entry.headings:
             quoted = "; ".join(entry.headings[:_MAX_HEADINGS_PER_FILE])
             line += f": {quoted}"
+        if entry.symbols:
+            # The names a page declares, after the headings that declare
+            # them: the map answers "where is it" and the symbols answer
+            # "what is in it" — the two questions an agent asks before
+            # opening a file.
+            line += f" [declares: {', '.join(entry.symbols[:_MAX_SYMBOLS_PER_FILE])}]"
         if used + len(line) + 1 > room and named:
             break
         lines.append(line)
@@ -264,6 +286,52 @@ def render_doc_context(context: DocContext) -> str:
         "written down, and any of it can be asked for in full.\n"
         f"{context.text}"
     )
+
+
+#: A heading that names the API a page declares: the languages a repository
+#: writes in, and the declaration keyword each of them puts in front of a
+#: name.  A heading like ``Class UserService`` or ``the ``OrderService``
+#: interface`` is a promise about one symbol, and the symbol is the part an
+#: agent can import.
+_SYMBOL_HEADING = re.compile(
+    r"""\b
+        (?:class|interface|struct|trait|enum|union|type\s+alias|protocol|
+         abstract\s+class|final\s+class|
+         def|fn|func|function|method|constructor)
+        \s*`?
+        ([A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*[A-Z][A-Za-z0-9_]*)
+    """,
+    re.VERBOSE,
+)
+
+
+def _symbols_of(headings, given) -> Tuple[str, ...]:
+    """
+    The API a page's headings declare, in order of first declaration.
+
+    A caller that already read the declarations passes them through
+    *given*, because a reader of the file saw more than a heading regex can
+    see.  A heading is then only the fallback: a page whose headings say
+    ``Class UserService`` and nothing else declares ``UserService``, and a
+    page whose headings are prose declares nothing, which is a true answer
+    and not a gap.
+    """
+    symbols = []
+    for symbol in given or ():
+        symbol = str(symbol).strip()
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+        if len(symbols) >= _MAX_SYMBOLS_PER_FILE:
+            break
+    for heading in headings or ():
+        if len(symbols) >= _MAX_SYMBOLS_PER_FILE:
+            break
+        match = _SYMBOL_HEADING.search(str(heading))
+        if match:
+            symbol = match.group(2)
+            if symbol not in symbols:
+                symbols.append(symbol)
+    return tuple(symbols)
 
 
 class DocContextStore:

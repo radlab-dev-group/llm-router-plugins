@@ -1082,14 +1082,15 @@ def test_a_fix_mined_on_the_next_turn_is_credited():
     assert stats["downvotes"] == 0
 
 
-def test_the_pending_injection_is_settled_within_one_turn():
-    """One turn is the whole window of attribution; nothing waits forever."""
+def test_the_pending_injection_is_settled_within_the_window():
+    """The window holds recent injections; a verdict settles them in order."""
     config = knowledge_config()
     store = FakeStore(hits=(store_hit("recipe", score=0.9),))
     plugin = make_plugin(config, store=store)
 
     plugin.apply(_recipe_turn("turn-1"))
-    doc = plugin._pending_feedback["sess-1"][0][0]
+    window = plugin._pending_feedback["sess-1"]
+    doc = window[0][1][0]
     assert plugin._pending_feedback
     # Turn two settles the verdict: the loop repeated, so the doc is blamed.
     plugin.apply(_recipe_turn("turn-2"))
@@ -1097,7 +1098,7 @@ def test_the_pending_injection_is_settled_within_one_turn():
     # Turn three re-injects the recipe; the loop still repeats, so the doc
     # is blamed again — a continuing loop keeps sinking a debunked recipe.
     plugin.apply(_recipe_turn("turn-3"))
-    assert plugin._pending_feedback["sess-1"][0][0] == doc
+    assert plugin._pending_feedback["sess-1"][0][1][0] == doc
     assert plugin._feedback_tracker.get_feedback(doc)["downvotes"] == 2
 
 

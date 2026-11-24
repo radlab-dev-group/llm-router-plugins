@@ -307,6 +307,24 @@ _DEFAULT_MIN_SIMILARITY = 0.35
 #: policy or with ``LLM_ROUTER_KNOWLEDGE_AGENTIC_RERANK_RESULTS=false``.
 _DEFAULT_HYBRID_SEARCH = True
 _DEFAULT_RERANK_RESULTS = True
+
+#: Re-score a retrieval with the cross-encoder only when the first-pass ranking
+#: is *contested* — its top candidates close together — instead of always.  A
+#: cross-encoder costs a forward pass per candidate pair on the engine's CPU,
+#: which is the same budget every other repository is waiting for; when fused
+#: ranks already separate the winner from the rest by a wide margin, the
+#: ordering is not in doubt and the second opinion changes nothing.
+_DEFAULT_RERANK_WHEN_CONTESTED = False
+
+#: Score gap below which a first-pass ranking counts as contested: the
+#: distance between the best hit and the third one, on the scale the answer
+#: was produced on.
+_DEFAULT_RERANK_CONTESTED_GAP = 0.05
+
+#: Ceiling of the candidate list handed to the cross-encoder on a contested
+#: re-ask.  The question is which of the top few is first, not which of the
+#: whole retrieval is tenth.
+_DEFAULT_RERANK_TOP_K = 5
 _DEFAULT_CACHE_TTL_SECONDS = 3600
 _DEFAULT_MAX_LOOKUPS = 20
 _DEFAULT_MAX_CHARS = 6000
@@ -618,6 +636,15 @@ class AgenticKnowledgeConfig:
     #: request drops the vector leg and asks the full-text leg alone; see
     #: :data:`_DEFAULT_FTS_ONLY_MIN_IDENTIFIER_SHARE`.
     fts_only_min_identifier_share: float = _DEFAULT_FTS_ONLY_MIN_IDENTIFIER_SHARE
+    #: Spend the cross-encoder only on a contested ranking.  Off by default:
+    #: it is a second engine call, and only worth it where the first one left
+    #: the ordering in doubt.  See :data:`_DEFAULT_RERANK_WHEN_CONTESTED`.
+    rerank_when_contested: bool = _DEFAULT_RERANK_WHEN_CONTESTED
+    #: Gap between the best and the third-best first-pass hit under which a
+    #: ranking is contested.
+    rerank_contested_gap: float = _DEFAULT_RERANK_CONTESTED_GAP
+    #: How many candidates a contested re-ask hands the cross-encoder.
+    rerank_top_k: int = _DEFAULT_RERANK_TOP_K
     cache_ttl_seconds: int = _DEFAULT_CACHE_TTL_SECONDS
     max_lookups_per_generation: int = _DEFAULT_MAX_LOOKUPS
 
@@ -832,6 +859,24 @@ class AgenticKnowledgeConfig:
                 ),
                 "read.fts_only_min_identifier_share",
             ),
+            rerank_when_contested=_boolean(
+                read.get(
+                    "rerank_when_contested",
+                    _DEFAULT_RERANK_WHEN_CONTESTED,
+                ),
+                "read.rerank_when_contested",
+            ),
+            rerank_contested_gap=_fraction(
+                read.get(
+                    "rerank_contested_gap",
+                    _DEFAULT_RERANK_CONTESTED_GAP,
+                ),
+                "read.rerank_contested_gap",
+            ),
+            rerank_top_k=_positive(
+                read.get("rerank_top_k", _DEFAULT_RERANK_TOP_K),
+                "read.rerank_top_k",
+            ),
             cache_ttl_seconds=_positive(
                 read.get("cache_ttl_seconds", _DEFAULT_CACHE_TTL_SECONDS),
                 "read.cache_ttl_seconds",
@@ -1022,6 +1067,9 @@ class AgenticKnowledgeConfig:
             ("MIN_SIMILARITY", "min_similarity", _fraction),
             ("HYBRID_SEARCH", "hybrid_search", _boolean),
             ("RERANK_RESULTS", "rerank_results", _boolean),
+            ("RERANK_WHEN_CONTESTED", "rerank_when_contested", _boolean),
+            ("RERANK_CONTESTED_GAP", "rerank_contested_gap", _fraction),
+            ("RERANK_TOP_K", "rerank_top_k", _positive),
             ("CACHE_TTL_SECONDS", "cache_ttl_seconds", _positive),
             (
                 "FTS_ONLY_MIN_IDENTIFIER_SHARE",

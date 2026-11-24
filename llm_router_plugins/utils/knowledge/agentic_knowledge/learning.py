@@ -66,6 +66,10 @@ __all__ = [
     "FeedbackLog",
     "train_ranker",
     "publish_snapshot",
+    "compute_meta_prior",
+    "load_meta_prior",
+    "save_meta_prior",
+    "meta_prior_key",
     "acquire_pass_lock",
     "release_pass_lock",
     "load_snapshot",
@@ -81,8 +85,15 @@ __all__ = [
 SCALE_RRF = "rrf"
 SCALE_RERANKER = "reranker"
 
+#: The objectives a fit can climb.
+LOSS_POINTWISE = "pointwise"
+LOSS_PAIRWISE = "pairwise"
+
 #: What the weight vector holds, in order.  The names are part of the snapshot
 #: contract: a snapshot whose names do not match is refused rather than read.
+#: The order is the plan's feature table, and the vector of a candidate is its
+#: row: fifteen features the candidate already carried, seven added for the
+#: interactions and for the state the document sits in.
 FEATURE_NAMES: Tuple[str, ...] = (
     "bias",
     "score",
@@ -99,13 +110,25 @@ FEATURE_NAMES: Tuple[str, ...] = (
     "exposure_log",
     "rank",
     "size_share",
+    "score_x_path",
+    "sig_x_cmd",
+    "agent_loop_level",
+    "is_human_doc",
+    "patch_sim_prior",
+    "query_intent_align",
+    "error_class_match",
 )
+
+SNAPSHOT_SCHEMA = 2
 
 _N_FEATURES = len(FEATURE_NAMES)
 
 #: The features a document is named by.  A corpus that varies none of them
 #: cannot identify a weight, and a weight nobody identified must not be used.
-_LEARNABLE = (1, 5, 6, 7, 8, 9, 13)
+#: The interactions are in the set: a corpus where every document names the
+#: same failure varies ``signature_match`` and ``score_x_sig`` together, and
+#: only one of the two is a dimension the fit may move.
+_LEARNABLE = (1, 5, 6, 7, 8, 9, 13, 15, 16, 17, 18, 19, 20, 21)
 
 #: :data:`_LEARNABLE` by name.  A reader that reports a corpus says what a fit
 #: may move as well as what it holds: a non-varying feature outside this set
@@ -128,6 +151,42 @@ _BACKTRACK_LIMIT = 24
 #: ranking nobody is holding, and the bound is what keeps a long-lived proxy
 #: from growing a ledger of them.
 _RANKED_EXPLORATION_LIMIT = 256
+
+
+def _is_human_document(kind: str) -> bool:
+    """
+    Whether *kind* is a page a person wrote, not an episode the miner mined.
+
+    The feature the model reads as ``is_human_doc``: documentation is prose
+    about how the repository does things, and the miner's recipes and
+    dead ends are records of what happened.  The two are not the same kind of
+    evidence, and a corpus where one of them never appears cannot identify
+    the weight of the other — so the split is a feature, not a filter.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
+        KIND_DOC,
+    )
+
+    return str(kind) == KIND_DOC
+
+
+def _error_class_matches(candidate: "CandidateFeatures", doc_class: str) -> bool:
+    """
+    Whether the failure the document is about is the same kind as this turn's.
+
+    The match is on the class of the exception — ``KeyError`` — not on the
+    message, which differs from failure to failure and is the part that makes
+    two signatures of the same class look different.  Case is folded, because
+    a document written by a human capitalizes the class and one written by a
+    normalizer may not.  An empty class on either side is no match: a document
+    that names no failure cannot match one, and a turn with no failure has
+    nothing to match a document against.
+    """
+    left = str(candidate.error_class or "").strip()
+    right = str(doc_class or "").strip()
+    if not left or not right:
+        return False
+    return left.lower() == right.lower()
 
 
 def _sigmoid(x: float) -> float:
@@ -192,7 +251,20 @@ class LearningConfig:
         Ceiling of one trained weight.  A feature that would dominate the vote
         by itself is a fit on noise, and this is where that stops.
     newton_steps : int
-        Newton iterations per fit.  Four is plenty for fifteen features.
+        Newton iterations per fit.  Four is plenty for twenty-two features.
+    loss : str
+        The objective a fit climbs.  ``pointwise`` is the layer's original
+        likelihood, one judgement at a time: the probability that this
+        document, shown to this turn, was useful.  ``pairwise`` is the
+        ranking's own likelihood, one comparison at a time: the probability
+        that the document a turn credited should have stood above the one it
+        blamed.  The two read the same labels and disagree about what the
+        observation is — a probability, or an order — and a corpus whose
+        verdicts are mostly about which of two documents to read first is
+        served by the one that models order.  The default stays
+        :data:`LOSS_POINTWISE`: the holdout gate and the neutral-snapshot
+        rule were built around the pointwise fit, and a new objective goes in
+        behind a switch, not in front of one.
     min_samples, min_holdout_auc : int, float
         What a scope must show before its snapshot is published.  A scope that
         shows less gets a neutral snapshot, which reads as ``1.0``.
@@ -227,6 +299,19 @@ class LearningConfig:
     l2: float = 32.0
     weight_clip: float = 3.0
     newton_steps: int = 4
+    loss: str = "pointwise"
+    #: Bootstrap a cold repository from what the other repositories have
+    #: taught: the fit starts from the mean of the accepted models instead of
+    #: from zero, and the ridge pulls it toward this repository's own labels
+    #: as they arrive.  A cold repository is not a blank one — the features
+    #: that made a verified fix useful somewhere made it useful here too —
+    #: and the zero prior is the layer refusing to know that.  Off by default
+    #: until a deployment has the scopes to make the prior mean something.
+    meta_prior_enabled: bool = False
+    #: How many accepted scopes a prior needs before it is written at all.
+    #: One repository's weights are that repository's accidents, and a prior
+    #: of accidents is worse than the policy.
+    meta_prior_min_scopes: int = 3
     min_samples: int = 200
     #: Minimum weighted evidence the fit must rest on.  Counterfactual labels
     #: count fully; coarse labels count half.  Below this the fit is published
@@ -259,6 +344,12 @@ class LearningConfig:
             raise ValueError("learning.weight_clip must be positive")
         if self.newton_steps < 1:
             raise ValueError("learning.newton_steps must be at least 1")
+        if self.meta_prior_min_scopes < 1:
+            raise ValueError("learning.meta_prior_min_scopes must be at least 1")
+        if self.loss not in (LOSS_POINTWISE, LOSS_PAIRWISE):
+            raise ValueError(
+                f"learning.loss must be {LOSS_POINTWISE} or {LOSS_PAIRWISE}"
+            )
         if self.min_samples < 1:
             raise ValueError("learning.min_samples must be at least 1")
         if self.min_evidence <= 0.0:
@@ -332,6 +423,40 @@ class CandidateFeatures:
     rank: int = 0
     size_chars: int = 0
     budget_chars: int = 0
+    #: How many times the agent has come back to the same failure this
+    #: session; ``0`` is "not in a loop", ``1`` is "first try", ``2`` and up
+    #: is the loop the escalation annotation is about.  The loop is a fact
+    #: about the turn, not the document, and it belongs in the vector
+    #: because the document that is worth reading changes with it.
+    loop_count: int = 0
+    #: The class of the exception this turn is stuck on, when it names one:
+    #: ``KeyError``, not the message.  ``""`` is "no class to match", and the
+    #: match is against the class the document's failure names, not its
+    #: whole signature, because the message differs from failure to failure
+    #: and the class is what a recipe is written with.
+    error_class: str = ""
+    #: The class the document's failure names, when it has one; ``""`` when
+    #: the document carries no failure of its own.  The match is a fact about
+    #: the pair, not either side, so both halves travel with the candidate.
+    doc_error_class: str = ""
+    #: How much the failure the document is about resembles the one this turn
+    #: is stuck on, 0..1, with 1 for the identical pair the hash already
+    #: catches.  The hash is all-or-nothing; a failure apart by one variable
+    #: name drops out of it, and the words still agree on most of their
+    #: tokens.  ``0.0`` when either side names no failure.
+    signature_similarity: float = 0.0
+    #: How much of the document's diff the turn's own change repeats, 0..1:
+    #: the share of the document's added lines that appear among the lines the
+    #: turn changed.  A turn that applied the fix the document describes shows
+    #: high overlap, one that merely edited the same file shows low; the label
+    #: the credit assignment reads is the overlap, and this is the feature the
+    #: model reads it with.  ``0.0`` when the turn carried no patch text.
+    patch_sim: float = 0.0
+    #: Whether the document is what the mode is asking for: a fix in debug, a
+    #: procedure in implement, a page in plan.  The engine matches on text;
+    #: this says whether the match is the kind of document the turn is looking
+    #: for, which text matching cannot see.
+    intent_align: bool = False
 
     def vector(self) -> List[float]:
         """The weight vector's input, in :data:`FEATURE_NAMES` order."""
@@ -340,22 +465,38 @@ class CandidateFeatures:
             size_share = _clamp(
                 self.size_chars / float(self.budget_chars), 0.0, 1.0
             )
+        score = _clamp(self.score, 0.0, 1.0)
+        path = 1.0 if self.path_match > 0 else 0.0
+        sig = 1.0 if self.signature_match else 0.0
+        cmd = 1.0 if self.command_match else 0.0
+        loop = _clamp(self.loop_count, 0, 8) / 8.0
+        # The continuous signature reads the words when the hash is silent:
+        # a match by identity is 1, a match by resemblance is the Jaccard,
+        # and a document that names no failure is 0 whatever the turn has.
+        signature = max(sig, _clamp(self.signature_similarity, 0.0, 1.0))
         return [
             1.0,
-            _clamp(self.score, 0.0, 1.0),
-            _clamp(self.score, 0.0, 1.0) ** 2,
+            score,
+            score ** 2,
             1.0 if self.score_scale == SCALE_RRF else 0.0,
             1.0 if self.score_scale == SCALE_RERANKER else 0.0,
-            1.0 if self.signature_match else 0.0,
-            1.0 if self.path_match > 0 else 0.0,
+            signature,
+            path,
             _clamp(self.path_stem_match, 0, 4) / 4.0,
-            1.0 if self.command_match else 0.0,
+            cmd,
             _log1p(max(self.age_days, 0.0)),
             _log1p(self.upvotes),
             _log1p(self.downvotes),
             _log1p(self.exposure),
             _clamp(self.rank, 0, 20) / 20.0,
             size_share,
+            score * path,
+            sig * cmd,
+            loop,
+            1.0 if _is_human_document(self.kind) else 0.0,
+            _clamp(self.patch_sim, 0.0, 1.0),
+            1.0 if self.intent_align else 0.0,
+            1.0 if _error_class_matches(self, self.doc_error_class) else 0.0,
         ]
 
     def to_json(self) -> Dict[str, Any]:
@@ -376,6 +517,12 @@ class CandidateFeatures:
             "rank": int(self.rank),
             "chars": int(self.size_chars),
             "budget": int(self.budget_chars),
+            "loop": int(self.loop_count),
+            "exc": self.error_class,
+            "dexc": self.doc_error_class,
+            "sims": round(self.signature_similarity, 4),
+            "psim": round(self.patch_sim, 4),
+            "intent": bool(self.intent_align),
         }
 
     @classmethod
@@ -398,6 +545,12 @@ class CandidateFeatures:
             rank=int(raw.get("rank") or 0),
             size_chars=int(raw.get("chars") or 0),
             budget_chars=int(raw.get("budget") or 0),
+            loop_count=int(raw.get("loop") or 0),
+            error_class=str(raw.get("exc") or ""),
+            doc_error_class=str(raw.get("dexc") or ""),
+            signature_similarity=float(raw.get("sims") or 0.0),
+            patch_sim=float(raw.get("psim") or 0.0),
+            intent_align=bool(raw.get("intent")),
         )
 
 
@@ -831,6 +984,7 @@ class ContextRanker:
         samples: Sequence[FeedbackSample],
         holdout_fraction: float = 0.0,
         rng: Optional[random.Random] = None,
+        prior: Optional[Sequence[float]] = None,
     ) -> Dict[str, Any]:
         """
         Fit on the labelled samples and report what the fit is worth.
@@ -851,6 +1005,7 @@ class ContextRanker:
             "train_auc": 0.0,
             "collinear": (),
             "ridge": 0.0,
+            "prior": "meta" if prior else "zero",
         }
         if not labelled:
             return report
@@ -870,12 +1025,31 @@ class ContextRanker:
         report["ridge"] = round(lam, 4)
         report["features"] = tuple(FEATURE_NAMES[i] for i in varied)
         weights = [0.0] * _N_FEATURES
-        for _ in range(cfg.newton_steps):
-            weights = _newton_step(
-                weights, train, lam, cfg.weight_clip, varied
-            )
+        pairs = _contrast_pairs(train) if cfg.loss == LOSS_PAIRWISE else ()
+        report["pairs"] = len(pairs)
+        if pairs:
+            report["loss"] = LOSS_PAIRWISE
+            for _ in range(cfg.newton_steps):
+                weights = _pairwise_newton_step(
+                    weights, pairs, lam, cfg.weight_clip, varied, prior
+                )
+            precision = _pairwise_hessian(pairs, lam, varied, weights)
+        else:
+            # Either the objective was never the pairwise one, or the corpus
+            # holds no pair of opposite judgements to compare: a scope whose
+            # every verdict says the same thing has an order to learn and
+            # nothing to learn it from.  The pointwise fit reads the same
+            # labels as probabilities, and the report names which of the two
+            # actually ran, because "pairwise was asked" and "pairwise fitted"
+            # are two different answers.
+            report["loss"] = LOSS_POINTWISE
+            for _ in range(cfg.newton_steps):
+                weights = _newton_step(
+                    weights, train, lam, cfg.weight_clip, varied, prior
+                )
+            precision = _hessian(train, lam, varied, weights)
         self.weights = weights
-        self.precision = _hessian(train, lam, varied, weights)
+        self.precision = precision
         report["train_auc"] = round(_auc(train, self), 4)
         if holdout:
             report["holdout_auc"] = round(_auc(holdout, self), 4)
@@ -947,6 +1121,29 @@ class ModelSnapshot:
         return not self.ranker.trained
 
 
+def _as_prior(prior_weights: Optional[Sequence[float]]) -> Optional[Sequence[float]]:
+    """
+    The prior mean a fit may start from, or ``None`` for the zero prior.
+
+    A prior the wrong length is a prior this build cannot read — the order of
+    the weights is the schema, and a vector whose ninth entry is someone
+    else's ninth feature is not a belief, it is a misalignment.  The honest
+    answer to a misaligned prior is no prior, because a fit that starts from
+    the wrong belief in the right shape is worse than one that starts from
+    none: the ridge will pull it back, but the pull is measured in features,
+    and a misaligned prior pulls every feature in the wrong direction at
+    once.
+    """
+    if not prior_weights:
+        return None
+    values = [float(value) for value in prior_weights]
+    if len(values) != _N_FEATURES or not all(
+        math.isfinite(v) for v in values
+    ):
+        return None
+    return values
+
+
 def train_ranker(
     samples: Sequence[FeedbackSample],
     scope: str,
@@ -955,6 +1152,7 @@ def train_ranker(
     rng: Optional[random.Random] = None,
     now: float = 0.0,
     arms: Optional[Dict[str, Dict[str, float]]] = None,
+    prior_weights: Optional[Sequence[float]] = None,
 ) -> Tuple[ModelSnapshot, Dict[str, Any]]:
     """
     Fit one scope and decide whether the fit is worth publishing.
@@ -969,7 +1167,12 @@ def train_ranker(
     cfg = config or LearningConfig()
     rng = rng or random.Random(0)
     ranker = ContextRanker(config=cfg, rng=rng)
-    report = ranker.fit(samples, holdout_fraction=holdout_fraction, rng=rng)
+    report = ranker.fit(
+        samples,
+        holdout_fraction=holdout_fraction,
+        rng=rng,
+        prior=_as_prior(prior_weights),
+    )
     enough = report["labelled"] >= cfg.min_samples
     separates = report["holdout_auc"] >= cfg.min_holdout_auc
     trusted = report.get("evidence", 0.0) >= cfg.min_evidence
@@ -1011,7 +1214,7 @@ def train_ranker(
 def _snapshot_payload(snapshot: ModelSnapshot) -> Dict[str, Any]:
     """The wire form of a snapshot, for the live key and the history alike."""
     return {
-        "schema": 1,
+        "schema": SNAPSHOT_SCHEMA,
         "scope": snapshot.scope,
         "model_id": snapshot.model_id,
         "trained_at": snapshot.trained_at,
@@ -1023,6 +1226,117 @@ def _snapshot_payload(snapshot: ModelSnapshot) -> Dict[str, Any]:
         "arms": snapshot.arms,
         **snapshot.ranker.to_dict(),
     }
+
+
+def meta_prior_key(key_prefix: str) -> str:
+    """Where the cross-repository prior lives."""
+    return f"{key_prefix}:meta_prior"
+
+
+def compute_meta_prior(
+    snapshots: Sequence["ModelSnapshot"],
+    min_scopes: int = 3,
+) -> Optional[List[float]]:
+    """
+    The weight vector the repositories that have taught something agree on.
+
+    A scope whose fit was accepted is a repository that has enough judged
+    injections for its weights to mean what they say; the mean of those
+    weights is the honest statement of what the layer has learned about
+    ranking knowledge *anywhere*, as opposed to what one repository's corpus
+    happens to vary.  It is the prior a new repository starts from, and the
+    reason it is a mean and not a median or a mode is that the weights are
+    already shrunk by their own corpora: averaging shrunk estimates is
+    shrinkage toward the center of the evidence, which is the whole idea.
+
+    ``None`` when fewer than *min_scopes* have been accepted.  One repository
+    is not a prior, it is one repository: its weights carry its own corpus's
+    accidents, and a second repository that starts from them inherits the
+    accidents without the evidence.  A prior this cheap is worse than the
+    zero prior, because the zero prior is the policy and the policy is what
+    the layer was checked against.
+    """
+    trained = [
+        snapshot for snapshot in snapshots if snapshot.ranker.trained
+    ]
+    if len(trained) < max(1, int(min_scopes)):
+        return None
+    total = [0.0] * _N_FEATURES
+    for snapshot in trained:
+        weights = snapshot.ranker.weights
+        for index in range(_N_FEATURES):
+            total[index] += float(weights[index]) if index < len(weights) else 0.0
+    count = float(len(trained))
+    return [value / count for value in total]
+
+
+def load_meta_prior(
+    client: Any,
+    key_prefix: str = "agentic-kb",
+    config: Optional[LearningConfig] = None,
+) -> Optional[List[float]]:
+    """
+    Read the cross-repository prior, or ``None`` when there is none to read.
+
+    Missing is the normal answer of a young deployment, and it is the right
+    one: a fit with no prior starts at zero, which is the policy, and the
+    policy is what every other part of this layer was designed to be.
+    """
+    if client is None:
+        return None
+    try:
+        raw = client.get(meta_prior_key(key_prefix))
+    except Exception:
+        return None
+    if not raw:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if int(data.get("schema") or 0) != SNAPSHOT_SCHEMA:
+        # A prior of another feature schema is a prior of another build's
+        # feature order: the weights would be read under the wrong names.
+        return None
+    weights = data.get("w")
+    if not isinstance(weights, (list, tuple)):
+        return None
+    return _as_prior(weights)
+
+
+def save_meta_prior(
+    client: Any,
+    weights: Sequence[float],
+    key_prefix: str = "agentic-kb",
+    scopes: Sequence[str] = (),
+) -> bool:
+    """
+    Write the cross-repository prior.  Fail-open: a prior is an acceleration.
+
+    The prior is what a fit starts from, never what it must not leave; a
+    deployment whose prior could not be written refits from zero, which is
+    what it did before the prior existed.
+    """
+    if client is None:
+        return False
+    values = _as_prior(weights)
+    if values is None:
+        return False
+    payload = {
+        "schema": SNAPSHOT_SCHEMA,
+        "w": [round(value, 6) for value in values],
+        "scopes": sorted(str(scope) for scope in scopes)[:200],
+        "at": round(time.time(), 3),
+    }
+    try:
+        client.set(meta_prior_key(key_prefix), json.dumps(payload, sort_keys=True))
+    except Exception:
+        return False
+    return True
 
 
 def publish_snapshot(
@@ -1254,6 +1568,15 @@ def load_snapshot(
     except (TypeError, ValueError):
         return None
     if not isinstance(data, dict):
+        return None
+    schema = int(data.get("schema") or 1)
+    if schema != SNAPSHOT_SCHEMA:
+        # A snapshot of another schema is not a snapshot this build can read:
+        # the order of the weights is the schema, and reading the weights of
+        # a schema-1 fit with the names of a schema-2 fit would mean feature
+        # five by one name and another by another.  The safe read is the one
+        # that reads nothing: a scope whose model a build cannot interpret
+        # is served by the policy until the model is republished.
         return None
     features = tuple(str(f) for f in data.get("features") or ())
     if features and features != FEATURE_NAMES:
@@ -1781,6 +2104,11 @@ class LabelStore:
         """The deduplication key: one record per (session, generation, doc)."""
         return f"{sample.session_id}|{sample.generation}|{sample.document_name}"
 
+    def _warn(self, message: str, *args: Any) -> None:
+        """Report a store failure without turning it into a pass failure."""
+        if self._logger is not None:
+            self._logger.warning(message, *args)
+
 
 class LearningPolicy:
     """
@@ -2208,6 +2536,14 @@ def _correlation(left: Sequence[float], right: Sequence[float]) -> float:
     return numerator / math.sqrt(square_left * square_right)
 
 
+def _prior_at(prior: Optional[Sequence[float]], index: int) -> float:
+    """One entry of the prior mean; ``0.0`` when there is no prior at all."""
+    if not prior or index >= len(prior):
+        return 0.0
+    value = float(prior[index])
+    return value if math.isfinite(value) else 0.0
+
+
 def _prior_precision(lam: float) -> List[List[float]]:
     """``lambda I`` over every feature, including the ones that will not move."""
     return [
@@ -2221,9 +2557,12 @@ def _objective(
     samples: Sequence[FeedbackSample],
     lam: float,
     varied: Sequence[int],
+    prior: Optional[Sequence[float]] = None,
 ) -> float:
     """The penalized log-likelihood the Newton step ascends."""
-    total = -0.5 * lam * sum(weights[i] * weights[i] for i in varied)
+    total = -0.5 * lam * sum(
+        (weights[i] - _prior_at(prior, i)) ** 2 for i in varied
+    )
     for sample in samples:
         target, weight = _target(sample.label)
         vector = sample.features.vector()
@@ -2239,6 +2578,7 @@ def _newton_step(
     lam: float,
     clip: float,
     varied: Sequence[int],
+    prior: Optional[Sequence[float]] = None,
 ) -> List[float]:
     """
     One damped ridge-Newton update over the identifiable features.
@@ -2253,7 +2593,9 @@ def _newton_step(
     """
     if not varied:
         return list(weights)
-    gradient = [-lam * weights[i] for i in range(_N_FEATURES)]
+    gradient = [
+        -lam * (weights[i] - _prior_at(prior, i)) for i in range(_N_FEATURES)
+    ]
     hessian = _prior_precision(lam)
     for sample in samples:
         target, weight = _target(sample.label)
@@ -2274,7 +2616,7 @@ def _newton_step(
         delta = _solve(hessian, gradient)
     except ArithmeticError:
         return list(weights)
-    current = _objective(weights, samples, lam, varied)
+    current = _objective(weights, samples, lam, varied, prior)
     step = 1.0
     best = list(weights)
     best_value = current
@@ -2284,13 +2626,200 @@ def _newton_step(
             candidate[index] = _clamp(
                 weights[index] + step * delta[index], -clip, clip
             )
-        value = _objective(candidate, samples, lam, varied)
+        value = _objective(candidate, samples, lam, varied, prior)
         if value > best_value:
             best, best_value = candidate, value
         if value > current + 1e-12:
             return candidate
         step *= 0.5
     return best if best_value > current else list(weights)
+
+
+#: Most contrast pairs one fit is built from.  The pairs of a corpus grow as
+#: the product of its positives and negatives, and a corpus of a thousand
+#: judgements can ask for a million comparisons a step cannot afford.  The
+#: cap is taken in a deterministic order — the pairs of the most recently
+#: judged generations first — so the same corpus always fits to the same
+#: weights, which is what makes a published model reproducible.
+_MAX_PAIRS = 20000
+
+
+def _contrast_pairs(
+    samples: Sequence[FeedbackSample],
+) -> List[Tuple[List[float], List[float], float]]:
+    """
+    The comparisons a ranking can be fitted on, as (winner, loser, weight).
+
+    A pair is two documents the *same request* showed, one of which the next
+    turn credited and the other blamed.  That restriction is the whole point
+    of a pairwise objective: the ranking decides what one agent reads first
+    among the candidates of one request, and a comparison between a document
+    shown to this repository in March and one shown to another in October is
+    not a comparison the model will ever be asked to make again.
+
+    The weight of a pair is how much the two verdicts agree with each other —
+    the weaker of the two magnitudes, since a pair built from a half-credit
+    and a whole blame is not as strong evidence as a pair built from two
+    whole ones.  Graded labels survive as weights; their directions decide
+    which side of the pair each document is on.
+    """
+    by_request: Dict[Tuple[str, str], List[FeedbackSample]] = {}
+    for sample in samples:
+        if not sample.label or not sample.document_name:
+            continue
+        key = (sample.session_id, sample.generation)
+        by_request.setdefault(key, []).append(sample)
+    pairs: List[Tuple[List[float], List[float], float]] = []
+    # Newest request first: with more pairs than the ceiling, what the fit
+    # sees is what the deployment did most recently, and the same corpus in
+    # the same order always yields the same pairs.
+    for key in sorted(by_request, key=lambda item: -_request_recency(by_request[item])):
+        group = by_request[key]
+        winners = [sample for sample in group if sample.label > 0]
+        losers = [sample for sample in group if sample.label < 0]
+        if not winners or not losers:
+            continue
+        for winner in winners:
+            for loser in losers:
+                credit = min(abs(winner.label), abs(loser.label))
+                credit *= _KIND_CREDIT.get(winner.label_kind, 1.0)
+                credit *= _KIND_CREDIT.get(loser.label_kind, 1.0)
+                if credit <= 0.0:
+                    continue
+                pairs.append(
+                    (winner.features.vector(), loser.features.vector(), credit)
+                )
+                if len(pairs) >= _MAX_PAIRS:
+                    return pairs
+    return pairs
+
+
+def _request_recency(group: Sequence[FeedbackSample]) -> float:
+    """When a request was made; a group of undated samples is old."""
+    stamps = [sample.at for sample in group if sample.at]
+    return max(stamps) if stamps else 0.0
+
+
+def _pairwise_objective(
+    weights: Sequence[float],
+    pairs: Sequence[Tuple[Sequence[float], Sequence[float], float]],
+    lam: float,
+    varied: Sequence[int],
+    prior: Optional[Sequence[float]] = None,
+) -> float:
+    """The penalized pairwise log-likelihood; the Newton step climbs it."""
+    total = -0.5 * lam * sum(
+        (weights[i] - _prior_at(prior, i)) ** 2 for i in varied
+    )
+    for winner, loser, weight in pairs:
+        z = sum(
+            weights[i] * (winner[i] - loser[i]) for i in varied
+        )
+        p = _clamp(_sigmoid(z), 1e-9, 1.0 - 1e-9)
+        total += weight * math.log(p)
+    return total
+
+
+def _pairwise_newton_step(
+    weights: Sequence[float],
+    pairs: Sequence[Tuple[Sequence[float], Sequence[float], float]],
+    lam: float,
+    clip: float,
+    varied: Sequence[int],
+    prior: Optional[Sequence[float]] = None,
+) -> List[float]:
+    """
+    One damped Newton step on the pairwise logistic loss.
+
+    RankNet's loss over pairs, with the ridge prior the pointwise fit already
+    uses.  For a pair the difference of the two feature vectors is the whole
+    question — the model is asked which of two documents should stand higher,
+    and only the difference says what makes them differ — so a pair contributes
+    to the gradient the residual ``(1 - p)`` along that difference, and to the
+    curvature ``p (1 - p)`` along the same.
+
+    Convex in the weights, so the Hessian is positive semidefinite everywhere
+    and the ridge term makes it definite: unlike the pointwise fit, which
+    needs damping because a separating corpus sends its optimum to infinity,
+    this one cannot leave the quadratic surface.  The backtrack stays, for the
+    same reason and with the same reason to fear it — the clip is not part of
+    the quadratic, and a full step that lands on a clip has to be checked
+    against the objective it landed on, not trusted because the surface was
+    well-behaved.
+    """
+    if not pairs or not varied:
+        return list(weights)
+    gradient = [0.0] * _N_FEATURES
+    for index in varied:
+        gradient[index] = -lam * (weights[index] - _prior_at(prior, index))
+    hessian = _prior_precision(lam)
+    for winner, loser, weight in pairs:
+        difference = [winner[i] - loser[i] for i in varied]
+        z = sum(weights[i] * (winner[i] - loser[i]) for i in varied)
+        p = _clamp(_sigmoid(z), 1e-9, 1.0 - 1e-9)
+        residual = weight * (1.0 - p)
+        curvature = weight * p * (1.0 - p)
+        for position, index in enumerate(varied):
+            gradient[index] += residual * difference[position]
+            row = hessian[index]
+            term = curvature * difference[position]
+            for other, column in enumerate(varied):
+                row[column] += term * difference[other]
+    for index in varied:
+        hessian[index][index] += 1e-9
+    try:
+        delta = _solve(hessian, gradient)
+    except ArithmeticError:
+        return list(weights)
+    current = _pairwise_objective(weights, pairs, lam, varied, prior)
+    step = 1.0
+    best = list(weights)
+    best_value = current
+    for _ in range(_BACKTRACK_LIMIT):
+        candidate = list(weights)
+        for index in varied:
+            candidate[index] = _clamp(
+                weights[index] + step * delta[index], -clip, clip
+            )
+        value = _pairwise_objective(candidate, pairs, lam, varied, prior)
+        if value > best_value:
+            best, best_value = candidate, value
+        if value > current + 1e-12:
+            return candidate
+        step *= 0.5
+    return best if best_value > current else list(weights)
+
+
+def _pairwise_hessian(
+    pairs: Sequence[Tuple[Sequence[float], Sequence[float], float]],
+    lam: float,
+    varied: Sequence[int],
+    weights: Sequence[float],
+) -> List[List[float]]:
+    """
+    The curvature of the pairwise loss at *weights*: the Laplace precision.
+
+    The same quantity the pointwise fit reads for its exploration bonus, with
+    each sample replaced by each comparison: the information a pair carries
+    about the ordering is the curvature of the log-probability of that
+    ordering, and a pair the model already ranks correctly with confidence
+    carries almost none.  A scope whose comparisons the model has stopped
+    getting wrong therefore stops being explored, which is the intended
+    behaviour: the exploration bonus pays for the comparisons the model is
+    still wrong about.
+    """
+    matrix = _prior_precision(lam)
+    for winner, loser, weight in pairs:
+        difference = [winner[i] - loser[i] for i in varied]
+        z = sum(weights[i] * (winner[i] - loser[i]) for i in varied)
+        p = _clamp(_sigmoid(z), 1e-9, 1.0 - 1e-9)
+        curvature = weight * p * (1.0 - p)
+        for position, index in enumerate(varied):
+            row = matrix[index]
+            term = curvature * difference[position]
+            for other, column in enumerate(varied):
+                row[column] += term * difference[other]
+    return matrix
 
 
 def _hessian(

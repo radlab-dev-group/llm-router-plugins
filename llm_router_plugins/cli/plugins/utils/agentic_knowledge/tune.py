@@ -33,10 +33,11 @@ import itertools
 import json
 import math
 import pathlib
+import random
 import sys
 
 from dataclasses import dataclass, replace
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.config import (
     AgenticKnowledgeConfig,
@@ -83,6 +84,33 @@ def _objective(
 ) -> float:
     """What the operator asked to maximize, in the plan's own terms."""
     return round(hit_rate - lam * chars_per_turn, 6)
+
+
+def _bayesian_objective(
+    hit_rate: float,
+    chars_per_turn: float,
+    lam: float,
+    escalation_recall: float,
+    precision_floor: float,
+    escalation_precision: float,
+) -> float:
+    """
+    The multi-criteria objective the Bayesian search climbs.
+
+    The plan's form: the hit rate the point earns, plus a share of the
+    escalation recall it holds, minus the price of the characters it
+    injects, minus a penalty that is zero when the precision floor is met
+    and grows without bound as it is missed.  The penalty is what makes the
+    floor a *constraint* rather than a hope: a point that cannot keep the
+    floor is not a point that lost by a little, it is a point that must not
+    be selected, and a bounded penalty would let a very high hit rate buy its
+    way under the floor.
+    """
+    penalty = max(0.0, precision_floor - escalation_precision)
+    return round(
+        hit_rate + 0.3 * escalation_recall - lam * chars_per_turn - 1.5 * penalty,
+        6,
+    )
 
 
 def _escalation_precision(report: Dict[str, Any]) -> float:
@@ -277,6 +305,8 @@ def tune(
     holdout_fraction: float = 0.0,
     holdout_ids: Sequence[str] = (),
     seed: int = 11,
+    search: str = "grid",
+    evaluations: int = 40,
 ) -> Dict[str, Any]:
     """
     Walk the grid, replay every point, and report what the walk found.
@@ -314,15 +344,10 @@ def tune(
         for source in policy.sources
     }
 
-    points: List[_Point] = []
-    for index, (ms, srs, lt, factors) in enumerate(
-        itertools.product(
-            min_similarity,
-            strong_recipe_score,
-            loop_threshold,
-            _factor_combos(weight_categories, weight_factors, shared_factors),
-        )
-    ):
+    def measure(
+        index: int, ms: float, srs: float, lt: int, factors: Dict[str, float]
+    ) -> _Point:
+        """One point of the space, replayed on both halves of the split."""
         weights = {
             category: round(shipped_weights.get(category, 1.0) * factor, 4)
             for category, factor in factors.items()
@@ -334,41 +359,81 @@ def tune(
             if held
             else None
         )
-        points.append(
-            _Point(
-                index=index,
-                min_similarity=ms,
-                strong_recipe_score=srs,
-                loop_threshold=lt,
-                weights=weights,
-                objective=earned["objective"],
-                recipe_hit_rate=earned["recipe_hit_rate"],
-                injected_chars_per_turn=earned["injected_chars_per_turn"],
-                char_efficiency=earned["char_efficiency"],
-                escalation_precision=earned["escalation_precision"],
-                escalation_recall=earned["escalation_recall"],
-                eligible=earned["eligible"],
-                refused_reason=earned["refused_reason"],
-                holdout_objective=(
-                    scored["objective"] if scored is not None else None
-                ),
-                holdout_recipe_hit_rate=(
-                    scored["recipe_hit_rate"] if scored is not None else None
-                ),
-                holdout_injected_chars_per_turn=(
-                    scored["injected_chars_per_turn"] if scored is not None else None
-                ),
-                holdout_char_efficiency=(
-                    scored["char_efficiency"] if scored is not None else None
-                ),
-                holdout_escalation_precision=(
-                    scored["escalation_precision"] if scored is not None else None
-                ),
-                holdout_escalation_recall=(
-                    scored["escalation_recall"] if scored is not None else None
-                ),
-            )
+        return _Point(
+            index=index,
+            min_similarity=ms,
+            strong_recipe_score=srs,
+            loop_threshold=lt,
+            weights=weights,
+            objective=earned["objective"],
+            recipe_hit_rate=earned["recipe_hit_rate"],
+            injected_chars_per_turn=earned["injected_chars_per_turn"],
+            char_efficiency=earned["char_efficiency"],
+            escalation_precision=earned["escalation_precision"],
+            escalation_recall=earned["escalation_recall"],
+            eligible=earned["eligible"],
+            refused_reason=earned["refused_reason"],
+            holdout_objective=(
+                scored["objective"] if scored is not None else None
+            ),
+            holdout_recipe_hit_rate=(
+                scored["recipe_hit_rate"] if scored is not None else None
+            ),
+            holdout_injected_chars_per_turn=(
+                scored["injected_chars_per_turn"]
+                if scored is not None
+                else None
+            ),
+            holdout_char_efficiency=(
+                scored["char_efficiency"] if scored is not None else None
+            ),
+            holdout_escalation_precision=(
+                scored["escalation_precision"]
+                if scored is not None
+                else None
+            ),
+            holdout_escalation_recall=(
+                scored["escalation_recall"] if scored is not None else None
+            ),
         )
+
+    points: List[_Point] = []
+    if str(search).lower() == "bayesian":
+        points = _bayesian_search(
+            measure,
+            dimensions=(
+                _Dimension(
+                    "min_similarity", min(min_similarity), max(min_similarity)
+                ),
+                _Dimension(
+                    "strong_recipe_score",
+                    min(strong_recipe_score),
+                    max(strong_recipe_score),
+                ),
+                _Dimension(
+                    "loop_threshold",
+                    min(loop_threshold),
+                    max(loop_threshold),
+                    is_int=True,
+                ),
+                _Dimension("weight_factor", min(weight_factors), max(weight_factors)),
+            ),
+            categories=tuple(weight_categories),
+            budget=max(1, int(evaluations)),
+            seed=seed,
+            lam=lam,
+            precision_floor=precision_floor,
+        )
+    else:
+        for index, (ms, srs, lt, factors) in enumerate(
+            itertools.product(
+                min_similarity,
+                strong_recipe_score,
+                loop_threshold,
+                _factor_combos(weight_categories, weight_factors, shared_factors),
+            )
+        ):
+            points.append(measure(index, ms, srs, lt, factors))
 
     eligible = [point for point in points if point.eligible]
     chosen = None
@@ -447,6 +512,15 @@ def tune(
                      "chosen point was selected on the sessions it reports"
             ),
         },
+        "search": {
+            "mode": str(search),
+            "evaluations": len(points),
+            "budget": (
+                max(1, int(evaluations))
+                if str(search).lower() == "bayesian"
+                else len(points)
+            ),
+        },
         "grid": {
             "min_similarity": list(min_similarity),
             "strong_recipe_score": list(strong_recipe_score),
@@ -472,6 +546,230 @@ def tune(
             else ""
         ),
     }
+
+
+@dataclass(frozen=True)
+class _Dimension:
+    """One axis of the search space, with the bounds it is sampled in."""
+
+    name: str
+    low: float
+    high: float
+    is_int: bool = False
+
+    def cast(self, value: float) -> Any:
+        """Snap a sample to the dimension's kind and bound it."""
+        if self.is_int:
+            return int(round(min(max(value, self.low), self.high)))
+        return round(min(max(value, self.low), self.high), 4)
+
+    def width(self) -> float:
+        """The span a sample can move in; a zero-width axis is inert."""
+        return max(0.0, self.high - self.low)
+
+
+def _parzen_log_density(
+    sample: Sequence[float],
+    observations: Sequence[Sequence[float]],
+    dimensions: Sequence[_Dimension],
+) -> float:
+    """
+    ``log`` of the Parzen-window density of *sample* under *observations*.
+
+    The estimator TPE is named for: the density of the points already seen is
+    the mixture of Gaussians centred on each of them, one dimension at a time,
+    and the ratio of the density under the good points to the density under
+    the rest is the quantity that says "this region has been good and has not
+    been explored enough".  A product over dimensions is the assumption that
+    the axes are independent, which they are not exactly — the hit rate does
+    not care about ``min_similarity`` in the same way at every
+    ``strong_recipe_score`` — and the assumption is the one that costs nothing
+    to hold and still puts the next sample where the evidence points.
+
+    The bandwidth is a share of the observed span, never zero: a Gaussian on
+    a dimension the search has only sampled once has no spread to speak of,
+    and a zero-width kernel proposes the same point twice and calls it
+    convergence.
+    """
+    if not observations:
+        return 0.0
+    total = 0.0
+    for position, dimension in enumerate(dimensions):
+        values = [float(point[position]) for point in observations]
+        span = max(values) - min(values) if len(values) > 1 else dimension.width()
+        bandwidth = max(span / max(1.0, float(len(values) - 1)) * 0.75, dimension.width() * 0.02, 1e-6)
+        density = 0.0
+        for value in values:
+            distance = (float(sample[position]) - value) / bandwidth
+            density += math.exp(-0.5 * distance * distance)
+        total += math.log(max(density / float(len(values)), 1e-12))
+    return total
+
+
+def _tpe_propose(
+    dimensions: Sequence[_Dimension],
+    seen: Sequence[Tuple[Sequence[float], float]],
+    rng: random.Random,
+    candidates: int = 24,
+) -> List[float]:
+    """
+    The next point to measure: the candidate the ratio of good to rest likes.
+
+    Half the candidates are drawn from the density of the points that earned
+    most — the search exploiting what it has learned — and half from the
+    uniform prior, which is the search refusing to believe yet that it has
+    learned anything.  Both halves are then ranked by the ratio of the two
+    densities, which is TPE's acquisition: a point that looks good and has
+    not been looked at is worth a measurement, and a point that looks good
+    because it *is* a point already measured is not.
+
+    The uniform half is not a courtesy.  A search that only proposes near its
+    best observations stops at the first ridge it climbs, and a replay whose
+    landscape has two ridges — one that reads well on the calibration
+    sessions and one that reads well everywhere — needs the samples that fall
+    off the ridge to know there is another one.
+    """
+    del candidates  # the split below fixes the count; kept for call compatibility
+    if not seen:
+        return [
+            dimension.cast(rng.uniform(dimension.low, dimension.high))
+            for dimension in dimensions
+        ]
+    ranked = sorted(seen, key=lambda item: item[1], reverse=True)
+    top = max(1, math.ceil(len(ranked) / 4))
+    good = [list(values) for values, _ in ranked[:top]]
+    rest = [list(values) for values, _ in ranked[top:]] or good
+
+    def sample(from_good: bool) -> List[float]:
+        origin = rng.choice(good if from_good else rest)
+        point = []
+        for position, dimension in enumerate(dimensions):
+            spread = dimension.width() * 0.15
+            point.append(dimension.cast(origin[position] + rng.gauss(0.0, spread)))
+        return point
+
+    best_point: Optional[List[float]] = None
+    best_score = None
+    for index in range(_TPE_CANDIDATES):
+        candidate = sample(index % 2 == 0)
+        score = _parzen_log_density(candidate, good, dimensions) - _parzen_log_density(
+            candidate, rest, dimensions
+        )
+        if best_score is None or score > best_score:
+            best_point, best_score = candidate, score
+    return best_point or [
+        dimension.cast(rng.uniform(dimension.low, dimension.high))
+        for dimension in dimensions
+    ]
+
+
+#: Candidates the TPE proposes per measurement.  Each candidate costs only a
+#: density evaluation; the point they win is what costs a replay.
+_TPE_CANDIDATES = 24
+
+#: Measurements spent before the model is trusted, whatever it claims.  A
+#: density estimated from two observations is a story about two points, and a
+#: search that believes it has stopped exploring on the strength of a story
+#: has converged on the first ridge it stood on.
+_TPE_EXPLORE = 8
+
+
+def _bayesian_search(
+    measure: Any,
+    dimensions: Sequence[_Dimension],
+    categories: Sequence[str],
+    budget: int,
+    seed: int,
+    lam: float,
+    precision_floor: float,
+) -> List[_Point]:
+    """
+    Spend a replay budget where the evidence says to spend it.
+
+    A grid walks every corner of the space the operator named, which is right
+    when the space is small enough to walk and wrong when it is not: the
+    corners of a five-axis grid multiply past the number of replays an
+    operator will wait for, and the ones they do wait for are the corners,
+    not the interior where the optimum of a threshold policy usually is.
+    This walks the same space on a budget: the first :data:`_TPE_EXPLORE`
+    measurements are uniform, and each measurement after that is proposed by
+    the density of the measurements that earned most against the density of
+    the ones that did not.
+
+    The ranking the proposal learns from is the multi-criteria objective, not
+    the plain one: a search that ranks by hit rate alone will happily propose
+    a point under the precision floor, because the floor is invisible to a
+    number that does not contain it, and the constraint the operator wrote is
+    the part of their intention the search is least allowed to lose.
+
+    Deterministic under *seed*: the same dataset, the same budget and the same
+    seed propose the same points in the same order, which is the only reason a
+    report saying "the search found this" can be checked by anyone but the
+    machine that found it.
+    """
+    rng = random.Random(seed)
+    seen: List[Tuple[List[float], float]] = []
+    points: List[_Point] = []
+
+    def earned(point: _Point) -> float:
+        return _bayesian_objective(
+            point.recipe_hit_rate,
+            point.injected_chars_per_turn,
+            lam,
+            point.escalation_recall,
+            precision_floor,
+            point.escalation_precision,
+        )
+
+    def evaluate(values: Sequence[float], index: int) -> _Point:
+        by_name = {
+            dimension.name: value
+            for dimension, value in zip(dimensions, values)
+        }
+        factor = float(by_name.get("weight_factor", 1.0))
+        point = measure(
+            index,
+            float(by_name.get("min_similarity", 0.35)),
+            float(by_name.get("strong_recipe_score", 0.6)),
+            int(by_name.get("loop_threshold", 3)),
+            {str(category): factor for category in categories},
+        )
+        points.append(point)
+        seen.append((list(values), earned(point)))
+        return point
+
+    def uniform() -> List[float]:
+        return [
+            dimension.cast(rng.uniform(dimension.low, dimension.high))
+            for dimension in dimensions
+        ]
+
+    for index in range(max(1, int(budget))):
+        if index < _TPE_EXPLORE or index * 5 <= budget:
+            values = uniform()
+        else:
+            values = _tpe_propose(dimensions, seen, rng)
+            # A proposal that repeats a measured point spends the budget on
+            # nothing.  A few resamples; if the model is still proposing a
+            # point it has already seen, the space it is modelling has run
+            # out, and a uniform draw is the honest next measurement.
+            attempts = 0
+            while any(
+                _same_point(values, known) for known, _ in seen
+            ) and attempts < 5:
+                values = _tpe_propose(dimensions, seen, rng)
+                attempts += 1
+            if any(_same_point(values, known) for known, _ in seen):
+                values = uniform()
+        evaluate(values, index)
+    return points
+
+
+def _same_point(left: Sequence[float], right: Sequence[float]) -> bool:
+    """Whether two samples are the same point of the space."""
+    if len(left) != len(right):
+        return False
+    return all(abs(float(a) - float(b)) < 1e-9 for a, b in zip(left, right))
 
 
 def _factor_combos(
@@ -701,6 +999,57 @@ def _markdown(result: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _write_tuned_policy(
+    config: AgenticKnowledgeConfig, result: Dict[str, Any], report_path: Optional[str]
+) -> str:
+    """
+    Write the chosen point next to the report, as a policy the operator can read.
+
+    The file is a proposal with the report's numbers in it, not a policy the
+    layer reads: it is named ``.tuned.json`` so it is never the file a
+    deployment loads by accident, and it carries the deltas it claims so the
+    diff into the real policy is reviewable against the evidence rather than
+    against the taste of whoever ran the tune.
+
+    The tune writes it only when asked.  A tool that edits the policy it
+    measured against has answered its own question, and a report the tool
+    wrote about a policy the tool changed is not evidence about anything.
+    """
+    chosen = result.get("chosen") or {}
+    if not chosen:
+        return ""
+    directory = (
+        pathlib.Path(report_path).parent if report_path else pathlib.Path(".")
+    )
+    target = pathlib.Path(directory) / "agentic_knowledge.tuned.json"
+    payload = {
+        "_comment": (
+            "Proposed thresholds from llm-router-agentic-kb-tune. Not loaded "
+            "by the layer; review and merge into the policy by hand."
+        ),
+        "read": {
+            "min_similarity": chosen.get("min_similarity"),
+        },
+        "escalation": {
+            "strong_recipe_score": chosen.get("strong_recipe_score"),
+            "loop_threshold": chosen.get("loop_threshold"),
+        },
+        "search": result.get("search") or {},
+        "earned": {
+            "objective": chosen.get("objective"),
+            "recipe_hit_rate": chosen.get("recipe_hit_rate"),
+            "injected_chars_per_turn": chosen.get("injected_chars_per_turn"),
+            "char_efficiency": chosen.get("char_efficiency"),
+            "escalation_precision": chosen.get("escalation_precision"),
+            "escalation_recall": chosen.get("escalation_recall"),
+        },
+        "deltas_against_shipped": result.get("deltas") or {},
+        "weights": chosen.get("weights") or {},
+    }
+    target.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return str(target)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Create the command-line parser."""
     parser = argparse.ArgumentParser(
@@ -828,9 +1177,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seed of the holdout split (default: 11).",
     )
     parser.add_argument(
+        "--search",
+        choices=("grid", "bayesian"),
+        default="grid",
+        help=(
+            "How the points are chosen: the full grid, or the TPE search that "
+            "spends --evaluations where the evidence points (default: grid)."
+        ),
+    )
+    parser.add_argument(
+        "--evaluations",
+        type=int,
+        default=40,
+        help=(
+            "The replay budget of the Bayesian search (default: 40).  Ignored "
+            "by the grid, which measures every point it is given."
+        ),
+    )
+    parser.add_argument(
         "--output",
         default=None,
         help="Write the JSON report here; the markdown goes to standard out.",
+    )
+    parser.add_argument(
+        "--write-policy",
+        action="store_true",
+        help=(
+            "Write the chosen point next to the report as "
+            "agentic_knowledge.tuned.json, a proposal for review.  The layer "
+            "never reads the file; merging it into the policy is the "
+            "operator's, and the diff is against the numbers it reports."
+        ),
     )
     parser.add_argument(
         "--log-level", default="WARNING", help="Logging level (default: WARNING)."
@@ -895,6 +1272,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             holdout_fraction=float(args.holdout_fraction),
             holdout_ids=[str(name) for name in (args.holdout_session or [])],
             seed=int(args.seed),
+            search=str(getattr(args, "search", "grid")),
+            evaluations=int(getattr(args, "evaluations", 40)),
         )
     except ValueError as error:
         print(str(error), file=sys.stderr)
@@ -904,6 +1283,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         pathlib.Path(args.output).write_text(
             json.dumps(result, indent=2, sort_keys=True), encoding="utf-8"
         )
+    if getattr(args, "write_policy", False):
+        written = _write_tuned_policy(config, result, args.output)
+        if written:
+            print(f"tuned policy written: {written}", file=sys.stderr)
     print(_markdown(result))
     return 0
 

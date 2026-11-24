@@ -759,3 +759,116 @@ def test_nontrivial_tool_command_recognition():
     assert not _is_nontrivial_tool_command("ls -la")
     assert not _is_nontrivial_tool_command("echo hi")
     assert not _is_nontrivial_tool_command("sleep 5")
+
+
+# --------------------------------------------------------------- bootstrap --
+def _git(tmp_path, *commands):
+    import shlex
+    import subprocess
+
+    for command in commands:
+        subprocess.run(
+            shlex.split(command),
+            cwd=str(tmp_path),
+            capture_output=True,
+            check=True,
+        )
+
+
+def test_turn_added_lines_reads_the_plus_lines_of_the_turns_patches():
+    """The side of the adoption comparison that the miner can only read now.
+
+    Every patch of the turn counts, deduplicated, and a patch that removes
+    lines changes nothing the document could have said: the ``+`` side of a
+    diff is the only side a later turn can be credited with repeating.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.miner import (
+        turn_added_lines,
+    )
+
+    items = base_items() + [
+        _command("c1", "e1"),
+        _command_output("c1", "o1", FAILING, code=1),
+        _patch("p1", "pe1", paths=("src/a.py",)),
+        _command("c2", "e2"),
+        _command_output("c2", "o2", GREEN, code=0),
+    ]
+    lines = turn_added_lines(CodexAgentAdapter().parse(codex_payload(items)))
+    assert "x = 2" in lines
+    assert lines.index("x = 2") == list(lines).index("x = 2")
+    assert len(lines) == len(set(lines))
+
+
+def test_a_revert_is_a_change_the_turn_took_back():
+    """``git checkout --`` after a patch is a negative verdict with a path."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.miner import (
+        _reverted_paths,
+    )
+
+    items = base_items() + [
+        _command("c1", "e1"),
+        _command_output("c1", "o1", FAILING, code=1),
+        _patch("p1", "pe1", paths=("src/a.py",)),
+        _command("c2", "e2", "git checkout -- src/a.py"),
+        _command_output("c2", "o2", "", code=0),
+    ]
+    turn = CodexAgentAdapter().parse(codex_payload(items))
+    assert _reverted_paths(turn) == ["src/a.py"]
+
+
+def test_a_commit_history_is_bootstrapped_into_recipes_per_fixed_file(tmp_path):
+    """A repository's fix commits are verified episodes of the miner's own shape.
+
+    A cold deployment has no labels of its own yet, and the history it
+    already has is the closest thing to them: a commit whose subject says it
+    fixed something is mined into one recipe per file it touched, with the
+    patch quoted and the subject as the signature, and re-running the mining
+    is a no-op, because the fingerprint is the commit and the path.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.miner import (
+        mine_commit_fixes,
+    )
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "git init -q")
+    _git(repo, "git config user.email test@example.com")
+    _git(repo, "git config user.name Test")
+    (repo / "src").mkdir()
+    (repo / "src" / "a.py").write_text("value = 1\n")
+    _git(repo, "git add src/a.py")
+    _git(repo, "git commit -q -m 'add a'")
+    (repo / "package-lock.json").write_text("{}\n")
+    _git(repo, "git add package-lock.json")
+    _git(repo, "git commit -q -m 'bump deps'")
+    (repo / "src" / "a.py").write_text("value = 2\n")
+    _git(repo, "git add src/a.py")
+    _git(repo, "git commit -q -m 'fix: the crash in a.py'")
+
+    events = mine_commit_fixes(str(repo), "webapp")
+    assert len(events) == 1
+    event = events[0]
+    assert event.kind == "recipe"
+    assert event.scope == "webapp"
+    assert event.metadata["paths"] == ["src/a.py"]
+    assert event.metadata["bootstrap"] is True
+    assert "fix: the crash in a.py" in event.text
+    assert "value = 2" in event.text
+    # A commit that only bumped the lockfile is a dependency, not a fix, and
+    # a recipe is not the document of a dependency bump.
+    lock_only = [e for e in events if "package-lock.json" in e.metadata["paths"]]
+    assert not lock_only
+    # The mining is stable: the fingerprint is the commit and the file, so a
+    # second run is the same document, not a duplicate of it.
+    again = mine_commit_fixes(str(repo), "webapp")
+    assert [e.fingerprint for e in again] == [e.fingerprint for e in events]
+
+
+def test_a_bootstrap_without_a_repository_is_nothing_not_an_error(tmp_path):
+    """The first rule of the layer: a missing history is nothing, not a crash."""
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.miner import (
+        mine_commit_fixes,
+    )
+
+    assert mine_commit_fixes(str(tmp_path / "absent"), "webapp") == []
+    assert mine_commit_fixes(str(tmp_path), "not a scope!") == []

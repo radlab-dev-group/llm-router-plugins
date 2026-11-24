@@ -535,3 +535,159 @@ def test_the_parser_defaults_to_no_recall_floor():
     assert parser.parse_args(
         ["--dataset", "x.json", "--recall-floor", "0.75"]
     ).recall_floor == 0.75
+
+
+# ------------------------------------------------- the Bayesian search ------
+def test_the_bayesian_objective_is_the_multi_criteria_formula_the_plan_named():
+    """The search ranks on the constraint, not just on the hit rate.
+
+    A point that cannot keep the precision floor pays a penalty that grows
+    without bound as it misses it, so a very high hit rate cannot buy its way
+    under the floor: the floor is a constraint the search was given, and a
+    number that does not contain it is a number that does not see it.
+    """
+    from llm_router_plugins.cli.plugins.utils.agentic_knowledge.tune import (
+        _bayesian_objective,
+    )
+
+    met = _bayesian_objective(0.5, 100.0, 0.001, 0.9, 0.8, 0.9)
+    assert met == pytest.approx(0.5 + 0.3 * 0.9 - 0.001 * 100.0)
+    # The same point at a missed floor pays the penalty, and a point that
+    # misses it harder pays more: the penalty is the floor being a constraint.
+    missed = _bayesian_objective(0.5, 100.0, 0.001, 0.9, 0.8, 0.5)
+    worse = _bayesian_objective(0.5, 100.0, 0.001, 0.9, 0.8, 0.2)
+    assert missed < met
+    assert worse < missed
+
+
+def test_the_bayesian_search_spends_the_budget_and_is_deterministic():
+    """The same dataset, budget and seed measure the same points, in order.
+
+    A search that cannot be re-run cannot be checked: the report says the
+    search found a point, and the only reason that sentence means anything is
+    that a different machine with the same inputs proposes the same points in
+    the same order.  The budget is the number of replays, and the report
+    names both it and how many points the search measured.
+    """
+    config = base_config()
+    sessions = load_sessions(DATASET)
+    first = tune(
+        config=config,
+        sessions=sessions,
+        min_similarity=[0.2, 0.45],
+        strong_recipe_score=[0.5, 0.7],
+        loop_threshold=[2, 3],
+        weight_factors=[0.8, 1.2],
+        weight_categories=["recipe"],
+        lam=0.0001,
+        precision_floor=0.8,
+        search="bayesian",
+        evaluations=10,
+        seed=11,
+    )
+    again = tune(
+        config=config,
+        sessions=sessions,
+        min_similarity=[0.2, 0.45],
+        strong_recipe_score=[0.5, 0.7],
+        loop_threshold=[2, 3],
+        weight_factors=[0.8, 1.2],
+        weight_categories=["recipe"],
+        lam=0.0001,
+        precision_floor=0.8,
+        search="bayesian",
+        evaluations=10,
+        seed=11,
+    )
+    assert first["search"]["mode"] == "bayesian"
+    assert first["search"]["budget"] == 10
+    assert len(first["points"]) == 10
+    assert all(
+        left == right
+        for left, right in zip(
+            [dict(point) for point in first["points"]],
+            [dict(point) for point in again["points"]],
+        )
+    )
+    # A different seed proposes a different walk of the same space.
+    other = tune(
+        config=config,
+        sessions=sessions,
+        min_similarity=[0.2, 0.45],
+        strong_recipe_score=[0.5, 0.7],
+        loop_threshold=[2, 3],
+        weight_factors=[0.8, 1.2],
+        weight_categories=["recipe"],
+        lam=0.0001,
+        precision_floor=0.8,
+        search="bayesian",
+        evaluations=10,
+        seed=12,
+    )
+    assert [point["min_similarity"] for point in other["points"]] != [
+        point["min_similarity"] for point in first["points"]
+    ]
+
+
+def test_the_bayesian_search_keeps_the_precision_floor_a_constraint():
+    """The search proposes under the floor, and the report still refuses it."""
+    config = base_config()
+    sessions = load_sessions(DATASET)
+    result = tune(
+        config=config,
+        sessions=sessions,
+        min_similarity=[0.2, 0.45],
+        strong_recipe_score=[0.5, 0.7],
+        loop_threshold=[2, 3],
+        weight_factors=[0.8, 1.2],
+        weight_categories=["recipe"],
+        lam=0.0001,
+        precision_floor=1.0001,
+        search="bayesian",
+        evaluations=8,
+        seed=11,
+    )
+    # The floor is above anything the dataset can produce: every point is
+    # refused, and the report says so rather than handing back the point the
+    # search liked best as if it had met the bar.
+    assert result["chosen"] is not None
+    assert result["chosen"]["eligible"] is False
+    assert result["note"]
+
+
+def test_the_write_policy_flag_writes_a_proposal_the_layer_never_reads(tmp_path):
+    """The tune's answer is a diff against the evidence, not a policy edit.
+
+    The file is named ``.tuned.json`` so it is never the one a deployment
+    loads by accident, it carries the numbers it claims so the merge into the
+    real policy is reviewable against the evidence, and it is written only
+    when asked: a tool that edits the policy it measured against has answered
+    its own question.
+    """
+    config = base_config()
+    sessions = load_sessions(DATASET)
+    out = tmp_path / "report.json"
+    code = tune_main(
+        [
+            "--dataset",
+            str(DATASET),
+            "--output",
+            str(out),
+            "--search",
+            "bayesian",
+            "--evaluations",
+            "6",
+            "--write-policy",
+        ]
+    )
+    assert code == 0
+    proposal = tmp_path / "agentic_knowledge.tuned.json"
+    assert proposal.exists()
+    written = json.loads(proposal.read_text())
+    assert "Not loaded by the layer" in written["_comment"]
+    # The proposal names the point it is, and the numbers it claims.
+    assert written["read"]["min_similarity"] is not None
+    assert written["escalation"]["loop_threshold"] is not None
+    assert written["earned"]["recipe_hit_rate"] is not None
+    # …and the shipped policy is untouched by the command that measured it.
+    assert not (tmp_path / "agentic_knowledge.json").exists()

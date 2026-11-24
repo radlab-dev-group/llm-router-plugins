@@ -20,6 +20,7 @@ plugin cannot serve comes back the very object it was given.
 """
 
 import logging
+import math
 import threading
 import time
 
@@ -108,6 +109,38 @@ _SCORED_KINDS = (KIND_RECIPE, KIND_PLAYBOOK, KIND_TASK_SOLUTION, KIND_TOOL_RECIP
 #: How many sessions may wait one turn for their injection to be scored.
 _FEEDBACK_PENDING_LIMIT = 512
 
+#: How many turns a verdict may come back after the injection that caused it.
+#: One is the window the layer used to claim, and it is the wrong one: an
+#: agent that is shown a fix reads it on the turn it arrives, edits on the
+#: next, and runs the test that proves it on the one after, and a window of
+#: one turn loses the credit of the first of those three and the blame of
+#: the last.  Three is the window the credit assignment was designed around,
+#: and beyond it a verdict is about the repository, not about this block.
+_ATTRIBUTION_HORIZON = 3
+
+#: How much a verdict is worth per turn of delay between the injection and
+#: the evidence that judges it: the fix applied three turns after it was
+#: shown was less caused by the showing than the one applied the next turn,
+#: and the discount says that, geometrically, so a delayed credit is a
+#: smaller credit, never a bigger one.
+_ATTRIBUTION_DISCOUNT = 0.85
+
+#: The overlap below which a document that named the file a turn edited has
+#: not been applied: the turn changed the file for its own reasons, and
+#: crediting the document with the change would be crediting it with a
+#: coincidence.  The number is a floor, not a guess at the typical case:
+#: a document whose change the turn repeated at least half of is adopted at
+#: whatever the overlap says, and a document the turn ignored is unattributed
+#: at whatever the overlap says, and the two are separated by the evidence,
+#: not by a threshold tuned to a corpus.
+_ADOPTION_FLOOR = 0.05
+
+#: The overlap at and above which a turn's change is the change the document
+#: describes: most of what the document adds is in what the turn added, and
+#: the credit for the green test that followed belongs to the document, not
+#: to the coincidence of it having been on screen.
+_ADOPTION_CONFIRMED = 0.4
+
 __all__ = ["AgenticKnowledgePlugin"]
 
 #: How often one repository is told that its read budget starved its searches.
@@ -140,6 +173,13 @@ class _InjectedDoc:
     paths: Tuple[str, ...] = ()
     test_command: str = ""
     features: Optional[CandidateFeatures] = None
+    #: The lines the document's change adds: the side of the adoption
+    #: comparison that cannot be recomputed later, because the document's
+    #: text is what the engine answered, and the engine's answer is gone
+    #: once the request is done.  Kept for the attribution window, not the
+    #: whole session: a window of three turns is the claim, and the lines of
+    #: a document outside it are not the layer's to keep.
+    added_lines: Tuple[str, ...] = ()
 
 
 class AgenticKnowledgePlugin(PluginInterface):
@@ -207,17 +247,23 @@ class AgenticKnowledgePlugin(PluginInterface):
         self._feedback_tracker: Optional[FeedbackTracker] = None
         self._redis: Optional[RedisClientHandle] = None
         self._learning: Optional[LearningPolicy] = None
-        #: Per session: what the previous request of this session was shown —
-        #: the document, the evidence it names and the features the learner saw
-        #: — so the verdict of the next turn can be credited per document
-        #: instead of per block.
-        self._pending_injections: "OrderedDict[str, Tuple[_InjectedDoc, ...]]" = (
+        #: Per session: the knowledge documents injected on the previous
+        #: request, and the failure signature the request was stuck on.
+        #: A request's verdict may come back on the next turn or the one
+        #: after, so what is kept is a window of requests, not the last one:
+        #: each entry is one request's documents with the turn it arrived in,
+        #: newest first, capped at :data:`_ATTRIBUTION_HORIZON`.
+        self._pending_injections: "OrderedDict[str, Tuple[Tuple[int, Tuple[_InjectedDoc, ...]], ...]]" = (
             OrderedDict()
         )
         self._metrics: Optional[KnowledgeMetrics] = metrics
-        #: Per session: the knowledge documents injected on the previous
-        #: request, and the failure signature the request was stuck on.
-        self._pending_feedback: "OrderedDict[str, Tuple[Tuple[str, ...], str]]" = (
+        #: Per session, one entry per injected request in the window: the
+        #: documents shown and the failure the request was stuck on, newest
+        #: first.  The window is what the credit assignment claims, and an
+        #: entry older than it is dropped on arrival, not kept and discounted
+        #: into nothing: a verdict four turns late is about the repository,
+        #: and the repository is not this block's to be credited.
+        self._pending_feedback: "OrderedDict[str, Tuple[Tuple[int, Tuple[str, ...], str], ...]]" = (
             OrderedDict()
         )
         #: When the last push actually reached the engine; ``None`` is "never".
@@ -226,6 +272,15 @@ class AgenticKnowledgePlugin(PluginInterface):
         #: than the interval, so a zero sentinel would hold the first verdict
         #: of every boot back until the clock climbs past it.
         self._feedback_pushed_at: Optional[float] = None
+        #: Per session, the number of requests of this session this process has
+        #: served.  The attribution window is measured in these, and they are
+        #: counted here rather than taken from the agent's turn identifiers
+        #: because the window is about how many times the layer has spoken,
+        #: which is not the same as how many turns the CLI counts: a cached
+        #: generation answers without injecting, an auxiliary request reads
+        #: without a turn id of its own, and the credit a verdict gives has to
+        #: be discounted by the injections between, not by the requests.
+        self._turn_numbers: "Dict[str, int]" = {}
         self._feedback_flush_lock = threading.Lock()
         self._feedback_thread: Optional[threading.Thread] = None
         self._budget_warnings: Dict[str, float] = {}
@@ -453,7 +508,8 @@ class AgenticKnowledgePlugin(PluginInterface):
         # injected knowledge held) or repeats the failure it was shown how
         # to avoid (it did not).  Settled before this request assembles, so
         # the verdict already weighs what this request ranks.
-        self._settle_feedback(turn, mining)
+        turn_number = self._advance_turn(turn.session_id)
+        self._settle_feedback(turn, mining, turn_number)
         self._flush_feedback(turn)
         candidate_features: Dict[str, CandidateFeatures] = {}
         if fresh:
@@ -697,6 +753,7 @@ class AgenticKnowledgePlugin(PluginInterface):
 
         assembler = ContextAssembler(
             signature_hash=mining.signature_hash,
+            signature=getattr(mining, "signature", "") or "",
             touched_paths=turn.touched_paths,
             local_deadends=mining.tried,
             feedback=self._feedback_weights(),
@@ -704,6 +761,8 @@ class AgenticKnowledgePlugin(PluginInterface):
             scope=turn.scope,
             failing_command=getattr(mining, "failing_command", "") or "",
             budget_chars=getattr(policy, "max_chars", 0) or 0,
+            loop_count=int(getattr(mining, "loop_count", 0) or 0),
+            turn_patch_lines=_turn_patch_lines(turn),
         )
         context = assembler.assemble(results, policy, doc_context=doc_context)
         # The exposure this request made, with the features the learner saw:
@@ -941,56 +1000,166 @@ class AgenticKnowledgePlugin(PluginInterface):
         except Exception:
             return None
 
-    def _settle_feedback(self, turn: AgentTurn, mining: Any) -> None:
+    def _advance_turn(self, session_id: str) -> int:
         """
-        Score the knowledge injected on the previous request of this session.
+        Count this request of this session, and say which number it got.
 
-        The turn carries what happened since the injection: a recipe or a
+        One per served request, taken before the previous request's verdict
+        is settled: the verdict belongs to the turn that is arriving, and an
+        injection recorded on the turn before it is one turn old, not zero.
+        """
+        if not session_id:
+            return 0
+        number = int(self._turn_numbers.get(session_id, 0)) + 1
+        self._turn_numbers[session_id] = number
+        while len(self._turn_numbers) > _FEEDBACK_PENDING_LIMIT:
+            oldest = next(iter(self._turn_numbers))
+            if oldest == session_id:
+                break
+            self._turn_numbers.pop(oldest, None)
+        return number
+
+    def _settle_feedback(
+        self, turn: AgentTurn, mining: Any, turn_number: int = 0
+    ) -> None:
+        """
+        Score the knowledge injected on the recent requests of this session.
+
+        The turn carries what happened since an injection: a recipe or a
         playbook mined out of it means a failure was verified fixed with the
         injected guidance on screen; the very same failure signature coming
-        back means the loop survived it.  A turn that proves neither — the
-        agent simply moved on — neither credits nor blames, and the pending
-        entry is spent either way: one turn is the whole window of
-        attribution the plugin claims.
+        back means the loop survived it; and a change the agent undid means
+        the advice was applied and then rejected, which is the strongest
+        negative the layer gets without waiting for a failure to repeat.
 
-        The coarse verdict above is one bit for the whole block, and the block
-        is several documents: crediting all of them with a fix one of them
+        The window is :data:`_ATTRIBUTION_HORIZON` turns, and it is the point
+        of this method rather than an accident of it.  An agent that is shown
+        a fix reads it on the turn it arrives, edits on the next, and runs
+        the test that proves it on the one after: a window of one turn loses
+        the credit of the first and the blame of the last, and the labels it
+        does keep are the ones that happened to land adjacent.  A verdict is
+        discounted by :data:`_ATTRIBUTION_DISCOUNT` per turn of delay,
+        because a fix applied three turns after it was shown was less caused
+        by the showing than the one applied the next turn.
+
+        A turn that produces no verdict spends nothing: the window is what
+        waits, and a turn that neither proves nor disproves is not a reason
+        to forget what the previous one showed.  The entries are walked in
+        the order they arrived, and only the verdicts of this turn settle
+        them; the rest stay, capped at the horizon by the arrival that keeps
+        writing them.
+
+        A document is credited once per verdict, at the nearest injection
+        that showed it: three consecutive injections of one recipe with one
+        green test between them is one piece of evidence about that recipe,
+        not three, and counting it three times is the self-reinforcement the
+        monitors watch for, manufactured out of the credit rule itself.
+
+        The coarse verdict above is one bit for a whole block, and a block is
+        several documents: crediting all of them with a fix one of them
         describes teaches the layer to inject more of everything.  So each
-        document is graded against the evidence of *this* turn — its signature,
-        the files it names, the command it declares — and the graded label is
-        what the learner folds in.  The counters keep the coarse bit, because
-        the engine's quality signal is a vote and a vote has two values.
+        document is graded against the evidence of *this* turn — its
+        signature, the files it names, the command it declares, and whether
+        the turn's own change repeats the change the document describes —
+        and the graded label is what the learner folds in.  The counters keep
+        the coarse bit, because the engine's quality signal is a vote and a
+        vote has two values.
         """
         tracker = self._feedback_tracker
         if tracker is None:
             return
-        pending = self._pending_feedback.pop(turn.session_id, None)
-        injected = self._pending_injections.pop(turn.session_id, ())
-        if not pending:
+        entries = tuple(self._pending_feedback.get(turn.session_id, ()))
+        if not entries:
             return
-        doc_names, previous_signature = pending
-        repeated = bool(previous_signature) and (
-            mining.signature_hash == previous_signature
-        )
+        injected = dict(self._pending_injections.get(turn.session_id, ()))
         resolved = any(
             event.kind in (KIND_RECIPE, KIND_PLAYBOOK) for event in mining.events
         )
-        if not doc_names or not (repeated or resolved):
+        reverted = tuple(str(path) for path in (getattr(mining, "reverted_paths", ()) or ()))
+        signature = str(getattr(mining, "signature_hash", "") or "")
+        changed = _turn_patch_lines(turn)
+        credited: set = set()
+        votes: List[Tuple[str, bool]] = []
+        consumed: List[int] = []
+        for index, doc_names, previous_signature in entries:
+            delay = max(0, int(turn_number) - int(index))
+            if delay > _ATTRIBUTION_HORIZON:
+                # Too late to be about this injection, and the entry says so
+                # by staying out of the window: a verdict four turns late is
+                # about the repository, not about the block.
+                consumed.append(int(index))
+                continue
+            repeated = bool(previous_signature) and signature == previous_signature
+            if not (resolved or repeated or reverted):
+                # No verdict yet, and the entry waits for one.  This is the
+                # whole difference between a window and a turn: the agent
+                # that edited without proving anything has not judged what it
+                # was shown, and the layer does not get to say otherwise.
+                continue
+            discount = _ATTRIBUTION_DISCOUNT ** delay
+            fresh = [name for name in doc_names if name not in credited]
+            if not fresh:
+                # Every document of this injection was already credited at a
+                # nearer one; the verdict has read this entry and it is spent.
+                consumed.append(int(index))
+                continue
+            credited.update(fresh)
+            consumed.append(int(index))
+            self._learn_from_verdict(
+                turn,
+                mining,
+                injected.get(index, ()),
+                resolved=resolved,
+                repeated=repeated,
+                previous_signature=previous_signature,
+                discount=discount,
+                changed_lines=changed,
+                reverted_paths=reverted,
+            )
+            if resolved or repeated:
+                votes.extend((name, resolved) for name in fresh)
+        if not votes:
+            # Nothing was earned, and the entries that waited for a verdict
+            # keep waiting; the ones the verdict read and refused are gone.
+            if len(consumed) != len(entries):
+                keep = {index for index, _, _ in entries} - set(consumed)
+                self._pending_feedback[turn.session_id] = tuple(
+                    entry for entry in entries if int(entry[0]) in keep
+                )
+                self._pending_injections[turn.session_id] = tuple(
+                    (index, docs)
+                    for index, docs in injected.items()
+                    if int(index) in keep
+                )
+            else:
+                self._pending_feedback.pop(turn.session_id, None)
+                self._pending_injections.pop(turn.session_id, None)
             return
-        for doc_name in doc_names:
+        # A verdict of this turn is spent, and only that one: the entries it
+        # judged leave the window, and the entries it did not judge stay,
+        # because the next turn of this session may be the one that proves
+        # them.  The window is a queue of evidence, not a mailbox the verdict
+        # empties.
+        settled = set(consumed)
+        remaining = tuple(
+            entry for entry in entries if int(entry[0]) not in settled
+        )
+        if remaining:
+            self._pending_feedback[turn.session_id] = remaining
+            self._pending_injections[turn.session_id] = tuple(
+                (index, docs)
+                for index, docs in injected.items()
+                if int(index) not in settled
+            )
+        else:
+            self._pending_feedback.pop(turn.session_id, None)
+            self._pending_injections.pop(turn.session_id, None)
+        for doc_name, success in votes:
             tracker.record_feedback(
                 doc_name,
-                success=resolved,
+                success=success,
                 collection=tracker.collection_of(doc_name),
             )
-        self._learn_from_verdict(
-            turn,
-            mining,
-            injected,
-            resolved=resolved,
-            repeated=repeated,
-            previous_signature=previous_signature,
-        )
         if self._metrics is not None and turn.scope:
             # The turn's own verdict on what it was shown last request, counted
             # once for the request rather than once per document: adoption is a
@@ -1014,6 +1183,9 @@ class AgenticKnowledgePlugin(PluginInterface):
         resolved: bool,
         repeated: bool,
         previous_signature: str = "",
+        discount: float = 1.0,
+        changed_lines: Tuple[str, ...] = (),
+        reverted_paths: Tuple[str, ...] = (),
     ) -> None:
         """
         Fold this turn's verdict into the learner, one document at a time.
@@ -1033,6 +1205,27 @@ class AgenticKnowledgePlugin(PluginInterface):
         * ``-0.3`` — the failure came back and this document is unrelated to
           it.  Weak evidence against a document that was merely along for the
           block, so it weighs a third of a judgement.
+
+        Two more readings sharpen that where the evidence supports them.
+
+        * **Adoption.**  A document that shares a file with the turn was on
+          screen while the turn edited that file, which is an reason to
+          suspect it helped and not a proof that it did.  The proof is the
+          change itself: how much of what the document's diff adds the turn
+          actually put into the code.  A turn that repeated the document's
+          change is credited to the document (``adopted``); a turn that
+          edited the same file while repeating none of it is not, and the
+          document is logged as an exposure with no label rather than paid a
+          credit it did not cause.  This is the filter that stops the layer
+          from teaching itself that being read is the same as being right.
+        * **Revert.**  A change the agent took back is a judgement, and the
+          strongest one available without waiting for a failure to repeat:
+          the advice was applied and the repository was judged better without
+          it.  A document about a reverted file is debunked outright.
+
+        A label earned ``discount`` below is a label earned later, which is a
+        label worth less: the discount is the attribution window's geometric
+        decay, applied to the magnitude and never to the direction.
 
         A document that names neither signature nor file of its own — the
         common case for a chunk the engine matched by text — falls back to the
@@ -1084,10 +1277,38 @@ class AgenticKnowledgePlugin(PluginInterface):
                     == failing_command.split()[-1]
                 )
             )
-            if about_previous or about_current or shares_path or command_matches:
+            reverted = bool(
+                reverted_paths
+                and paths
+                and (
+                    {path.rsplit("/", 1)[-1] for path in paths}
+                    & {path.rsplit("/", 1)[-1] for path in reverted_paths}
+                )
+            )
+            adoption = _adoption_score(record.added_lines, changed_lines)
+            if reverted and (shares_path or about_previous or about_current):
+                # The change went in and came back out.  Nothing about the
+                # turn's verdict — a green test, a moved-on agent — outranks
+                # that: the repository was left without the fix the document
+                # describes, and a layer that read this as a success would be
+                # learning to inject the change its own agent undid.
+                label, kind = -1.0, "reverted"
+            elif about_previous or about_current or shares_path or command_matches:
                 if resolved:
                     if about_current:
                         label, kind = 1.0, "confirmed"
+                    elif adoption >= _ADOPTION_CONFIRMED:
+                        # The turn applied what the document showed.  That is
+                        # the whole causal chain in evidence: shown, adopted,
+                        # green — a confirmed fix by the only route the layer
+                        # can actually observe.
+                        label, kind = 1.0, "adopted"
+                    elif shares_path and adoption < _ADOPTION_FLOOR:
+                        # Same file, none of the change: the turn had its own
+                        # reason to edit, and the document was along for the
+                        # read.  Zero labels train nothing, and the exposure
+                        # is still written, which is what a later fit reads.
+                        continue
                     else:
                         label, kind = 0.5, "plausible"
                 elif repeated and about_previous:
@@ -1111,7 +1332,7 @@ class AgenticKnowledgePlugin(PluginInterface):
                         generation=turn.cache_generation,
                         document_name=record.document_name,
                         features=record.features or CandidateFeatures(),
-                        label=label,
+                        label=_discounted_label(label, discount),
                         label_kind=kind,
                     )
                 )
@@ -1177,6 +1398,7 @@ class AgenticKnowledgePlugin(PluginInterface):
         if not doc_names:
             return
         features = candidate_features or {}
+        turn_number = int(self._turn_numbers.get(turn.session_id, 0))
         recorded = tuple(
             _InjectedDoc(
                 document_name=hit.document_name,
@@ -1184,11 +1406,18 @@ class AgenticKnowledgePlugin(PluginInterface):
                 paths=tuple(hit.paths or ()),
                 test_command=hit.test_command,
                 features=features.get(hit.document_name),
+                added_lines=_document_added_lines(hit.text),
             )
             for hit in context.hits
             if hit.document_name and hit.category in _SCORED_KINDS
         )
-        self._pending_injections[turn.session_id] = recorded
+        # Newest first, and the horizon is counted from the front: a verdict
+        # arrives on a later turn and walks back through what it might have
+        # been about, and the walk stops at the horizon.
+        window = ((turn_number, recorded),) + tuple(
+            self._pending_injections.get(turn.session_id, ())
+        )[: _ATTRIBUTION_HORIZON - 1]
+        self._pending_injections[turn.session_id] = window
         while len(self._pending_injections) > _FEEDBACK_PENDING_LIMIT:
             self._pending_injections.popitem(last=False)
         tracker = self._feedback_tracker
@@ -1202,7 +1431,12 @@ class AgenticKnowledgePlugin(PluginInterface):
                     hit.document_name,
                     self._config.collection(turn.scope, hit.category),
                 )
-        self._pending_feedback[turn.session_id] = (doc_names, mining.signature_hash)
+        self._pending_feedback[turn.session_id] = (
+            ((turn_number, doc_names, mining.signature_hash),)
+            + tuple(self._pending_feedback.get(turn.session_id, ()))[
+                : _ATTRIBUTION_HORIZON - 1
+            ]
+        )
         while len(self._pending_feedback) > _FEEDBACK_PENDING_LIMIT:
             self._pending_feedback.popitem(last=False)
 
@@ -1716,6 +1950,102 @@ def _build_cache(
 
 
 # ------------------------------------------------------------- annotations -
+def _document_added_lines(text: str) -> Tuple[str, ...]:
+    """
+    The lines a document's change adds, from the fenced diff it quotes.
+
+    A recipe is written around the diff that made its failure pass, and the
+    ``+`` lines of that diff are what a later turn either repeats or does not.
+    Everything outside a fence is prose about the change and is not compared:
+    a sentence that says "we added a null check" matches nothing in a patch,
+    and matching prose against code is how a credit rule starts crediting
+    documents that were merely lucky in their wording.
+    """
+    body = str(text or "")
+    lines: List[str] = []
+    seen = set()
+    inside = False
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            inside = not inside
+            continue
+        if not inside:
+            continue
+        if not stripped.startswith("+") or stripped.startswith("+++"):
+            continue
+        added = stripped[1:].strip()
+        if added and added not in seen:
+            seen.add(added)
+            lines.append(added)
+    return tuple(lines)
+
+
+def _adoption_score(
+    document_lines: Tuple[str, ...], changed_lines: Tuple[str, ...]
+) -> float:
+    """
+    How much of the document's change the turn actually made.
+
+    The share of the lines the document adds that appear among the lines the
+    turn added, whatever the turn's tool spelled them as.  The denominator is
+    the document, because the question the credit assignment asks is "did the
+    turn do what this document says", and a document that adds nothing has no
+    change to adopt.  ``0.0`` on either side being empty: a turn that changed
+    nothing adopted nothing, and a document that changes nothing cannot be
+    the fix a turn verified.
+    """
+    if not document_lines or not changed_lines:
+        return 0.0
+    changed = {str(line).strip() for line in changed_lines if str(line).strip()}
+    wanted = {str(line).strip() for line in document_lines if str(line).strip()}
+    if not wanted or not changed:
+        return 0.0
+    return len(wanted & changed) / float(len(wanted))
+
+
+def _discounted_label(label: float, discount: float) -> float:
+    """
+    A label earned later, which is a label worth less.
+
+    The discount scales the magnitude and never the direction: a credit that
+    arrived three turns late is still a credit, and a blame that arrived late
+    is still a blame, because the evidence that produced either is a fact
+    about the turn that produced it and not about how long the layer waited.
+    Bounded below by the smallest non-zero magnitude the layer's own grading
+    uses, so a discount cannot turn a debunked document into an unlabelled
+    one — the direction reaching the fit is the one thing the window must not
+    wash away.
+    """
+    value = float(label)
+    factor = float(discount)
+    if not math.isfinite(factor) or factor <= 0.0:
+        return value
+    scaled = value * factor
+    if value and abs(scaled) < 0.1:
+        return 0.1 if value > 0 else -0.1
+    return round(scaled, 4)
+
+
+def _turn_patch_lines(turn: AgentTurn) -> Tuple[str, ...]:
+    """
+    The lines this turn changed, for the adoption feature of the ranking.
+
+    Read off the miner, which is the one place that knows how each CLI spells
+    a patch, and never allowed to raise: a feature the learner reads is not
+    worth a failed read, and the absence of the feature reads as zero — the
+    same number a turn that changed nothing produces, truthfully.
+    """
+    from llm_router_plugins.utils.knowledge.agentic_knowledge.miner import (
+        turn_added_lines,
+    )
+
+    try:
+        return turn_added_lines(turn)
+    except Exception:  # a feature is never a reason to fail a read
+        return ()
+
+
 def _is_mined_only(request) -> bool:
     """Whether one search asks only for mined knowledge."""
     categories = tuple(str(kind) for kind in request.categories or ())

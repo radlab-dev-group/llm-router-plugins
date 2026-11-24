@@ -721,7 +721,7 @@ that cannot beat the policy publishes the policy.
 | Level | Question | Model | Where it runs | How it is used |
 |---|---|---|---|---|
 | document | does this advice work? | Beta posterior with a half-life, sampled by Thompson's rule | online, as counting | a multiplier in `mult_min … mult_max` (0.3 … 1.5) |
-| candidate features | which features predict that advice works? | ridge logistic regression, damped Newton, corpus-scaled ridge, Laplace spread per weight | offline, `llm-router-agentic-kb-learner` | a versioned snapshot read with one `GET` + 60 s local cache; the spread is the exploration term |
+| candidate features | which features predict that advice works? | logistic ranker over 22 features — `pointwise` likelihood, or `pairwise` (RankNet) over the order inside one request — damped Newton, corpus-scaled ridge, Laplace spread per weight, optionally started from the cross-scope meta-prior | offline, `llm-router-agentic-kb-learner` | a versioned snapshot read with one `GET` + 60 s local cache; the spread is the exploration term |
 | source per mode | what is a character of this source's budget worth here? | Beta posterior per `(mode, kind)` with the character cost averaged in | online, as counting | a value-per-character; the hand-written policy `weight` is the prior for an untried arm |
 
 All three return `1.0` when they do not know, and all three are clamped to the
@@ -738,10 +738,13 @@ happened.
 
 ### 9.2 The features (the training data, field by field)
 
-`FEATURE_NAMES` — 15 numbers, in order: `bias`, `score`, `score_sq`,
+`FEATURE_NAMES` — 22 numbers, in order: `bias`, `score`, `score_sq`,
 `scale_rrf`, `scale_reranker`, `signature_match`, `path_match`,
 `path_stem_match`, `command_match`, `age_days_log`, `upvotes_log`,
-`downvotes_log`, `exposure_log`, `rank`, `size_share`.
+`downvotes_log`, `exposure_log`, `rank`, `size_share`, then seven added at
+the end so the order of the first fifteen is unchanged: `score_x_path`,
+`sig_x_cmd`, `agent_loop_level`, `is_human_doc`, `patch_sim_prior`,
+`query_intent_align`, `error_class_match`.
 
 `CandidateFeatures.vector()` builds them from what the assembler already holds:
 the normalized score clamped to `[0,1]` and its square; one-hot of the scale
@@ -750,13 +753,25 @@ signature matched; whether it names a touched path or a path stem
 (`/4`); whether it declares the verification command; `log1p` of the document's
 age in days, its upvotes, downvotes and exposures; the engine rank
 (`/20`, capped); and the share of the mode's character budget the document
-consumes. No text, no path, no command — features and short names only,
+consumes. The seven that came later: two interactions (`score × path_match`,
+`signature_match × command_match` — an effect that only exists when both
+halves hold is invisible to an additive fit); the turn's loop level
+(saturating at eight: the first try wants the general page, the third try
+wants the verified recipe about this exact failure); whether the document is
+prose a person wrote rather than a record of what happened; the share of the
+document's diff that the turn's own change repeats (the same number the
+adoption check labels with, read as a feature); whether the document's kind
+is the kind the turn is looking for (a fix in `debug`, a procedure in
+`implement`); and whether both failures name the same exception class
+(`KeyError`, not its message). No text, no path, no command — features and
+short names only,
 because the worker masks documents before indexing them and a training record
 carrying a path would undo that from the other side.
 
-Only a subset may ever move: `_LEARNABLE = (1, 5, 6, 7, 8, 9, 13)` —
+Only a subset may ever move:
+`_LEARNABLE = (1, 5, 6, 7, 8, 9, 13, 15, 16, 17, 18, 19, 20, 21)` —
 `score`, `signature_match`, `path_match`, `path_stem_match`, `command_match`,
-`age_days_log`, `rank`. A feature the corpus never varied (every document of
+`age_days_log`, `rank`, and all seven of the new features. A feature the corpus never varied (every document of
 one repository is the same `kind`), or one another feature determines
 (`score` vs `score_sq` when all scores sit in one range; the two scale
 dummies when every hit came on the same scale), is **pruned** rather than
@@ -766,16 +781,27 @@ Correlation at or above `0.995` counts as one feature wearing two names.
 
 ### 9.3 The labels (how traffic becomes a target)
 
-Written on the settle path, one turn after the injection, graded per document
-against the evidence of that turn (its signature, its touched files, the
-command that went green):
+Written on the settle path, graded per document against the evidence of the
+turn that settles it (its signature, its touched files, the command that went
+green, the change it made). The settle is not due the turn after the
+injection: a request's documents stay in an attribution window of three
+requests (`_ATTRIBUTION_HORIZON`), a settled verdict walks the window from
+newest to oldest, and each injection is judged at its own delay with the
+label discounted 0.85 (`_ATTRIBUTION_DISCOUNT`) per turn of it — shown,
+edited, green two turns later is the normal shape of agent work, and the
+layer used to lose exactly that label. A turn that proves nothing keeps the
+window it was given. A document is credited once per verdict, at the nearest
+injection that showed it, so three showings and one green test are one piece
+of evidence, not three:
 
 | label | when | weight in the fit |
 |---|---|---|
-| `+1.0` confirmed | the document names the very failure that was verified fixed this turn | 1.0 |
+| `+1.0` confirmed | the document names the very failure that was verified fixed on the turn | 1.0 |
+| `+1.0` adopted | the turn repeated at least 40% of the lines the document's diff adds (`_ADOPTION_CONFIRMED`): shown, applied, green | 1.0 |
 | `+0.5` plausible | the turn was resolved and the document shares a touched file or declares the command that just went green | 0.5 |
-| `0.0` unattributed | the turn was resolved and this document has nothing in common with it — logged as an exposure, fitted as nothing | 0 |
+| `0.0` unattributed | the turn was resolved and this document has nothing in common with it — or shares a file but repeated under 5% of the change (`_ADOPTION_FLOOR`): same file, none of the change, the turn had its own reason — logged as an exposure, fitted as nothing | 0 |
 | `-1.0` debunked | the same failure came back and the document was about it | 1.0 |
+| `-1.0` reverted | the agent reverted a file the document is about (the miner's `reverted_paths`): applied and undone is the strongest negative that does not wait for the failure to return | 1.0 |
 | `-0.3` rejected | the failure came back and the document is unrelated to it | 1/3 |
 | `±1.0` coarse | the document names neither a signature nor a file (a plain text hit): the whole-block verdict, marked so a fit can tell the two kinds of credit apart | 0.5 |
 
@@ -824,8 +850,10 @@ because both are easy to ship.
 - **Snapshot** (`{key_prefix}:model:{scope}`): `schema`, `scope`, `model_id`
   (`{scope}:{unix}:{labelled}:{auc}`), `trained_at`, `samples`, `labelled`,
   `positive`, `holdout_auc`, `features`, `arms`, the weight vector `w` and the
-  Laplace diagonal `diag`. A snapshot whose `features` differ from this
-  build's `FEATURE_NAMES` is **refused**, not partially applied.
+  Laplace diagonal `diag`. `schema` is 2 (the 22-feature order); a snapshot
+  of another schema, or with a `features` list that differs from this build's
+  `FEATURE_NAMES`, is **refused**, not partially applied — the order of the
+  weights is the schema, and a misread is a model nobody can explain.
 - **History** (`{key_prefix}:model_history:{scope}`): the snapshots a publish
   retired, newest first, deduplicated by `model_id`, capped at
   `snapshot_history_size` (8; 0 keeps only the live key). A rollback copies a
@@ -834,6 +862,15 @@ because both are easy to ship.
 - **Reputation** (`DocReputation`) per document: `a`, `b`, `e`, `t` in one
   hash at `{key_prefix}:rep:{document_name}`, TTL 4 × half-life, with a local mirror; **arms**
   (`{key_prefix}:arms`): `a`, `b`, `chars`, `n` per `mode|kind`.
+- **Meta-prior** (`{key_prefix}:meta_prior`), when
+  `learning.meta_prior_enabled` (off by default): the mean of the weight
+  vectors the last pass *accepted*, written only once
+  `meta_prior_min_scopes` (3) scopes have accepted, under the snapshot's
+  schema. A cold scope starts its fit from it as a MAP prior instead of
+  from zero — the features that made a verified fix useful somewhere are
+  not unrelated here — and the ridge pulls it toward this scope's own
+  labels as they arrive. A pass that accepted nothing leaves the prior
+  alone; a prior of another schema or the wrong length reads as no prior.
 
 Publishing requires all three gates: `labelled >= min_samples` (200),
 `holdout_auc >= min_holdout_auc` (0.6), and weighted
@@ -844,10 +881,17 @@ refused (`too_few_labels`, `holdout_auc_below_floor`,
 declined to publish" are two different sentences, and the report keeps them
 apart.
 
-The holdout split is **by session**, not by sample (sample-level splits leak:
-the same session's injections share context), keeping at least one session on
-each side; a scope with a single session trains on all of it rather than
-scoring a model against itself. The ridge is corpus-scaled —
+`learning.loss` names the objective the fit climbs: `pointwise` (the
+default) is the original likelihood, one judgement at a time; `pairwise` is
+RankNet's log-likelihood of the **order**, built from pairs of opposite
+judgements of the *same* request — the document a turn credited above the one
+it blamed — capped at 20 000 pairs and taken in a deterministic order, with
+the same ridge prior and backtracking. A corpus whose verdicts never
+contradict a request falls back to pointwise, and the fit report names which
+of the two ran. The holdout split is **by session**, not by sample
+(sample-level splits leak: the same session's injections share context),
+keeping at least one session on each side; a scope with a single session
+trains on all of it rather than scoring a model against itself. The ridge is corpus-scaled —
 `l2 × n / 100` (default `l2 = 32`) — so the prior keeps the same strength of
 belief at any sample size, and Newton steps are damped by backtracking on the
 penalized log-likelihood, because an undamped step from zero throws every
@@ -868,6 +912,8 @@ llm-router-agentic-kb-learner --window 20000        # corpus ceiling per scope
 llm-router-agentic-kb-learner --reset-cursor        # ignore the saved cursor
 llm-router-agentic-kb-learner --show                # print each touched scope's weights
 llm-router-agentic-kb-learner --arms                # print the bandit's view per (mode, kind)
+llm-router-agentic-kb-learner --bootstrap-git /path/to/repo --scope webapp
+                                                    # seed the scope from its fix commits
 ```
 
 It needs Redis and nothing else — no engine, no embedder, no reranker — and it
@@ -884,6 +930,19 @@ moves the crash window.
 It writes nothing to the engine and touches no policy: the policy's thresholds
 and source weights are never overwritten by a model; the model multiplies,
 the policy clamps. That clamp is the brake an operator can read in a diff.
+
+Two commands answer the cold start from the outside.
+`--bootstrap-git REPO_ROOT` (with `--bootstrap-limit` 50 and
+`--bootstrap-since <git date>`) reads the repository's fix commits — subjects
+matching `fix`, `bugfix`, `hotfix`, `repair`, `correct`, `revert` — and
+publishes one recipe per file each touched, through the same publisher the
+proxy uses, so re-running is a no-op; lockfile-only commits are skipped and a
+directory that is not a repository is nothing, not an error. It needs
+`--scope`: history is knowledge about *a* repository. The meta-prior
+(`learning.meta_prior_enabled`) covers the other direction — a scope with no
+history of its own starting from the scopes beside it — and neither is
+required: a scope with neither starts at zero and earns its weights the slow
+way.
 
 Learning is off by default (`learning.enabled: false`), and "off" is not
 "empty": the learner has **no vote at all** — it is not consulted, its
@@ -1023,6 +1082,8 @@ llm-router-agentic-kb-tune --dataset tests/data/eval.json \
   [--recall-floor 0.5]     # of the dataset's loops, the share to escalate on
   [--holdout-fraction 0.3] [--seed 11]   # or --holdout-session ID, repeatable
   [--per-category-factors]   # one exponential grid per source category
+  [--search bayesian --evaluations 60]   # TPE walk instead of the full grid
+  [--write-policy]           # also write agentic_knowledge.tuned.json
   [--output tune-report/]
 ```
 
@@ -1033,6 +1094,26 @@ best of the ineligible rather than silently promoting one. The grid is deliberat
 search that can find a better policy on the dataset it was searched on has
 found a policy that fits that dataset, and the holdout the operator keeps is
 the one thing it cannot see.
+
+`--search bayesian` is for the space the grid cannot walk — more dimensions,
+or a replay too slow for a Cartesian product. It spends `--evaluations` (40)
+replays as a Tree-structured Parzen Estimator walk: eight uniform points
+first, each one after that proposed by the ratio of the Parzen density of
+the measurements that earned most to the density of the rest, ranked on the
+multi-criteria objective
+
+```
+hit + 0.3 · recall − λ · chars − 1.5 · max(0, precision_floor − precision)
+```
+
+so a point under the precision floor pays a penalty that grows the further
+under it sits and no hit rate buys its way out. The walk is seeded by
+`--seed`: the same dataset, budget and seed propose the same points in the
+same order, because a report the search writes has to be checkable by anyone
+but the machine that wrote it. `--write-policy` writes the chosen point next
+to the report as `agentic_knowledge.tuned.json` — a proposal, with the
+numbers it claims, that the layer never reads; merging it into the policy is
+the operator's, and the diff is against the evidence the report carries.
 
 ### 9.10 The scoreboard's view of the learned state
 

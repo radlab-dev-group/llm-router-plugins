@@ -48,8 +48,8 @@ import threading
 import time
 
 from collections import OrderedDict
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from dataclasses import dataclass, replace
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from llm_router_plugins.utils.knowledge.agentic_knowledge.documents import (
     parse_document_name,
@@ -180,6 +180,14 @@ class SearchRequest:
     #: answers it better than a cosine.  Wins over the store's
     #: ``hybrid_search``.
     lexical_only: bool = False
+    #: Ask this question twice when the first answer is undecided.  Under a
+    #: store with ``rerank_when_contested`` the first pass runs without the
+    #: cross-encoder, and only a ranking whose top candidates sit within a
+    #: hair of each other is re-asked with one.  The caller marks the
+    #: questions where order is worth paying for — the failure a debug turn
+    #: is stuck on, where which recipe is first decides what the agent tries
+    #: next — and leaves the rest to a single pass.
+    rerank_if_contested: bool = False
 
 
 @dataclass(frozen=True)
@@ -314,6 +322,9 @@ class KnowledgeStore:
         hybrid_search: bool = True,
         rerank_results: bool = False,
         fts_only_min_identifier_share: float = 0.0,
+        rerank_when_contested: bool = False,
+        rerank_contested_gap: float = 0.05,
+        rerank_top_k: int = 5,
         logger: Optional[logging.Logger] = None,
         client: Any = None,
         username: str = "",
@@ -337,6 +348,16 @@ class KnowledgeStore:
         # Above this share of identifier-looking tokens a question is asked of
         # the text index alone; ``0`` keeps the fast path off.
         self._fts_only_share = float(fts_only_min_identifier_share)
+        # The cross-encoder is the most expensive thing this layer asks of the
+        # engine, and it is asked for the sake of *ordering*.  When the first
+        # pass already separates the winner from the field, the order is not
+        # in doubt and the second opinion is bought for nothing; a contested
+        # ranking is the one case where it is.  Off by default, because a
+        # contested re-ask is a second round trip, and the read budget is the
+        # same three seconds either way.
+        self._rerank_when_contested = bool(rerank_when_contested)
+        self._rerank_contested_gap = float(rerank_contested_gap)
+        self._rerank_top_k = max(1, int(rerank_top_k))
         self._ignore_language_detect = bool(ignore_language_detect)
         # Whether the client in use accepts the language switch, resolved once
         # and only when it is needed: an older ``sse_lib`` has no such keyword,
@@ -417,20 +438,12 @@ class KnowledgeStore:
             self._warn("knowledge store is unavailable: %s", type(exc).__name__)
             self._unavailable_reason = type(exc).__name__
             return SearchResult(STATUS_UNAVAILABLE, reason="client")
+        # Which of the two passes this one is.  A question the caller marked
+        # worth a second look runs cheap first, and the cross-encoder is spent
+        # only on the answer that left the ordering in doubt.
+        deferred = self._defers_rerank(request)
         try:
-            response = client.search(
-                request.collection,
-                request.query,
-                _options(
-                    request,
-                    self._min_similarity,
-                    hybrid_search=self._hybrid_search,
-                    rerank_results=self._rerank_results,
-                    lexical_only=self._wants_lexical(request.query)
-                    or bool(request.lexical_only),
-                ),
-                **self._language_switch_arguments(client),
-            )
+            response = self._ask(client, request, rerank=not deferred)
         except Exception as exc:  # sse_lib.SSEError and anything transport-shaped
             if _collection_missing(exc):
                 # A repository whose first episode has not been indexed yet has
@@ -466,12 +479,110 @@ class KnowledgeStore:
             scale or "unknown",
             f"; {described}" if described else "",
         )
+        if deferred:
+            result = self._reask_if_contested(client, request, result, deadline)
         # Only a real answer is worth remembering: a failure is a state the
         # engine may leave before the next identical question, and a missing
         # collection is the worker's to create, so neither is memoed.
         if result.status == STATUS_OK and result.reason != "no collection":
             self._memo_put(request, started, result)
         return result
+
+    def _ask(self, client: Any, request: SearchRequest, *, rerank: bool) -> Any:
+        """One call to the engine, shaped by this store and by *rerank*."""
+        return client.search(
+            request.collection,
+            request.query,
+            _options(
+                request,
+                self._min_similarity,
+                hybrid_search=self._hybrid_search,
+                rerank_results=rerank and self._rerank_results,
+                lexical_only=self._wants_lexical(request.query)
+                or bool(request.lexical_only),
+            ),
+            **self._language_switch_arguments(client),
+        )
+
+    def _defers_rerank(self, request: SearchRequest) -> bool:
+        """
+        Whether this question runs un-reranked first.
+
+        Three switches have to agree: the deployment must own a cross-encoder
+        at all, it must have opted into paying for it only when it matters,
+        and the caller must have marked this particular question as one whose
+        order is worth a second look.  Anything else keeps the single pass it
+        had before, in both directions: a store that reranks everything does
+        not start skipping on its own, and one that was told to skip never
+        reranks more than it was told to.
+        """
+        return bool(
+            self._rerank_results
+            and self._rerank_when_contested
+            and getattr(request, "rerank_if_contested", False)
+        )
+
+    def _reask_if_contested(
+        self,
+        client: Any,
+        request: SearchRequest,
+        result: SearchResult,
+        deadline: Optional[float],
+    ) -> SearchResult:
+        """
+        Re-ask *request* with the cross-encoder when the answer is undecided.
+
+        Contested means the top of the first pass is not separated from the
+        rest of it: the winner and the third hit sit within
+        :attr:`_rerank_contested_gap` of each other on the scale the engine
+        produced, so which recipe the agent reads first is decided by a margin
+        the fusion leg does not actually stand behind.  A wide gap is the
+        engine saying it is sure, and a sure answer needs no second opinion.
+
+        The re-ask asks for the top few, not for the whole retrieval: the
+        question is which of the leaders is first.  A second call is only
+        started while a whole one still fits the read budget, and any failure
+        of the second pass keeps the first answer — a ranking that may be
+        wrongly ordered beats a request that answers nothing.
+        """
+        if result.status != STATUS_OK or not _contested(
+            result.hits, self._rerank_contested_gap
+        ):
+            return result
+        if deadline is not None and deadline - time.monotonic() < self._timeout:
+            # No room for the second pass.  The first answer stands: an
+            # ordering that may be wrong still names the same documents.
+            return result
+        retry = replace(
+            request, max_results=min(int(request.max_results), self._rerank_top_k)
+        )
+        started = time.monotonic()
+        try:
+            response = self._ask(client, retry, rerank=True)
+        except Exception as exc:
+            self._warn(
+                "contested knowledge re-ask failed (%s): %s",
+                request.collection,
+                type(exc).__name__,
+            )
+            return result
+        scale = _score_scale(response)
+        reasked = SearchResult(
+            STATUS_OK,
+            hits=tuple(_hits(request.collection, response, scale)),
+            score_scale=scale,
+        )
+        if not reasked.hits:
+            # An empty rerank is an engine that did not like anything enough;
+            # the first pass at least found something worth looking at.
+            return result
+        self._info(
+            "knowledge re-ask re-ranked (%s): %d hits in %d ms",
+            request.collection,
+            len(reasked.hits),
+            _elapsed_ms(started),
+        )
+        return reasked
 
     def push_quality(
         self,
@@ -1002,6 +1113,30 @@ def _options(
             for doc_type in request.doc_types
         ]
     return options
+
+
+def _contested(hits: Sequence[StoreHit], gap: float) -> bool:
+    """
+    Whether a first-pass ranking left the order in doubt.
+
+    The measure is the distance from the best hit to the third — the margin
+    the caller is actually about to act on, since a block quotes two or three
+    documents.  A ranking with one or two hits has nothing to be undecided
+    about: there is no order left to get wrong, and a cross-encoder would be
+    buying a reshuffle of a short list.
+    """
+    if gap <= 0.0 or len(hits) < 3:
+        return False
+    scores = [
+        float(hit.score_normalized)
+        if hit.score_normalized is not None
+        else (float(hit.score) if hit.score is not None else None)
+        for hit in hits
+    ]
+    known = [score for score in scores if score is not None]
+    if len(known) < 3:
+        return False
+    return abs(known[0] - known[2]) < float(gap)
 
 
 def _hits(

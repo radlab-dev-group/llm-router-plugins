@@ -123,6 +123,14 @@ class MiningResult:
     signature: str = ""
     tried: Tuple[str, ...] = ()
     failing_command: str = ""
+    #: Files the agent changed and then undid in this same turn: a
+    #: ``git checkout -- file``, a ``git restore``, or a second patch that
+    #: removes the lines the first added.  A revert is a judgement stronger
+    #: than "the test never went green": the fix was tried, and the agent
+    #: decided the repository was better without it.  The reader reads it as
+    #: a negative label on the knowledge that described the change, rather
+    #: than waiting for the same failure to repeat.
+    reverted_paths: Tuple[str, ...] = ()
     #: Why nothing (or less than expected) was written, counted per turn.
     #: ``no_failure`` — a turn with commands but no test failure to key an
     #: episode on; ``no_patch`` — a failure the turn never changed anything for;
@@ -271,6 +279,7 @@ class EpisodeMiner:
             if event is not None
         ]
         loop = self._loop(turn, failures)
+        reverted = _reverted_paths(turn)
         tried = _deduplicated(
             tried
             for tried in (self._summary(turn, item) for item in failures)
@@ -283,6 +292,7 @@ class EpisodeMiner:
             signature=loop.signature,
             tried=tried,
             failing_command=_last_failing_command(failures),
+            reverted_paths=tuple(reverted),
             diagnostics=self._diagnostics(turn, failures, events, covered_by_recipe),
         )
 
@@ -943,6 +953,14 @@ class EpisodeMiner:
             for body in bodies:
                 if not body.strip():
                     continue
+                if _is_noise_patch(body):
+                    # A lockfile or a build artifact is not knowledge: it
+                    # changes on every dependency bump, quotes the version
+                    # numbers of a hundred packages into a recipe, and a
+                    # reader applying it applies nothing.  A patch that is
+                    # all noise is dropped from the quote, not kept for the
+                    # few real lines it may hide among the hashes.
+                    continue
                 chunks.append(body.strip())
                 total += len(body)
                 if total >= self._max_patch_chars:
@@ -1127,6 +1145,181 @@ def _verified_patches(failures: Sequence[_Failure]) -> FrozenSet[str]:
         if failure.verified()
         for patch in failure.patches
     )
+
+
+#: Files whose change is bookkeeping, not code: dependency locks and build
+#: output.  They are the bulk of a "fixed the build" diff and none of its
+#: meaning — a recipe quoted with them is a wall of hashes, and one quoted
+#: without them is the fix.
+_NOISE_FILENAMES = frozenset(
+    {
+        "package-lock.json",
+        "poetry.lock",
+        "piplock.json",
+        "requirements.lock",
+        "cargo.lock",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "bun.lockb",
+        "composer.lock",
+        "gemfile.lock",
+        "go.sum",
+        "pubspec.lock",
+        "mix.lock",
+        "flake.lock",
+        "uv.lock",
+    }
+)
+_NOISE_SUFFIXES = (".pyc", ".pyo", ".map", ".min.js", ".min.css")
+
+#: A command that takes a file back to where it was before the turn: a
+#: discard, not an edit.  The paths it names are the ones the agent has
+#: decided against.
+_REVERT_COMMAND = re.compile(
+    r"""\b(?:
+        git\s+(?:checkout\s+(?:--\s+)?|restore\s+|revert\s+(-?n)?\s+HEAD~?\d*\s+)
+    )""",
+    re.VERBOSE,
+)
+
+
+def turn_added_lines(turn: AgentTurn) -> Tuple[str, ...]:
+    """
+    The lines this turn's patches add, in order, deduplicated.
+
+    The credit assignment asks one question of a document: did the turn do
+    what the document says?  The doing is here — the lines the agent put into
+    the code — and the document's side is the lines its own diff adds.  The
+    two sets meeting is adoption; their not meeting, on a document that named
+    the file the turn edited, is a document that was read and ignored.
+
+    Every patch of the turn counts, verified or not: the verdict is read from
+    what the agent actually changed, and a patch whose test never went green is
+    still a change the agent chose to make.
+    """
+    arguments = _call_arguments(turn)
+    lines: List[str] = []
+    seen = set()
+    for item in turn.evidence:
+        if item.kind != EVIDENCE_PATCH:
+            continue
+        raw = arguments.get(item.call_id) or arguments.get(item.event_id) or ""
+        for body in patch_envelopes(raw) or [raw]:
+            for line in str(body).splitlines():
+                if not line.startswith("+") or line.startswith("+++"):
+                    continue
+                text = line[1:].strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    lines.append(text)
+    return tuple(lines)
+
+
+def _is_noise_patch(body: str) -> bool:
+    """Whether a patch body changes nothing but bookkeeping files."""
+    paths = _patched_paths(body)
+    if not paths:
+        # No file header at all: a raw hunk.  Keep it — without a name there
+        # is nothing to judge, and dropping nameless patches would drop the
+        # heredoc edits a CLI without a patch tool is the only writer of.
+        return False
+    for path in paths:
+        name = str(path).rsplit("/", 1)[-1].lower()
+        if name not in _NOISE_FILENAMES and not name.endswith(_NOISE_SUFFIXES):
+            return False
+    return True
+
+
+def _reverted_paths(turn: AgentTurn) -> List[str]:
+    """
+    Files this turn changed and then took back.
+
+    A revert is read in order, because only order makes it a revert.  A path
+    is named by what put it back — a ``git checkout --`` / ``git restore`` /
+    ``git revert HEAD`` command, or a later patch that deletes the very lines
+    an earlier patch added.  A path touched only by the second kind is the
+    agent's own undo, the one a recipe on screen is most likely to have
+    caused; a path named by the first kind is a discard of whatever the turn
+    did to it.  Both are the same signal to the credit assignment: the change
+    was not kept.
+    """
+    arguments = _call_arguments(turn)
+    texts = _output_texts(turn)
+    patched: Dict[str, str] = {}
+    reverts: List[str] = []
+    for item in turn.activity:
+        if item.kind != "function_call":
+            continue
+        raw = arguments.get(item.call_id) or arguments.get(item.event_id) or ""
+        command = _command_line(raw)
+        if _REVERT_COMMAND.search(command):
+            for path in _paths_of(command):
+                if patched.get(path) and path not in reverts:
+                    reverts.append(path)
+                elif path not in patched and path not in reverts:
+                    # A discard of a file the turn never touched is still a
+                    # statement about what the repository should look like:
+                    # the agent restored it, and a recipe that changed it was
+                    # not what it wanted.  Name it, so the label has a path
+                    # to attach to.
+                    reverts.append(path)
+            continue
+        for body in patch_envelopes(raw) or []:
+            for path in _patched_paths(body):
+                if path in patched:
+                    # The file was patched again.  A second patch that undoes
+                    # the first is a revert; one that extends it is work.
+                    # The difference is in the lines: lines the first patch
+                    # added and the second removes are an undo, and they are
+                    # the only kind that is.
+                    if _undoes(patched[path], body):
+                        if path not in reverts:
+                            reverts.append(path)
+                else:
+                    patched[path] = body
+    return reverts
+
+
+def _paths_of(command: str) -> List[str]:
+    """The paths a shell command names, whatever it is doing to them."""
+    return [part for part in command.split() if "/" in part or "." in part]
+
+
+def _added_lines(body: str) -> set:
+    """Lines a patch adds, minus their ``+``."""
+    return {
+        line[1:].strip()
+        for line in body.splitlines()
+        if line.startswith("+") and not line.startswith("+++") and line[1:].strip()
+    }
+
+
+def _removed_lines(body: str) -> set:
+    """Lines a patch removes, minus their ``-``."""
+    return {
+        line[1:].strip()
+        for line in body.splitlines()
+        if line.startswith("-") and not line.startswith("---") and line[1:].strip()
+    }
+
+
+def _undoes(first: str, second: str) -> bool:
+    """
+    Whether *second* takes back what *first* put in.
+
+    The test is the lines, not the file: a patch that removes a line the
+    first one added is undoing it, and a patch that adds a new line next to
+    it is continuing it.  Measured against the added lines only, so a second
+    patch that merely edits a line the first added is not a revert of it —
+    it is the third attempt at the same fix, and the miner already has a
+    place for that.
+    """
+    added = _added_lines(first)
+    if not added:
+        return False
+    removed = _removed_lines(second)
+    overlap = added & removed
+    return bool(overlap) and len(overlap) >= max(1, len(added) // 2)
 
 
 def _patched_paths(patch_text: str) -> Tuple[str, ...]:
@@ -1328,5 +1521,224 @@ def _is_nontrivial_tool_command(cmd: str) -> bool:
     ):
         return len(c.split()) > 1
     if "-" in c and len(c.split()) > 1:
+        return True
+    return False
+
+# ------------------------------------------------------------------ bootstrap --
+#: A commit subject that says a change is a repair, not a feature.  A
+#: bootstrap that mines every commit mines the feature work too, and a corpus
+#: of feature diffs teaches the ranker that adding code is what a fix is,
+#: which is the opposite of what a fix is.
+_FIX_SUBJECT = re.compile(
+    r"""^(?i:
+        (?:fix(?:es|ed)?|bugfix|hotfix|repair|correct(?:s|ed)?)\b
+        |\bfix(?:es)?\s+for\b
+        |\bbug\s*:?
+        |\b(?:patch|update)\s+(?:for\s+)?(?:bug|error|issue)\b
+        |\brevert\b
+    )""",
+    re.VERBOSE,
+)
+
+#: The most characters of a commit's patch quoted into a bootstrapped recipe.
+#: The miner quotes 4000 of a turn's diff; a commit's is usually shorter and
+#: sometimes a merge of several, and the ceiling is the same one the reader's
+#: budget was tuned against.
+_BOOTSTRAP_PATCH_CHARS = 4000
+
+
+def mine_commit_fixes(
+    repo_root: str,
+    scope: str,
+    limit: int = 50,
+    since: Optional[str] = None,
+) -> List[KnowledgeEvent]:
+    """
+    The recipes a repository already earned, mined from its own history.
+
+    A cold deployment on its first project has neither a cross-repository
+    prior — there are no other repositories to learn from — nor settled
+    judgements of its own, because the proxy has not served the project a
+    week.  The history the project already has is its own answer: a commit
+    that fixes a named failure is a verified episode of exactly the shape the
+    miner writes, and a knowledge base seeded from it is not empty on day one.
+
+    The mining is deliberately narrow.  A commit is a repair only when its
+    subject says so, and only the files it touches and the patch it carries
+    become a recipe — the commit's body is the author's opinion of the fix,
+    and a document that quotes it is quoting an opinion, not a fix.  A commit
+    that changes nothing but a lockfile is a dependency bump, and a recipe
+    whose diff is a wall of hashes is not a recipe.
+
+    ``git`` must be on the path and *repo_root* must hold a repository;
+    anything else returns an empty list, because a bootstrap that raises is a
+    CLI that cannot start on a machine without the history it is bootstrapping
+    from, and the layer's first rule is that a missing history is nothing, not
+    an error.
+    """
+    if not repo_root or not re.match(r"^\w[\w.\-]*$", scope):
+        return []
+    command = [
+        "git",
+        "log",
+        "--pretty=format:%H%x00%at%x00%s",
+        "-n",
+        str(max(1, int(limit))),
+        "--name-only",
+        "--no-merges",
+    ]
+    if since:
+        command = command[:2] + ["--since", str(since)] + command[2:]
+    try:
+        import subprocess
+
+        completed = subprocess.run(
+            command,
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+    except Exception:
+        return []
+
+    events: List[KnowledgeEvent] = []
+    commit = None
+    for line in (completed.stdout or "").splitlines():
+        if not line.strip():
+            continue
+        line = line.strip()
+        if "\x00" in line:
+            if commit is not None:
+                events.extend(_commit_events(commit, scope, repo_root))
+            hash_, stamp, subject = line.split("\x00", 2)
+            if not _FIX_SUBJECT.search(subject or ""):
+                commit = None
+                continue
+            try:
+                created = float(stamp)
+            except (TypeError, ValueError):
+                created = _now()
+            commit = {
+                "hash": hash_.strip(),
+                "created_at": created,
+                "subject": (subject or "")[:200],
+                "paths": [],
+            }
+        elif commit is not None:
+            commit["paths"].append(line)
+    if commit is not None:
+        events.extend(_commit_events(commit, scope, repo_root))
+    return events
+
+
+def _commit_events(
+    commit: Dict[str, Any], scope: str, repo_root: str = ""
+) -> List[KnowledgeEvent]:
+    """The bootstrapped recipes of one fix commit, one per file it fixed."""
+    paths = tuple(
+        str(path)
+        for path in commit.get("paths") or ()
+        if str(path).strip() and not _is_noise_path(str(path))
+    )
+    if not paths:
+        # A fix commit whose changes are all lockfiles is a dependency bump,
+        # and a recipe is not the document of a dependency bump.
+        return []
+    subject = str(commit.get("subject") or "")
+    signature = signature_of(subject)
+    stamp = float(commit.get("created_at") or 0.0)
+    date = (
+        datetime.datetime.fromtimestamp(stamp, tz=datetime.timezone.utc).date()
+        if stamp
+        else _today()
+    )
+    events: List[KnowledgeEvent] = []
+    for path in paths[:8]:
+        patch = _commit_patch(str(commit.get("hash") or ""), path, repo_root)
+        if not patch:
+            patch = "(the commit's change to this file)"
+        body = "\n".join(
+            part
+            for part in (
+                f"Failure: {subject}",
+                f"Fixed in {date.isoformat()} by commit {str(commit.get('hash') or '')[:12]}",
+                "",
+                "Change that fixed it:",
+                patch[:_BOOTSTRAP_PATCH_CHARS],
+            )
+            if part is not None
+        )
+        digest = fingerprint(
+            "bootstrap", scope, str(commit.get("hash") or ""), path
+        )
+        text = build_document_text(
+            KIND_RECIPE,
+            body,
+            date=date,
+            signature=signature.signature if signature else "",
+            signature_hash=signature.signature_hash if signature else "",
+            paths=(path,),
+            thread_id="",
+            agent="git",
+            mode="debug",
+            test_command="",
+            phase="implement",
+            verification_type="",
+        )
+        events.append(
+            KnowledgeEvent(
+                kind=KIND_RECIPE,
+                fingerprint=digest,
+                scope=scope,
+                agent="git",
+                mode="debug",
+                model="",
+                thread_id="",
+                generation=str(commit.get("hash") or ""),
+                created_at=stamp or _now(),
+                signature=signature.signature if signature else "",
+                signature_hash=signature.signature_hash if signature else "",
+                text=text,
+                metadata={
+                    "paths": [path],
+                    "thread_id": "",
+                    "mode": "debug",
+                    "agent": "git",
+                    "phase": "implement",
+                    "bootstrap": True,
+                },
+            )
+        )
+    return events
+
+
+def _commit_patch(commit_hash: str, path: str, repo_root: str = "") -> str:
+    """The patch of one file in one commit; ``""`` when git will not show it."""
+    if not commit_hash or not path:
+        return ""
+    try:
+        import subprocess
+
+        completed = subprocess.run(
+            ["git", "show", "--format=", "-U3", commit_hash, "--", path],
+            cwd=str(repo_root) or None,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+    except Exception:
+        return ""
+    return str(completed.stdout or "").strip()
+
+
+def _is_noise_path(path: str) -> bool:
+    """Whether a changed file is bookkeeping rather than code."""
+    name = str(path).rsplit("/", 1)[-1].lower()
+    if name in _NOISE_FILENAMES or name.endswith(_NOISE_SUFFIXES):
+        return True
+    if name.endswith((".pyc", ".pyo")):
         return True
     return False
